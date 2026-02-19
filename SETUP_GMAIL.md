@@ -60,14 +60,27 @@ In Supabase Dashboard → SQL Editor, run the contents of `supabase/migrations/0
 
 ### Create a Push Subscription
 
-1. In the topic details, click "Create Subscription"
-2. Choose "Push" delivery type
-3. Set the endpoint URL to: `https://yourdomain.com/api/gmail/webhook`
-   - For local development, use a tool like [ngrok](https://ngrok.com/) to expose your local server
-   - Example: `https://abc123.ngrok.io/api/gmail/webhook`
-4. Set authentication (optional but recommended):
-   - Use "Add Google-managed key" or configure OIDC
-5. Save the subscription
+You need at least one push subscription so Google can notify your app when new mail arrives.
+
+**For production (Vercel):**
+
+1. Go to [Google Cloud Console → Pub/Sub → Subscriptions](https://console.cloud.google.com/cloudpubsub/subscription/list)
+2. Click **Create Subscription**
+3. **Subscription ID**: e.g. `gmail-webhook-production`
+4. **Topic**: select the same topic you use for `GMAIL_PUBSUB_TOPIC` (e.g. `gmail-push`)
+5. **Delivery type**: Push
+6. **Endpoint URL**: your **production** webhook URL, e.g.  
+   `https://<your-vercel-app>.vercel.app/api/gmail/webhook`  
+   (Replace `<your-vercel-app>` with your actual Vercel project URL.)
+7. Leave other defaults, then click **Create**
+
+**For local development:** create a second subscription with endpoint `https://<your-ngrok-url>/api/gmail/webhook`, or use a separate topic for local.
+
+**Checklist for automatic emails on Vercel:**
+
+- [ ] Push subscription endpoint is **exactly** your Vercel URL + `/api/gmail/webhook` (HTTPS, no trailing slash)
+- [ ] `GMAIL_PUBSUB_TOPIC` is set in Vercel env vars (e.g. `projects/your-project-id/topics/gmail-push`)
+- [ ] User connected Gmail **from the deployed app** (so the watch was registered with Google for that topic)
 
 ### Grant Gmail API permissions
 
@@ -121,3 +134,17 @@ GMAIL_PUBSUB_TOPIC=projects/your-project-id/topics/your-topic-name
 - **Webhooks not working**: Verify the Pub/Sub subscription endpoint URL is correct and accessible
 - **No emails appearing**: Check that the watch subscription was created successfully (check `watch_expiration` in database)
 - **Login breaks after deleting connection**: This is now fixed - the app handles missing connections gracefully
+
+### Automatic (background) emails not working on Vercel
+
+"Sync now" works without the topic or webhook; it only uses tokens and `history_id`. Push uses the topic + subscription. If push is set up but new mail still doesn’t appear automatically:
+
+1. **Reconnect Gmail from the deployed app**  
+   Open your **Vercel** app URL, disconnect Gmail, then connect again. That re-registers the Gmail watch. Watches expire in about 7 days, so if you connected a while ago (or only ever from localhost), the watch may have expired.
+
+2. **Check whether the webhook is being called**  
+   In Vercel → Project → Logs (or Runtime Logs), filter for `/api/gmail/webhook`. Send yourself a test email and see if a POST appears when the message arrives.  
+   - **No request** → Google isn’t reaching your app. Check: Pub/Sub subscription endpoint is exactly `https://<your-vercel-domain>/api/gmail/webhook`; subscription is on the same topic as `GMAIL_PUBSUB_TOPIC`; push delivery is enabled. If the subscription uses authentication, ensure it’s set up so Google can call your endpoint (e.g. allow unauthenticated push if you’re not using OIDC).
+
+3. **Requests appear but emails don’t update**  
+   Check the same logs for errors (4xx/5xx or stack traces). Fix any auth or runtime errors in the webhook so it returns 200 and completes successfully.

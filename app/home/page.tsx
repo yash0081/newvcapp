@@ -6,6 +6,7 @@ import { ConnectGmailButton } from "@/components/connect-gmail-button";
 import { SyncButton } from "@/components/sync-button";
 import { DisconnectGmailButton } from "@/components/disconnect-gmail-button";
 import { DeleteEmailButton } from "@/components/delete-email-button";
+import { EmailListRefresh } from "@/components/email-list-refresh";
 
 async function HomePageContent() {
   const supabase = await createClient();
@@ -67,6 +68,7 @@ async function HomePageContent() {
           </div>
         ) : (
           <div className="space-y-4">
+            <EmailListRefresh />
             <div className="flex items-center justify-between">
               <p className="text-gray-600">
                 Gmail connected: <strong>{connection.email}</strong>
