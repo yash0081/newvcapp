@@ -34,7 +34,8 @@ export async function DELETE(
   }
 
   // Check if email belongs to the user (via RLS, but double-check with admin)
-  const connectionUserId = (email.gmail_connections as { user_id: string }).user_id;
+  const connection = email.gmail_connections as unknown as { user_id: string };
+  const connectionUserId = connection.user_id;
   if (connectionUserId !== user.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   }
