@@ -124,3 +124,64 @@ export async function fetchNewEmails(
   const newHistoryId = String(historyRes.data.historyId ?? startHistoryId);
   return { emails, newHistoryId };
 }
+
+export interface PdfAttachment {
+  attachmentId: string;
+  filename: string;
+  mimeType: string;
+}
+
+/**
+ * Get full message and find first PDF attachment part (including nested parts).
+ */
+export function findPdfAttachments(payload: gmail_v1.Schema$MessagePart): PdfAttachment[] {
+  const out: PdfAttachment[] = [];
+  function walk(part: gmail_v1.Schema$MessagePart) {
+    if (part.mimeType === "application/pdf" && part.filename?.toLowerCase().endsWith(".pdf") && part.body?.attachmentId) {
+      out.push({
+        attachmentId: part.body.attachmentId,
+        filename: part.filename ?? "attachment.pdf",
+        mimeType: part.mimeType ?? "application/pdf",
+      });
+      return;
+    }
+    for (const p of part.parts ?? []) {
+      walk(p);
+    }
+  }
+  walk(payload);
+  return out;
+}
+
+/**
+ * Fetch full message (use for process-pitch-decks only).
+ */
+export async function getFullMessage(
+  client: gmail_v1.Gmail,
+  messageId: string
+): Promise<gmail_v1.Schema$Message> {
+  const res = await client.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "full",
+  });
+  return res.data;
+}
+
+/**
+ * Fetch attachment bytes by messageId and attachmentId. Returns Buffer.
+ */
+export async function getAttachment(
+  client: gmail_v1.Gmail,
+  messageId: string,
+  attachmentId: string
+): Promise<Buffer> {
+  const res = await client.users.messages.attachments.get({
+    userId: "me",
+    messageId,
+    id: attachmentId,
+  });
+  const data = res.data.data;
+  if (!data) throw new Error("Empty attachment data");
+  return Buffer.from(data, "base64url");
+}
