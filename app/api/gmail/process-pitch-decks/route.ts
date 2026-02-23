@@ -46,20 +46,31 @@ export async function POST() {
   }
 
   let processed = 0;
+  let skippedNoPdf = 0;
+  let skippedSize = 0;
   const errors: string[] = [];
 
   for (const email of emails) {
     try {
       const msg = await getFullMessage(gmail, email.gmail_message_id);
       const payload = msg.payload;
-      if (!payload) continue;
+      if (!payload) {
+        skippedNoPdf++;
+        continue;
+      }
 
       const pdfs = findPdfAttachments(payload);
-      if (pdfs.length === 0) continue;
+      if (pdfs.length === 0) {
+        skippedNoPdf++;
+        continue;
+      }
 
       const first = pdfs[0];
       const buffer = await getAttachment(gmail, email.gmail_message_id, first.attachmentId);
-      if (buffer.length < MIN_PDF_BYTES || buffer.length > maxBytes) continue;
+      if (buffer.length < MIN_PDF_BYTES || buffer.length > maxBytes) {
+        skippedSize++;
+        continue;
+      }
 
       const result = await runPitchDeckPipeline(buffer);
 
@@ -97,6 +108,8 @@ export async function POST() {
   return NextResponse.json({
     processed,
     total: emails.length,
+    skippedNoPdf,
+    skippedSize,
     errors: errors.length ? errors.slice(0, 10) : undefined,
   });
 }

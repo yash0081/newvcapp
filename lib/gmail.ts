@@ -132,12 +132,13 @@ export interface PdfAttachment {
 }
 
 /**
- * Get full message and find first PDF attachment part (including nested parts).
+ * Find PDF attachment parts (including nested). Accept any part with mimeType application/pdf
+ * and an attachmentId — do not require .pdf filename (many clients omit or change it).
  */
 export function findPdfAttachments(payload: gmail_v1.Schema$MessagePart): PdfAttachment[] {
   const out: PdfAttachment[] = [];
   function walk(part: gmail_v1.Schema$MessagePart) {
-    if (part.mimeType === "application/pdf" && part.filename?.toLowerCase().endsWith(".pdf") && part.body?.attachmentId) {
+    if (part.mimeType === "application/pdf" && part.body?.attachmentId) {
       out.push({
         attachmentId: part.body.attachmentId,
         filename: part.filename ?? "attachment.pdf",

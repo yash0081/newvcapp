@@ -15,7 +15,16 @@ export function ScorePitchDecksButton() {
       if (res.ok) {
         router.refresh();
         if (data.processed !== undefined) {
-          alert(`Processed ${data.processed} pitch deck(s).`);
+          if (data.processed > 0) {
+            alert(`Processed ${data.processed} pitch deck(s).${data.errors?.length ? ` Some errors: ${data.errors[0]}` : ""}`);
+          } else if (data.total === 0) {
+            alert("No emails to process. Sync first to pull in emails.");
+          } else {
+            const parts = [];
+            if (data.skippedNoPdf) parts.push(`${data.skippedNoPdf} had no PDF`);
+            if (data.skippedSize) parts.push(`${data.skippedSize} wrong size (50 KB – 10 MB)`);
+            alert(`0 pitch decks processed. ${parts.join("; ")}.`);
+          }
         }
       } else {
         alert(data.error || "Failed to process pitch decks.");
