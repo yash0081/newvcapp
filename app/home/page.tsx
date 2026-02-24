@@ -7,6 +7,7 @@ import { SyncButton } from "@/components/sync-button";
 import { DisconnectGmailButton } from "@/components/disconnect-gmail-button";
 import { DeleteEmailButton } from "@/components/delete-email-button";
 import { EmailListRefresh } from "@/components/email-list-refresh";
+import { TriggerScoringOnLoad } from "@/components/trigger-scoring-on-load";
 import { ScorePitchDecksButton } from "@/components/score-pitch-decks-button";
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -112,6 +113,7 @@ async function HomePageContent() {
         ) : (
           <div className="space-y-4">
             <EmailListRefresh />
+            <TriggerScoringOnLoad />
             <div className="flex items-center justify-between">
               <p className="text-gray-600">
                 Gmail connected: <strong>{connection.email}</strong>

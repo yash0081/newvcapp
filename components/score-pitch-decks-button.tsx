@@ -23,7 +23,12 @@ export function ScorePitchDecksButton() {
             const parts = [];
             if (data.skippedNoPdf) parts.push(`${data.skippedNoPdf} had no PDF`);
             if (data.skippedSize) parts.push(`${data.skippedSize} wrong size (50 KB – 10 MB)`);
-            alert(`0 pitch decks processed. ${parts.join("; ")}.`);
+            let msg = `0 pitch decks processed. ${parts.join("; ")}.`;
+            const first = data.debug?.[0];
+            if (first?.reason && first.reason !== "ok") {
+              msg += ` First email: ${first.reason}${first.detail ? ` (${first.detail})` : ""}.`;
+            }
+            alert(msg);
           }
         }
       } else {

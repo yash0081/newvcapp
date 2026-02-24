@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
     const admin = createAdminClient();
     const { data: conn, error: connError } = await admin
       .from("gmail_connections")
-      .select("id, access_token, refresh_token, history_id")
+      .select("id, email, access_token, refresh_token, history_id")
       .eq("email", emailAddress)
       .single();
 
@@ -62,6 +62,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false }, { status: 500 });
     }
 
+    const newMessageIds: string[] = [];
     for (const email of result.emails) {
       // Check if this email was previously deleted
       const { data: existingEmail } = await admin
@@ -76,6 +77,7 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
+      newMessageIds.push(email.id);
       await admin.from("emails").upsert(
         {
           gmail_connection_id: conn.id,
@@ -96,6 +98,26 @@ export async function POST(request: NextRequest) {
       .from("gmail_connections")
       .update({ history_id: result.newHistoryId })
       .eq("id", conn.id);
+
+    // Trigger pitch deck scoring for the new emails (fire-and-forget; don't block webhook response)
+    if (newMessageIds.length > 0 && process.env.INTERNAL_SECRET) {
+      const baseUrl = process.env.VERCEL_URL
+        ? `https://${process.env.VERCEL_URL}`
+        : process.env.NEXT_PUBLIC_APP_URL;
+      if (baseUrl) {
+        fetch(`${baseUrl}/api/gmail/process-pitch-decks`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-internal-secret": process.env.INTERNAL_SECRET,
+          },
+          body: JSON.stringify({
+            messageIds: newMessageIds,
+            emailAddress: conn.email,
+          }),
+        }).catch((err) => console.error("Webhook: trigger scoring failed", err));
+      }
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err) {
