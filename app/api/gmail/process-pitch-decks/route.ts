@@ -85,14 +85,32 @@ export async function POST(request: NextRequest) {
     emails = list;
   }
 
+  // Skip emails that already have a pitch deck result so we don't re-run
+  // the Gemini pipeline on every page load / button click.
+  const emailIds = emails.map((e) => e.id);
+  const { data: existingResults } = await admin
+    .from("pitch_deck_results")
+    .select("email_id")
+    .in("email_id", emailIds);
+  const alreadyScored = new Set(
+    (existingResults ?? []).map((r) => (r as { email_id: string }).email_id)
+  );
+
   let processed = 0;
   let skippedNoPdf = 0;
   let skippedSize = 0;
+  let skippedAlreadyScored = 0;
   const errors: string[] = [];
   const debug: { gmail_message_id: string; reason: string; detail?: string }[] = [];
 
   for (const email of emails) {
     try {
+      if (alreadyScored.has(email.id)) {
+        skippedAlreadyScored++;
+        debug.push({ gmail_message_id: email.gmail_message_id, reason: "already_scored" });
+        continue;
+      }
+
       const msg = await getFullMessage(gmail, email.gmail_message_id);
       const payload = msg.payload;
       if (!payload) {
@@ -160,6 +178,7 @@ export async function POST(request: NextRequest) {
     total: emails.length,
     skippedNoPdf,
     skippedSize,
+    skippedAlreadyScored,
     errors: errors.length ? errors.slice(0, 10) : undefined,
     debug: debug.slice(0, 20),
   });

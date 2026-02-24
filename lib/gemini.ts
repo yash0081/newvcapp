@@ -1,7 +1,13 @@
 import { GoogleGenerativeAI, type GenerativeModel } from "@google/generative-ai";
 
-const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH ?? "gemini-2.0-flash";
-const WEB_HEAVY_MODEL = process.env.GEMINI_MODEL_WEB_HEAVY ?? "gemini-1.5-pro";
+// FLASH_MODEL: cheaper/faster model for PDF + lighter web steps
+// WEB_HEAVY_MODEL: stronger model for problem/solution web steps
+//
+// Default model IDs come from Google’s Gemini API docs.
+// - Gemini 2.5 Flash Lite: "gemini-2.5-flash-lite"
+// - Gemini 3 Flash (preview): "gemini-3-flash-preview"
+const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH ?? "gemini-2.5-flash-lite";
+const WEB_HEAVY_MODEL = process.env.GEMINI_MODEL_WEB_HEAVY ?? "gemini-3-flash-preview";
 
 function getClient(): GoogleGenerativeAI {
   const key = process.env.GEMINI_API_KEY;

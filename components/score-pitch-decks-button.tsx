@@ -21,6 +21,7 @@ export function ScorePitchDecksButton() {
             alert("No emails to process. Sync first to pull in emails.");
           } else {
             const parts = [];
+            if (data.skippedAlreadyScored) parts.push(`${data.skippedAlreadyScored} already scored`);
             if (data.skippedNoPdf) parts.push(`${data.skippedNoPdf} had no PDF`);
             if (data.skippedSize) parts.push(`${data.skippedSize} wrong size (50 KB – 10 MB)`);
             let msg = `0 pitch decks processed. ${parts.join("; ")}.`;
