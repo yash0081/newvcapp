@@ -61,7 +61,7 @@ async function HomePageContent() {
 
     const { data: results } = await supabase
       .from("pitch_deck_results")
-      .select("email_id, composite_score, problem_quality_score, solution_quality_score, founder_team_quality_score, metrics_quality_score, problem_web_json, solution_web_json, founder_web_json, metrics_web_json, emails!inner(subject, from_address, date)")
+      .select("email_id, composite_score, problem_quality_score, solution_quality_score, founder_team_quality_score, metrics_quality_score, parsing_json, problem_extraction_json, solution_extraction_json, problem_web_json, solution_web_json, founder_web_json, metrics_web_json, emails!inner(subject, from_address, date)")
       .order("composite_score", { ascending: false });
 
     if (results?.length) {
@@ -69,6 +69,9 @@ async function HomePageContent() {
         const rawEmails = r.emails;
         const emailsRow = Array.isArray(rawEmails) ? rawEmails[0] : rawEmails;
         const description = aggregateCommentary({
+          parsing_json: r.parsing_json as Record<string, unknown> | null,
+          problem_extraction_json: r.problem_extraction_json as Record<string, unknown> | null,
+          solution_extraction_json: r.solution_extraction_json as Record<string, unknown> | null,
           problem_web_json: r.problem_web_json as Record<string, unknown> | null,
           solution_web_json: r.solution_web_json as Record<string, unknown> | null,
           founder_web_json: r.founder_web_json as Record<string, unknown> | null,
