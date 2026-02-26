@@ -37,23 +37,23 @@ function toNumber(v: unknown): number {
  * Run the full 7-step pitch deck pipeline. PDF is sent directly to Gemini (no text extraction).
  */
 export async function runPitchDeckPipeline(pdfBuffer: Buffer): Promise<PipelineResult> {
-  // Steps 1–3: PDF → extraction (Flash)
+  // Steps 1–3: PDF → extraction (Flash Lite)
   const [parsing_json, problem_extraction_json, solution_extraction_json] = await Promise.all([
-    runWithPdf(PROMPT_PARSING, pdfBuffer, false),
-    runWithPdf(PROMPT_PROBLEM_PDF, pdfBuffer, false),
-    runWithPdf(PROMPT_SOLUTION_PDF, pdfBuffer, false),
+    runWithPdf(PROMPT_PARSING, pdfBuffer, "flash_lite"),
+    runWithPdf(PROMPT_PROBLEM_PDF, pdfBuffer, "flash_lite"),
+    runWithPdf(PROMPT_SOLUTION_PDF, pdfBuffer, "flash_lite"),
   ]);
 
   // Steps 4–5: JSON + web (heavy model)
   const [problem_web_json, solution_web_json] = await Promise.all([
-    runWithText(PROMPT_PROBLEM_WEB, problem_extraction_json, true),
-    runWithText(PROMPT_SOLUTION_WEB, solution_extraction_json, true),
+    runWithText(PROMPT_PROBLEM_WEB, problem_extraction_json, "heavy"),
+    runWithText(PROMPT_SOLUTION_WEB, solution_extraction_json, "heavy"),
   ]);
 
-  // Steps 6–7: parsing_json + web (Flash)
+  // Steps 6–7: parsing_json + web (Flash Lite)
   const [founder_web_json, metrics_web_json] = await Promise.all([
-    runWithText(PROMPT_FOUNDER_TEAM_WEB, parsing_json, false),
-    runWithText(PROMPT_METRICS_WEB, parsing_json, false),
+    runWithText(PROMPT_FOUNDER_TEAM_WEB, parsing_json, "flash_lite"),
+    runWithText(PROMPT_METRICS_WEB, parsing_json, "flash_lite"),
   ]);
 
   const problem_quality_score = toNumber((problem_web_json as Record<string, unknown>)?.problem_quality_score);
