@@ -9,6 +9,7 @@ import { DeleteEmailButton } from "@/components/delete-email-button";
 import { EmailListRefresh } from "@/components/email-list-refresh";
 import { TriggerScoringOnLoad } from "@/components/trigger-scoring-on-load";
 import { ScorePitchDecksButton } from "@/components/score-pitch-decks-button";
+import { FundThesisForm } from "@/components/fund-thesis-form";
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { aggregateCommentary } from "@/lib/commentary";
@@ -44,6 +45,11 @@ async function HomePageContent() {
     solution_quality_score: number;
     founder_team_quality_score: number;
     metrics_quality_score: number;
+    thesis_fit_score: number | null;
+    founder_signal_score: number | null;
+    traction_signal_score: number | null;
+    solution_defensibility_score: number | null;
+    market_power_score: number | null;
     description: string;
   }[] = [];
 
@@ -61,7 +67,7 @@ async function HomePageContent() {
 
     const { data: results } = await supabase
       .from("pitch_deck_results")
-      .select("email_id, composite_score, problem_quality_score, solution_quality_score, founder_team_quality_score, metrics_quality_score, parsing_json, problem_extraction_json, solution_extraction_json, problem_web_json, solution_web_json, founder_web_json, metrics_web_json, emails!inner(subject, from_address, date)")
+      .select("email_id, composite_score, problem_quality_score, solution_quality_score, founder_team_quality_score, metrics_quality_score, thesis_fit_score, founder_signal_score, traction_signal_score, solution_defensibility_score, market_power_score, parsing_json, problem_extraction_json, solution_extraction_json, problem_web_json, solution_web_json, founder_web_json, metrics_web_json, thesis_fit_json, founder_signal_json, traction_signal_json, problem_quality_3c_json, solution_defensibility_json, market_power_json, core_assumption_json, emails!inner(subject, from_address, date)")
       .order("composite_score", { ascending: false });
 
     if (results?.length) {
@@ -76,6 +82,13 @@ async function HomePageContent() {
           solution_web_json: r.solution_web_json as Record<string, unknown> | null,
           founder_web_json: r.founder_web_json as Record<string, unknown> | null,
           metrics_web_json: r.metrics_web_json as Record<string, unknown> | null,
+          thesis_fit_json: r.thesis_fit_json as Record<string, unknown> | null,
+          founder_signal_json: r.founder_signal_json as Record<string, unknown> | null,
+          traction_signal_json: r.traction_signal_json as Record<string, unknown> | null,
+          problem_quality_3c_json: r.problem_quality_3c_json as Record<string, unknown> | null,
+          solution_defensibility_json: r.solution_defensibility_json as Record<string, unknown> | null,
+          market_power_json: r.market_power_json as Record<string, unknown> | null,
+          core_assumption_json: r.core_assumption_json as Record<string, unknown> | null,
         });
         const e = (emailsRow as Record<string, unknown>) ?? {};
         return {
@@ -88,6 +101,11 @@ async function HomePageContent() {
           solution_quality_score: Number(r.solution_quality_score) ?? 0,
           founder_team_quality_score: Number(r.founder_team_quality_score) ?? 0,
           metrics_quality_score: Number(r.metrics_quality_score) ?? 0,
+          thesis_fit_score: r.thesis_fit_score != null ? Number(r.thesis_fit_score) : null,
+          founder_signal_score: r.founder_signal_score != null ? Number(r.founder_signal_score) : null,
+          traction_signal_score: r.traction_signal_score != null ? Number(r.traction_signal_score) : null,
+          solution_defensibility_score: r.solution_defensibility_score != null ? Number(r.solution_defensibility_score) : null,
+          market_power_score: r.market_power_score != null ? Number(r.market_power_score) : null,
           description,
         };
       });
@@ -128,6 +146,11 @@ async function HomePageContent() {
               </div>
             </div>
 
+            <div className="space-y-2">
+              <h2 className="text-lg font-semibold">Fund thesis</h2>
+              <FundThesisForm />
+            </div>
+
             {scoredPitches.length > 0 && (
               <div className="space-y-3">
                 <h2 className="text-lg font-semibold">Ranked pitch decks</h2>
@@ -161,10 +184,12 @@ async function HomePageContent() {
                           <p className="text-sm text-gray-500 italic">No commentary yet.</p>
                         )}
                         <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                          {pitch.thesis_fit_score != null && <span>Thesis: {pitch.thesis_fit_score.toFixed(1)}</span>}
                           <span>Problem: {pitch.problem_quality_score.toFixed(1)}</span>
-                          <span>Solution: {pitch.solution_quality_score.toFixed(1)}</span>
-                          <span>Team: {pitch.founder_team_quality_score.toFixed(1)}</span>
-                          <span>Metrics: {pitch.metrics_quality_score.toFixed(1)}</span>
+                          <span>Solution: {(pitch.solution_defensibility_score ?? pitch.solution_quality_score).toFixed(1)}</span>
+                          <span>Team: {(pitch.founder_signal_score ?? pitch.founder_team_quality_score).toFixed(1)}</span>
+                          <span>Traction: {(pitch.traction_signal_score ?? pitch.metrics_quality_score).toFixed(1)}</span>
+                          {pitch.market_power_score != null && <span>Market: {pitch.market_power_score.toFixed(1)}</span>}
                         </div>
                       </CardContent>
                       <CardFooter className="pt-0 flex justify-end">

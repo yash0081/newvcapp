@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getGmailClient, getFullMessage, findPdfAttachments, getAttachment } from "@/lib/gmail";
-import { runPitchDeckPipeline } from "@/lib/pipeline";
+import { runDealSourcingPipeline } from "@/lib/deal-sourcing-pipeline";
 import { NextRequest, NextResponse } from "next/server";
 
 const DEFAULT_MAX_PDF_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -9,7 +9,7 @@ const MIN_PDF_BYTES = 50 * 1024; // 50 KB
 
 export async function POST(request: NextRequest) {
   const admin = createAdminClient();
-  let conn: { id: string; access_token: string; refresh_token: string | null } | null = null;
+  let conn: { id: string; user_id: string; access_token: string; refresh_token: string | null } | null = null;
 
   // Internal call from webhook: secret + messageIds + emailAddress (no user session)
   const internalSecret = request.headers.get("x-internal-secret");
@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
       if (Array.isArray(messageIds) && messageIds.length && typeof emailAddress === "string") {
         const { data: connection, error: connError } = await admin
           .from("gmail_connections")
-          .select("id, access_token, refresh_token")
+          .select("id, user_id, access_token, refresh_token")
           .eq("email", emailAddress)
           .single();
         if (!connError && connection) {
@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
     }
     const { data: connection, error: connError } = await admin
       .from("gmail_connections")
-      .select("id, access_token, refresh_token")
+      .select("id, user_id, access_token, refresh_token")
       .eq("user_id", user.id)
       .single();
     if (connError || !connection) {
@@ -56,6 +56,17 @@ export async function POST(request: NextRequest) {
       );
     }
     conn = connection;
+  }
+
+  // Load fund thesis for this user (for Phase 2 thesis-fit scoring)
+  let fundThesisStatement: string | null = null;
+  const { data: thesisRow } = await admin
+    .from("fund_thesis")
+    .select("thesis_text")
+    .eq("user_id", conn.user_id)
+    .maybeSingle();
+  if (thesisRow && typeof (thesisRow as { thesis_text?: string }).thesis_text === "string") {
+    fundThesisStatement = (thesisRow as { thesis_text: string }).thesis_text;
   }
 
   const maxBytes = Number(process.env.PITCH_DECK_PDF_MAX_BYTES) || DEFAULT_MAX_PDF_BYTES;
@@ -138,7 +149,7 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      const result = await runPitchDeckPipeline(buffer);
+      const result = await runDealSourcingPipeline(buffer, fundThesisStatement);
 
       await admin
         .from("pitch_deck_results")
@@ -149,17 +160,20 @@ export async function POST(request: NextRequest) {
             gmail_attachment_id: first.attachmentId,
             pdf_size_bytes: buffer.length,
             parsing_json: result.parsing_json,
-            problem_extraction_json: result.problem_extraction_json,
-            solution_extraction_json: result.solution_extraction_json,
+            thesis_fit_json: result.thesis_fit_json,
+            founder_signal_json: result.founder_signal_json,
+            traction_signal_json: result.traction_signal_json,
+            problem_quality_3c_json: result.problem_quality_3c_json,
+            solution_defensibility_json: result.solution_defensibility_json,
+            market_power_json: result.market_power_json,
+            core_assumption_json: result.core_assumption_json,
+            thesis_fit_score: result.thesis_fit_score,
+            founder_signal_score: result.founder_signal_score,
+            traction_signal_score: result.traction_signal_score,
             problem_quality_score: result.problem_quality_score,
-            solution_quality_score: result.solution_quality_score,
-            founder_team_quality_score: result.founder_team_quality_score,
-            metrics_quality_score: result.metrics_quality_score,
+            solution_defensibility_score: result.solution_defensibility_score,
+            market_power_score: result.market_power_score,
             composite_score: result.composite_score,
-            problem_web_json: result.problem_web_json,
-            solution_web_json: result.solution_web_json,
-            founder_web_json: result.founder_web_json,
-            metrics_web_json: result.metrics_web_json,
             processed_at: new Date().toISOString(),
           },
           { onConflict: "email_id" }

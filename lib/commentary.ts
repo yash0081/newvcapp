@@ -1,23 +1,28 @@
 /**
- * Aggregate problem/solution/team/metrics statements + commentary + sources
- * into a single multi-paragraph description for the UI.
+ * Aggregate analysis for the UI. Supports:
+ * - Deal-sourcing pipeline (Phase 1–4): parsing_json, thesis_fit_json, founder_signal_json, etc.
+ * - Legacy pipeline: parsing_json, problem_extraction_json, solution_extraction_json, *_web_json.
  *
- * The intended order:
- * 1. Problem statement, then problem commentary
- * 2. Solution statement, then solution commentary
- * 3. Founder/team info, then founder/team commentary
- * 4. Metrics info, then metrics commentary
- * 5. Sources (from all web steps)
+ * Order: problem statement + commentary, solution + commentary, founder/team + commentary,
+ * metrics/traction + commentary, thesis fit, market, core assumptions, sources.
  */
 
 export interface CommentaryInputs {
   parsing_json: Record<string, unknown> | null;
-  problem_extraction_json: Record<string, unknown> | null;
-  solution_extraction_json: Record<string, unknown> | null;
-  problem_web_json: Record<string, unknown> | null;
-  solution_web_json: Record<string, unknown> | null;
-  founder_web_json: Record<string, unknown> | null;
-  metrics_web_json: Record<string, unknown> | null;
+  problem_extraction_json?: Record<string, unknown> | null;
+  solution_extraction_json?: Record<string, unknown> | null;
+  problem_web_json?: Record<string, unknown> | null;
+  solution_web_json?: Record<string, unknown> | null;
+  founder_web_json?: Record<string, unknown> | null;
+  metrics_web_json?: Record<string, unknown> | null;
+  // Deal-sourcing (Phase 2–4)
+  thesis_fit_json?: Record<string, unknown> | null;
+  founder_signal_json?: Record<string, unknown> | null;
+  traction_signal_json?: Record<string, unknown> | null;
+  problem_quality_3c_json?: Record<string, unknown> | null;
+  solution_defensibility_json?: Record<string, unknown> | null;
+  market_power_json?: Record<string, unknown> | null;
+  core_assumption_json?: Record<string, unknown> | null;
 }
 
 function getStr(obj: Record<string, unknown> | null, key: string): string | null {
@@ -27,64 +32,63 @@ function getStr(obj: Record<string, unknown> | null, key: string): string | null
 }
 
 function pickCompanyName(input: CommentaryInputs): string | null {
+  const co = input.parsing_json?.company_overview as Record<string, unknown> | undefined;
+  if (co && typeof co.company_name === "string" && co.company_name.trim()) return co.company_name.trim();
   const fromParsing = getStr(input.parsing_json, "company_name");
   if (fromParsing) return fromParsing;
-  const fromProblem = getStr(input.problem_extraction_json, "company_name");
+  const fromProblem = input.problem_extraction_json ? getStr(input.problem_extraction_json, "company_name") : null;
   if (fromProblem) return fromProblem;
-  const fromSolution = getStr(input.solution_extraction_json, "company_name");
+  const fromSolution = input.solution_extraction_json ? getStr(input.solution_extraction_json, "company_name") : null;
   if (fromSolution) return fromSolution;
   return null;
 }
 
 function buildProblemSection(input: CommentaryInputs, paragraphs: string[]) {
   const company = pickCompanyName(input);
-  const summary = getStr(input.problem_extraction_json, "summary_problem");
-  const targetCustomer = getStr(input.problem_extraction_json, "target_customer");
+  // Deal-sourcing: parsing_json.problem.problem_statement, .target_customer
+  const problemObj = input.parsing_json?.problem as Record<string, unknown> | undefined;
+  const summary = problemObj ? getStr(problemObj, "problem_statement") : getStr(input.problem_extraction_json ?? null, "summary_problem");
+  const targetCustomer = problemObj ? getStr(problemObj, "target_customer") : getStr(input.problem_extraction_json ?? null, "target_customer");
 
   if (summary || targetCustomer) {
     const lines: string[] = [];
-    if (company) {
-      lines.push(`Problem – ${company}:`);
-    } else {
-      lines.push("Problem:");
-    }
+    if (company) lines.push(`Problem – ${company}:`);
+    else lines.push("Problem:");
     if (summary) lines.push(summary);
     if (targetCustomer) lines.push(`Target customer: ${targetCustomer}`);
     paragraphs.push(lines.join(" "));
   }
 
-  const pQuality = getStr(input.problem_web_json, "problem_quality_commentary");
-  const pUncertainty = getStr(input.problem_web_json, "uncertainty_commentary");
+  const pQuality = getStr(input.problem_quality_3c_json ?? null, "problem_quality_summary") ?? getStr(input.problem_web_json ?? null, "problem_quality_commentary");
+  const pUncertainty = getStr(input.problem_web_json ?? null, "uncertainty_commentary");
   if (pQuality) paragraphs.push(`Problem commentary: ${pQuality}`);
   if (pUncertainty) paragraphs.push(`Problem uncertainty: ${pUncertainty}`);
 }
 
 function buildSolutionSection(input: CommentaryInputs, paragraphs: string[]) {
   const company = pickCompanyName(input);
-  const summary = getStr(input.solution_extraction_json, "summary_solution");
-  const productType = getStr(input.solution_extraction_json, "product_type");
+  const solutionObj = input.parsing_json?.solution as Record<string, unknown> | undefined;
+  const summary = solutionObj ? getStr(solutionObj, "solution_summary") : getStr(input.solution_extraction_json ?? null, "summary_solution");
+  const productType = solutionObj ? getStr(solutionObj, "product_type") : getStr(input.solution_extraction_json ?? null, "product_type");
 
   if (summary || productType) {
     const lines: string[] = [];
-    if (company) {
-      lines.push(`Solution – ${company}:`);
-    } else {
-      lines.push("Solution:");
-    }
+    if (company) lines.push(`Solution – ${company}:`);
+    else lines.push("Solution:");
     if (summary) lines.push(summary);
     if (productType) lines.push(`Product type: ${productType}`);
     paragraphs.push(lines.join(" "));
   }
 
-  const sQuality = getStr(input.solution_web_json, "solution_quality_commentary");
-  const sUncertainty = getStr(input.solution_web_json, "uncertainty_commentary");
+  const sQuality = getStr(input.solution_defensibility_json ?? null, "solution_summary") ?? getStr(input.solution_web_json ?? null, "solution_quality_commentary");
+  const sUncertainty = getStr(input.solution_web_json ?? null, "uncertainty_commentary");
   if (sQuality) paragraphs.push(`Solution commentary: ${sQuality}`);
   if (sUncertainty) paragraphs.push(`Solution uncertainty: ${sUncertainty}`);
 }
 
 function buildTeamSection(input: CommentaryInputs, paragraphs: string[]) {
   const parsing = input.parsing_json;
-  const teamVal = parsing?.["team_members"];
+  const teamVal = parsing?.["team"] ?? parsing?.["team_members"];
   let teamSummary: string | null = null;
 
   if (Array.isArray(teamVal) && teamVal.length > 0) {
@@ -102,19 +106,16 @@ function buildTeamSection(input: CommentaryInputs, paragraphs: string[]) {
     }
   }
 
-  if (teamSummary) {
-    paragraphs.push(teamSummary);
-  }
+  if (teamSummary) paragraphs.push(teamSummary);
 
-  const founderCommentary = getStr(input.founder_web_json, "founder_team_quality_commentary");
-  if (founderCommentary) {
-    paragraphs.push(`Team commentary: ${founderCommentary}`);
-  }
+  const founderCommentary = getStr(input.founder_signal_json ?? null, "founder_signal_summary") ?? getStr(input.founder_web_json ?? null, "founder_team_quality_commentary");
+  if (founderCommentary) paragraphs.push(`Team commentary: ${founderCommentary}`);
 }
 
 function buildMetricsSection(input: CommentaryInputs, paragraphs: string[]) {
   const parsing = input.parsing_json;
-  const metricsVal = parsing?.["metrics"] as Record<string, unknown> | undefined;
+  const tractionVal = parsing?.traction as Record<string, unknown> | undefined;
+  const metricsVal = (parsing?.metrics ?? tractionVal) as Record<string, unknown> | undefined;
   const parts: string[] = [];
 
   if (metricsVal) {
@@ -128,22 +129,20 @@ function buildMetricsSection(input: CommentaryInputs, paragraphs: string[]) {
     addMetric("Revenue", "revenue");
     addMetric("ARR", "arr");
     addMetric("Growth rate", "growth_rate");
+    addMetric("Customers", "customers");
     addMetric("Total customers", "total_customers");
     addMetric("Active users", "active_users");
+    addMetric("Churn", "retention_or_churn");
     addMetric("Churn", "churn");
     addMetric("LTV", "ltv");
     addMetric("CAC", "cac");
     addMetric("LTV/CAC", "ltv_cac_ratio");
   }
 
-  if (parts.length > 0) {
-    paragraphs.push(`Metrics: ${parts.join(" · ")}`);
-  }
+  if (parts.length > 0) paragraphs.push(`Traction / metrics: ${parts.join(" · ")}`);
 
-  const metricsCommentary = getStr(input.metrics_web_json, "metrics_quality_commentary");
-  if (metricsCommentary) {
-    paragraphs.push(`Metrics commentary: ${metricsCommentary}`);
-  }
+  const metricsCommentary = getStr(input.traction_signal_json ?? null, "signal_summary") ?? getStr(input.metrics_web_json ?? null, "metrics_quality_commentary");
+  if (metricsCommentary) paragraphs.push(`Traction commentary: ${metricsCommentary}`);
 }
 
 function collectSources(obj: Record<string, unknown> | null): string[] {
@@ -171,32 +170,37 @@ function collectSources(obj: Record<string, unknown> | null): string[] {
 export function aggregateCommentary(input: CommentaryInputs): string {
   const paragraphs: string[] = [];
 
-  // 1. Problem
   buildProblemSection(input, paragraphs);
-
-  // 2. Solution
   buildSolutionSection(input, paragraphs);
-
-  // 3. Founder / team
   buildTeamSection(input, paragraphs);
-
-  // 4. Metrics
   buildMetricsSection(input, paragraphs);
 
-  // 5. Sources (combined from all web JSONs)
-  const sources = [
-    ...collectSources(input.problem_web_json),
-    ...collectSources(input.solution_web_json),
-    ...collectSources(input.founder_web_json),
-    ...collectSources(input.metrics_web_json),
-  ];
+  // Thesis fit (deal-sourcing Phase 2)
+  const thesisReasoning = getStr(input.thesis_fit_json ?? null, "thesis_alignment_reasoning");
+  if (thesisReasoning) paragraphs.push(`Thesis fit: ${thesisReasoning}`);
 
+  // Market power (Phase 3E)
+  const marketSummary = getStr(input.market_power_json ?? null, "market_power_summary");
+  if (marketSummary) paragraphs.push(`Market: ${marketSummary}`);
+
+  // Core assumptions (Phase 4)
+  const core = input.core_assumption_json as Record<string, unknown> | null | undefined;
+  const dominantAssumption = core ? getStr(core, "dominant_fragile_assumption") : null;
+  const failureMode = core ? getStr(core, "failure_mode_summary") : null;
+  if (dominantAssumption) paragraphs.push(`Dominant fragile assumption: ${dominantAssumption}`);
+  if (failureMode) paragraphs.push(`Failure mode: ${failureMode}`);
+
+  // Sources
+  const sources = [
+    ...collectSources(input.problem_web_json ?? null),
+    ...collectSources(input.solution_web_json ?? null),
+    ...collectSources(input.founder_web_json ?? null),
+    ...collectSources(input.metrics_web_json ?? null),
+  ];
   const uniqueSources = Array.from(new Set(sources)).slice(0, 10);
   if (uniqueSources.length > 0) {
-    const lines = ["Sources:", ...uniqueSources.map((s) => `- ${s}`)];
-    paragraphs.push(lines.join("\n"));
+    paragraphs.push("Sources:\n" + uniqueSources.map((s) => `- ${s}`).join("\n"));
   }
 
-  // Fallback: if everything is empty, return an empty string so the UI can show "No commentary yet."
   return paragraphs.join("\n\n");
 }
