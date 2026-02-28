@@ -12,7 +12,8 @@ import { ScorePitchDecksButton } from "@/components/score-pitch-decks-button";
 import { FundThesisForm } from "@/components/fund-thesis-form";
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { aggregateCommentary } from "@/lib/commentary";
+import Link from "next/link";
+import { aggregateCommentary, getAnalysisPreview, PREVIEW_CHARS } from "@/lib/commentary";
 
 async function HomePageContent() {
   const supabase = await createClient();
@@ -157,42 +158,57 @@ async function HomePageContent() {
                 <div className="grid gap-4 sm:grid-cols-1">
                   {scoredPitches.map((pitch) => (
                     <Card key={pitch.emailId} className="overflow-hidden">
-                      <CardHeader className="pb-2">
-                        <div className="flex items-start justify-between gap-2">
-                          <CardTitle className="text-base font-medium truncate pr-2">
-                            {pitch.subject || "(No subject)"}
-                          </CardTitle>
-                          <Badge variant="secondary" className="shrink-0">
-                            {pitch.composite_score.toFixed(1)}
-                          </Badge>
-                        </div>
-                        <p className="text-sm text-muted-foreground">
-                          From: {pitch.from_address}
-                          {pitch.date && (
-                            <> · {new Date(pitch.date).toLocaleString()}</>
-                          )}
-                        </p>
-                      </CardHeader>
-                      <CardContent className="pt-0">
-                        {pitch.description ? (
-                          <div className="text-sm text-gray-600 whitespace-pre-wrap space-y-2">
-                            {pitch.description.split("\n\n").map((para, i) => (
-                              <p key={i}>{para}</p>
-                            ))}
+                      <Link
+                        href={`/home/pitch/${pitch.emailId}`}
+                        className="block hover:bg-gray-50/80 transition-colors rounded-t-lg"
+                      >
+                        <CardHeader className="pb-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <CardTitle className="text-base font-medium truncate pr-2">
+                              {pitch.subject || "(No subject)"}
+                            </CardTitle>
+                            <Badge variant="secondary" className="shrink-0">
+                              {pitch.composite_score.toFixed(1)}
+                            </Badge>
                           </div>
-                        ) : (
-                          <p className="text-sm text-gray-500 italic">No commentary yet.</p>
-                        )}
-                        <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
-                          {pitch.thesis_fit_score != null && <span>Thesis: {pitch.thesis_fit_score.toFixed(1)}</span>}
-                          <span>Problem: {pitch.problem_quality_score.toFixed(1)}</span>
-                          <span>Solution: {(pitch.solution_defensibility_score ?? pitch.solution_quality_score).toFixed(1)}</span>
-                          <span>Team: {(pitch.founder_signal_score ?? pitch.founder_team_quality_score).toFixed(1)}</span>
-                          <span>Traction: {(pitch.traction_signal_score ?? pitch.metrics_quality_score).toFixed(1)}</span>
-                          {pitch.market_power_score != null && <span>Market: {pitch.market_power_score.toFixed(1)}</span>}
-                        </div>
-                      </CardContent>
-                      <CardFooter className="pt-0 flex justify-end">
+                          <p className="text-sm text-muted-foreground">
+                            From: {pitch.from_address}
+                            {pitch.date && (
+                              <> · {new Date(pitch.date).toLocaleString()}</>
+                            )}
+                          </p>
+                        </CardHeader>
+                        <CardContent className="pt-0">
+                          {pitch.description ? (
+                            <>
+                              <div className="text-sm text-gray-600 whitespace-pre-wrap space-y-2">
+                                {getAnalysisPreview(pitch.description, PREVIEW_CHARS)
+                                  .split("\n\n")
+                                  .map((para, i) => (
+                                    <p key={i}>{para}</p>
+                                  ))}
+                                {pitch.description.length > PREVIEW_CHARS && (
+                                  <p className="text-gray-400 italic">…</p>
+                                )}
+                              </div>
+                              <p className="mt-2 text-sm font-medium text-blue-600">
+                                View full analysis →
+                              </p>
+                            </>
+                          ) : (
+                            <p className="text-sm text-gray-500 italic">No commentary yet.</p>
+                          )}
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                            {pitch.thesis_fit_score != null && <span>Thesis: {pitch.thesis_fit_score.toFixed(1)}</span>}
+                            <span>Problem: {pitch.problem_quality_score.toFixed(1)}</span>
+                            <span>Solution: {(pitch.solution_defensibility_score ?? pitch.solution_quality_score).toFixed(1)}</span>
+                            <span>Team: {(pitch.founder_signal_score ?? pitch.founder_team_quality_score).toFixed(1)}</span>
+                            <span>Traction: {(pitch.traction_signal_score ?? pitch.metrics_quality_score).toFixed(1)}</span>
+                            {pitch.market_power_score != null && <span>Market: {pitch.market_power_score.toFixed(1)}</span>}
+                          </div>
+                        </CardContent>
+                      </Link>
+                      <CardFooter className="pt-0 flex justify-end border-t border-gray-100">
                         <DeleteEmailButton emailId={pitch.emailId} />
                       </CardFooter>
                     </Card>

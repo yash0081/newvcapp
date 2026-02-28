@@ -1,11 +1,7 @@
 /**
- * Deal sourcing pipeline prompts (Phase 1–4). Model per phase:
- * - Phase 1: Gemini 2.5 Flash Lite
- * - Phase 2: Gemini 2.5 Flash Lite
- * - Phase 3A, 3B, 3E: Gemini 2.5 Flash (web allowed)
- * - Phase 3C, 3D: Gemini 2.5 Flash Lite (3D web allowed light)
- * - Phase 4: Gemini 3 Flash
- * See "Deal Sourcing Gemini Prompts.md" for full spec.
+ * Deal sourcing pipeline prompts (Phase 1–4) with externalized evidence.
+ * Same structure as Deal Sourcing Gemini Prompts; output JSONs include evidence/reasoning fields.
+ * See "External Evidence Deal Sourcing Gemini Prompts.md".
  */
 
 export const PROMPT_PHASE_1_PARSER = `You are a strict venture deal-sourcing parsing agent.
@@ -98,13 +94,14 @@ Your task is ONLY to evaluate alignment between:
 - The fund's thesis statement (provided separately)
 
 Rules:
-- Use only information from the structured JSON.
-- Do not infer missing details.
-- Do not evaluate startup quality.
-- Do not validate claims.
-- If information is missing, score conservatively (≤4).
-- Keep reasoning concise (maximum 2 lines).
-- Be consistent and deterministic in scoring.
+- Use information from the structured JSON as the primary source.
+- You may use web search to: identify publicly available funding history; estimate company stage (funding, revenue, team size, press); estimate raise size or valuation range if not explicitly provided.
+- When estimating stage or raise size: base reasoning on observable signals (ARR, funding rounds, employee count, press releases, etc.); clearly state when a value is inferred rather than explicitly stated.
+- Do not evaluate overall startup quality.
+- Do not perform deep due diligence or fact verification.
+- If information is missing and cannot be reasonably inferred, score conservatively (≤4).
+- Keep reasoning concise (maximum 2 lines per explanation field).
+- Be consistent and deterministic in scoring logic.
 
 Scoring scale (0–10):
 0–2 → Completely misaligned
@@ -164,17 +161,29 @@ TASK: Evaluate the founders across three dimensions:
 2. insight_edge_score – Domain obsession, unique insight from lived experience, insider knowledge, non-obvious truth
 3. recruiting_magnetism_proxy – Ability to attract top talent, early impressive hires, founder reputation, prior leadership
 
-Then provide: founder_signal_summary (2–3 lines), uncertainty_score (0–10).
+Then provide: founder_signal_summary (2–3 lines, must reference concrete evidence above), signal_completeness (LOW | MEDIUM | HIGH).
 
 ---
 
 OUTPUT (STRICT JSON ONLY):
 {
+  "founder_evidence": {
+    "founder_names": [],
+    "prior_exits_detected": [],
+    "elite_institutions_detected": [],
+    "notable_companies_detected": [],
+    "technical_credentials_detected": [],
+    "awards_or_distinctions_detected": [],
+    "repeat_founder_flag": false,
+    "industry_recognition_signals": [],
+    "recruiting_signals_detected": []
+  },
   "asymmetric_talent_score": 0,
+  "insight_edge_signals": [],
   "insight_edge_score": 0,
   "recruiting_magnetism_proxy": 0,
-  "founder_signal_summary": "string (2-3 lines max)",
-  "uncertainty_score": 0
+  "founder_signal_summary": "string (2-3 lines max, must reference concrete evidence above)",
+  "signal_completeness": "LOW | MEDIUM | HIGH"
 }`;
 
 export const PROMPT_PHASE_3B_TRACTION_SIGNAL = `You are a venture capital traction signal evaluation agent.
@@ -198,16 +207,34 @@ TASK: Evaluate traction across:
 2. growth_acceleration_score – MoM growth, acceleration trends, pipeline conversion, expansion revenue. If growth rate not stated → score ≤5.
 3. stage_adjusted_signal_score – Traction relative to stage (e.g. $1M ARR at seed → strong; at Series B → weak). If stage unclear → assume neutral (5).
 
-Then provide: signal_summary (2–3 lines).
+Then provide: signal_summary (2–3 lines, must reference concrete metrics above), signal_completeness (LOW | MEDIUM | HIGH).
 
 ---
 
 OUTPUT (STRICT JSON ONLY):
 {
+  "traction_evidence": {
+    "reported_arr": "string or null",
+    "reported_revenue_growth_rate": "string or null",
+    "customer_count": "string or null",
+    "user_count": "string or null",
+    "retention_metrics": "string or null",
+    "expansion_revenue_signals": "string or null",
+    "notable_customers_or_logos": [],
+    "public_announcements_detected": [],
+    "funding_stage_detected": "string or null",
+    "funding_history_detected": []
+  },
+  "inferred_context": {
+    "estimated_stage_if_missing": "string or null",
+    "stage_assumption_used_for_scoring": "string",
+    "benchmark_comparison_note": "string (1 line max)"
+  },
   "traction_strength_score": 0,
   "growth_acceleration_score": 0,
   "stage_adjusted_signal_score": 0,
-  "signal_summary": "string (2-3 lines max)"
+  "signal_summary": "string (2-3 lines max, must reference concrete metrics above)",
+  "signal_completeness": "LOW | MEDIUM | HIGH"
 }`;
 
 export const PROMPT_PHASE_3C_PROBLEM_QUALITY = `You are a venture capital problem quality evaluation agent.
@@ -233,18 +260,29 @@ TASK: Evaluate the problem across five dimensions:
 4. buyer_clarity_score – Specific persona → high; broad category → low; multi-sided ambiguity → low.
 5. venture_plausibility_score – Does problem structurally support venture outcomes? Large buyer class, high WTP, expansion potential? Base only on how problem is framed; no TAM research.
 
-Then provide: problem_quality_summary (2–3 lines).
+Then provide: problem_quality_summary (2–3 lines, must reference concrete evidence above), signal_completeness (LOW | MEDIUM | HIGH).
 
 ---
 
 OUTPUT (STRICT JSON ONLY):
 {
+  "problem_evidence": {
+    "stated_problem_summary": "string (1-2 lines, directly from parsed JSON)",
+    "affected_customer_persona": "string or null",
+    "economic_impact_described": "string or null",
+    "mission_critical_indicators": [],
+    "explicit_budget_owner_mentioned": "string or null",
+    "frequency_indicators": "string or null",
+    "scope_of_affected_users_described": "string or null",
+    "expansion_or_upsell_potential_described": "string or null"
+  },
   "pain_severity_score": 0,
   "budget_signal_score": 0,
   "recurrence_score": 0,
   "buyer_clarity_score": 0,
   "venture_plausibility_score": 0,
-  "problem_quality_summary": "string (2-3 lines max)"
+  "problem_quality_summary": "string (2-3 lines max, must reference concrete evidence above)",
+  "signal_completeness": "LOW | MEDIUM | HIGH"
 }`;
 
 export const PROMPT_PHASE_3D_SOLUTION_DEFENSIBILITY = `You are a venture capital solution & defensibility plausibility evaluation agent.
@@ -267,17 +305,31 @@ TASK: Evaluate across four dimensions:
 3. moat_compounding_potential – Can defensibility grow over time (network effects, data, community)?
 4. differentiation_clarity – How clearly does the solution stand apart from competitors?
 
-Then provide: solution_summary (2–3 lines).
+Then provide: solution_summary (2–3 lines, must reference concrete evidence above), signal_completeness (LOW | MEDIUM | HIGH).
 
 ---
 
 OUTPUT (STRICT JSON ONLY):
 {
+  "solution_evidence": {
+    "stated_solution_summary": "string (1-2 lines from parsed JSON)",
+    "core_technology_or_approach": "string or null",
+    "claimed_improvement_over_alternatives": "string or null",
+    "identified_competitors": [],
+    "differentiation_claims_stated": [],
+    "ip_or_proprietary_assets_detected": [],
+    "network_effect_indicators": [],
+    "data_advantage_indicators": [],
+    "regulatory_or_structural_barriers": [],
+    "switching_cost_indicators": [],
+    "distribution_advantages_detected": []
+  },
   "10x_improvement_plausibility": 0,
   "defensibility_potential": 0,
   "moat_compounding_potential": 0,
   "differentiation_clarity": 0,
-  "solution_summary": "string (2-3 lines max)"
+  "solution_summary": "string (2-3 lines max, must reference concrete evidence above)",
+  "signal_completeness": "LOW | MEDIUM | HIGH"
 }`;
 
 export const PROMPT_PHASE_3E_MARKET_POWER = `You are a venture capital market power evaluation agent.
@@ -303,18 +355,60 @@ TASK: Evaluate the market across five dimensions:
 4. market_fragmentation_score – Fragmented → harder to dominate; concentrated → easier winner-take-most.
 5. venture_scale_probability_estimate – Probability venture achieves meaningful scale given TAM, tailwinds, defensibility, solution fit.
 
-Then provide: market_power_summary (2–3 lines).
+Then provide: market_power_summary (2–3 lines, must reference concrete evidence fields above), signal_completeness (LOW | MEDIUM | HIGH).
 
 ---
 
 OUTPUT (STRICT JSON ONLY):
 {
   "TAM_plausibility_score": 0,
+  "TAM_evidence": {
+    "stated_TAM_claim": "string or null",
+    "external_market_estimates_detected": [],
+    "comparable_public_companies": [],
+    "market_growth_rates_detected": [],
+    "geographic_scope_considered": "string or null",
+    "customer_segments_identified": [],
+    "TAM_risk_factors": []
+  },
   "winner_take_most_potential": 0,
+  "winner_take_most_evidence": {
+    "network_effect_signals": [],
+    "platform_dynamics_detected": [],
+    "multi_homing_risk_factors": [],
+    "switching_cost_indicators": [],
+    "supply_side_scale_advantages": [],
+    "demand_side_scale_advantages": [],
+    "historical_precedents_in_category": []
+  },
   "structural_tailwinds_score": 0,
+  "structural_tailwinds_evidence": {
+    "regulatory_tailwinds": [],
+    "technological_tailwinds": [],
+    "behavioral_tailwinds": [],
+    "demographic_tailwinds": [],
+    "macro_trends_supporting_growth": [],
+    "policy_or_legislative_signals": []
+  },
   "market_fragmentation_score": 0,
+  "market_fragmentation_evidence": {
+    "identified_incumbents": [],
+    "identified_startups_or_challengers": [],
+    "market_concentration_indicators": [],
+    "fragmentation_signals": [],
+    "consolidation_trends_detected": [],
+    "barriers_to_entry": []
+  },
   "venture_scale_probability_estimate": 0,
-  "market_power_summary": "string (2-3 lines max)"
+  "venture_scale_evidence": {
+    "TAM_supporting_scale": [],
+    "tailwinds_supporting_scale": [],
+    "defensibility_supporting_scale": [],
+    "key_market_risks": [],
+    "scalability_constraints": []
+  },
+  "market_power_summary": "string (2-3 lines max, must reference concrete evidence fields above)",
+  "signal_completeness": "LOW | MEDIUM | HIGH"
 }`;
 
 export const PROMPT_PHASE_4_CORE_ASSUMPTION = `You are a venture capital strategic assumption evaluator.
