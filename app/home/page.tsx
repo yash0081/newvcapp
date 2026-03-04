@@ -13,7 +13,7 @@ import { FundThesisForm } from "@/components/fund-thesis-form";
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
-import { aggregateCommentary, getAnalysisPreview, PREVIEW_CHARS } from "@/lib/commentary";
+import { aggregateCommentaryStructured, getStructuredPreview, type StructuredAnalysis } from "@/lib/commentary";
 
 async function HomePageContent() {
   const supabase = await createClient();
@@ -51,7 +51,7 @@ async function HomePageContent() {
     traction_signal_score: number | null;
     solution_defensibility_score: number | null;
     market_power_score: number | null;
-    description: string;
+    structured: StructuredAnalysis;
   }[] = [];
 
   if (connection) {
@@ -75,7 +75,7 @@ async function HomePageContent() {
       scoredPitches = results.map((r: Record<string, unknown>) => {
         const rawEmails = r.emails;
         const emailsRow = Array.isArray(rawEmails) ? rawEmails[0] : rawEmails;
-        const description = aggregateCommentary({
+        const structured = aggregateCommentaryStructured({
           parsing_json: r.parsing_json as Record<string, unknown> | null,
           problem_extraction_json: r.problem_extraction_json as Record<string, unknown> | null,
           solution_extraction_json: r.solution_extraction_json as Record<string, unknown> | null,
@@ -107,7 +107,7 @@ async function HomePageContent() {
           traction_signal_score: r.traction_signal_score != null ? Number(r.traction_signal_score) : null,
           solution_defensibility_score: r.solution_defensibility_score != null ? Number(r.solution_defensibility_score) : null,
           market_power_score: r.market_power_score != null ? Number(r.market_power_score) : null,
-          description,
+          structured,
         };
       });
     }
@@ -179,25 +179,21 @@ async function HomePageContent() {
                           </p>
                         </CardHeader>
                         <CardContent className="pt-0">
-                          {pitch.description ? (
-                            <>
-                              <div className="text-sm text-gray-600 whitespace-pre-wrap space-y-2">
-                                {getAnalysisPreview(pitch.description, PREVIEW_CHARS)
-                                  .split("\n\n")
-                                  .map((para, i) => (
-                                    <p key={i}>{para}</p>
-                                  ))}
-                                {pitch.description.length > PREVIEW_CHARS && (
-                                  <p className="text-gray-400 italic">…</p>
-                                )}
-                              </div>
-                              <p className="mt-2 text-sm font-medium text-blue-600">
-                                View full analysis →
-                              </p>
-                            </>
-                          ) : (
-                            <p className="text-sm text-gray-500 italic">No commentary yet.</p>
-                          )}
+                          {(() => {
+                            const preview = getStructuredPreview(pitch.structured, 2);
+                            return preview ? (
+                              <>
+                                <p className="text-sm text-gray-600 line-clamp-3">
+                                  {preview}
+                                </p>
+                                <p className="mt-2 text-sm font-medium text-blue-600">
+                                  View full analysis →
+                                </p>
+                              </>
+                            ) : (
+                              <p className="text-sm text-gray-500 italic">No summary yet.</p>
+                            );
+                          })()}
                           <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
                             {pitch.thesis_fit_score != null && <span>Thesis: {pitch.thesis_fit_score.toFixed(1)}</span>}
                             <span>Problem: {pitch.problem_quality_score.toFixed(1)}</span>

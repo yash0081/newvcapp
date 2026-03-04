@@ -1,35 +1,37 @@
 /**
- * Deal-sourcing pipeline: Phase 1 (PDF parse) → Phase 2 (thesis fit) → Phase 3A–3E → Phase 4.
- * See Deal Sourcing Gemini Prompts.md and lib/deal-sourcing-prompts.ts.
+ * Deal-sourcing pipeline V2. Matches Prompts V2-2.md.
+ * Flow: Phase 1 (PDF) → Phase 2 (Thesis; gate) → Founder A per founder → Founder B → Traction → 3C Problem → 3D Solution → Phase 4.
+ * Models: 3.1 Flash Lite (flash_lite), 3 Flash (flash).
  */
-import { runWithPdf, runWithText, runWithTextMulti } from "@/lib/gemini";
+import { runWithPdf, runWithText, runWithTextMulti, runWithPromptOnly } from "@/lib/gemini";
 import {
   PROMPT_PHASE_1_PARSER,
-  PROMPT_PHASE_2_THESIS_FIT,
-  PROMPT_PHASE_3A_FOUNDER_SIGNAL,
-  PROMPT_PHASE_3B_TRACTION_SIGNAL,
-  PROMPT_PHASE_3C_PROBLEM_QUALITY,
-  PROMPT_PHASE_3D_SOLUTION_DEFENSIBILITY,
-  PROMPT_PHASE_3E_MARKET_POWER,
-  PROMPT_PHASE_4_CORE_ASSUMPTION,
+  PROMPT_PHASE_2_THESIS,
+  getFounderAPrompt,
+  getFounderBPrompt,
+  PROMPT_TRACTION,
+  PROMPT_PHASE_3C_PROBLEM,
+  PROMPT_PHASE_3D_SOLUTION,
+  PROMPT_PHASE_4_ASSUMPTION,
 } from "@/lib/deal-sourcing-prompts";
 
 export interface DealSourcingResult {
   parsing_json: unknown;
   thesis_fit_json: unknown;
-  founder_signal_json: unknown;
+  founder_signal_json: unknown; // { per_founder: unknown[]; collective: unknown }
   traction_signal_json: unknown;
   problem_quality_3c_json: unknown;
   solution_defensibility_json: unknown;
-  market_power_json: unknown;
+  market_power_json: null; // V2 has no market phase
   core_assumption_json: unknown;
   thesis_fit_score: number;
   founder_signal_score: number;
   traction_signal_score: number;
   problem_quality_score: number;
   solution_defensibility_score: number;
-  market_power_score: number;
+  market_power_score: number; // 0 in V2
   composite_score: number;
+  thesis_auto_reject?: boolean;
 }
 
 function avgScore(obj: Record<string, unknown> | null, keys: string[]): number {
@@ -52,74 +54,93 @@ function avgScore(obj: Record<string, unknown> | null, keys: string[]): number {
   return n ? sum / n : 0;
 }
 
-/**
- * Run the full deal-sourcing pipeline. Uses fund_thesis_statement for Phase 2; if null, Phase 2 still runs but scores may be conservative.
- */
+function getCompanyName(parsing: Record<string, unknown>): string {
+  const co = parsing.company_overview as Record<string, unknown> | undefined;
+  const name = co && typeof co.company_name === "string" ? co.company_name.trim() : "";
+  return name || "Unknown Company";
+}
+
+function getTeamForFounderA(parsing: Record<string, unknown>): { name: string; role?: string }[] {
+  const team = parsing.team;
+  if (!Array.isArray(team) || team.length === 0) return [];
+  const members = team.slice(0, 2).map((m) => {
+    const r = m as Record<string, unknown>;
+    const name = (typeof r.name === "string" ? r.name : String(r.name ?? "Unknown")).trim();
+    const role = typeof r.role === "string" ? r.role : undefined;
+    return { name, role };
+  });
+  return members;
+}
+
 export async function runDealSourcingPipeline(
   pdfBuffer: Buffer,
   fundThesisStatement: string | null
 ): Promise<DealSourcingResult> {
-  const thesis = fundThesisStatement?.trim() ?? "";
+  const thesisText = fundThesisStatement?.trim() ?? "(No fund thesis provided.)";
 
-  // Phase 1: PDF → structured JSON (Flash Lite)
+  // ——— Phase 1: PDF parsing (3.1 Flash Lite) ———
   const parsing_json = await runWithPdf(PROMPT_PHASE_1_PARSER, pdfBuffer, "flash_lite");
+  const parsing = (parsing_json ?? {}) as Record<string, unknown>;
+  const companyName = getCompanyName(parsing);
 
-  // Phase 2: thesis + Phase 1 → thesis fit (Flash Lite)
+  // ——— Phase 2: Thesis Agent (3.1 Flash Lite) ———
+  const startup_thesis_info = {
+    company_overview: parsing.company_overview,
+    traction: parsing.traction,
+    fundraising: parsing.fundraising,
+  };
   const thesis_fit_json = await runWithTextMulti(
-    PROMPT_PHASE_2_THESIS_FIT,
+    PROMPT_PHASE_2_THESIS,
     [
-      { label: "fund_thesis_statement", value: thesis || "(No fund thesis provided.)" },
-      { label: "startup_structured_json", value: parsing_json },
+      { label: "fund_thesis_json", value: thesisText },
+      { label: "startup_thesis_info", value: startup_thesis_info },
     ],
     "flash_lite"
   );
 
-  // Phase 3A–3E: can run in parallel (each takes Phase 1 output)
-  const [
-    founder_signal_json,
-    traction_signal_json,
-    problem_quality_3c_json,
-    solution_defensibility_json,
-    market_power_json,
-  ] = await Promise.all([
-    runWithText(PROMPT_PHASE_3A_FOUNDER_SIGNAL, parsing_json, "flash"),
-    runWithText(PROMPT_PHASE_3B_TRACTION_SIGNAL, parsing_json, "flash"),
-    runWithText(PROMPT_PHASE_3C_PROBLEM_QUALITY, parsing_json, "flash_lite"),
-    runWithText(PROMPT_PHASE_3D_SOLUTION_DEFENSIBILITY, parsing_json, "flash_lite"),
-    runWithText(PROMPT_PHASE_3E_MARKET_POWER, parsing_json, "flash"),
-  ]);
+  const thesisFit = thesis_fit_json as Record<string, unknown>;
+  const ind = (thesisFit?.industry_evaluation as Record<string, unknown>)?.score;
+  const stg = (thesisFit?.stage_evaluation as Record<string, unknown>)?.score;
+  const fund = (thesisFit?.funding_evaluation as Record<string, unknown>)?.score;
+  const scores = [ind, stg, fund].filter((v) => typeof v === "number" && !Number.isNaN(v)) as number[];
+  const thesis_fit_score = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
 
-  // Phase 4: Phase 1 + 2 + all Phase 3 → core assumption (Gemini 3 Flash)
-  const phase3Combined = {
-    parsing: parsing_json,
-    thesis_fit: thesis_fit_json,
-    founder_signal: founder_signal_json,
-    traction_signal: traction_signal_json,
-    problem_quality: problem_quality_3c_json,
-    solution_defensibility: solution_defensibility_json,
-    market_power: market_power_json,
+  // ——— Founder A: per founder (3.1 Flash Lite) ———
+  const teamMembers = getTeamForFounderA(parsing);
+  const perFounderResults: unknown[] = [];
+  for (const member of teamMembers) {
+    const prompt = getFounderAPrompt(member.name, companyName);
+    const result = await runWithPromptOnly(prompt, "flash_lite");
+    perFounderResults.push(result);
+  }
+
+  // ——— Founder B: collective (3.1 Flash Lite) ———
+  const founderBCheck = await runWithPromptOnly(getFounderBPrompt(companyName), "flash_lite");
+  const founderB = founderBCheck as Record<string, unknown>;
+  const founder_signal_json = {
+    per_founder: perFounderResults,
+    collective: founderBCheck,
   };
-  const core_assumption_json = await runWithText(
-    PROMPT_PHASE_4_CORE_ASSUMPTION,
-    phase3Combined,
-    "heavy"
+
+  const founder_signal_score = avgScore(
+    founderB?.scores as Record<string, unknown>,
+    ["asymmetric_talent_score", "insight_edge_score", "recruiting_magnetism_proxy"]
   );
 
-  // Compute scores
-  const thesisFit = thesis_fit_json as Record<string, unknown>;
-  const thesis_fit_score = avgScore(thesisFit, [
-    "sector_fit_score",
-    "stage_fit_score",
-    "geo_fit_score",
-    "check_size_fit_score",
-  ]);
-
-  const founderSignal = founder_signal_json as Record<string, unknown>;
-  const founder_signal_score = avgScore(founderSignal, [
-    "asymmetric_talent_score",
-    "insight_edge_score",
-    "recruiting_magnetism_proxy",
-  ]);
+  // ——— Traction (3.1 Flash Lite) ———
+  const startup_traction_info = {
+    company_overview: parsing.company_overview,
+    traction: parsing.traction,
+    fundraising: parsing.fundraising,
+  };
+  const traction_signal_json = await runWithTextMulti(
+    PROMPT_TRACTION,
+    [
+      { label: "startup_traction_info", value: startup_traction_info },
+      { label: "company_name", value: companyName },
+    ],
+    "flash_lite"
+  );
 
   const tractionSignal = traction_signal_json as Record<string, unknown>;
   const traction_signal_score = avgScore(tractionSignal, [
@@ -128,40 +149,78 @@ export async function runDealSourcingPipeline(
     "stage_adjusted_signal_score",
   ]);
 
-  const problemQuality = problem_quality_3c_json as Record<string, unknown>;
-  const problem_quality_score = avgScore(problemQuality, [
+  // ——— Phase 3C: Problem (3 Flash) ———
+  const problemInput = {
+    problem: parsing.problem,
+    company_overview: parsing.company_overview,
+  };
+  const problem_quality_3c_json = await runWithTextMulti(
+    PROMPT_PHASE_3C_PROBLEM,
+    [
+      { label: "parsed_startup_data", value: problemInput },
+      { label: "company_name", value: companyName },
+    ],
+    "flash"
+  );
+
+  const problem3C = problem_quality_3c_json as Record<string, unknown>;
+  const problem_quality_score = avgScore(problem3C?.scores as Record<string, unknown>, [
     "pain_severity_score",
-    "budget_signal_score",
-    "recurrence_score",
-    "buyer_clarity_score",
-    "venture_plausibility_score",
+    "buyer_authority_score",
+    "structural_tailwinds_score",
+    "venture_scale_plausibility",
   ]);
 
-  const solutionDef = solution_defensibility_json as Record<string, unknown>;
-  const solution_defensibility_score = avgScore(solutionDef, [
+  // ——— Phase 3D: Solution (3 Flash) ———
+  const solutionInput = {
+    solution: parsing.solution,
+    company_overview: parsing.company_overview,
+  };
+  const solution_defensibility_json = await runWithTextMulti(
+    PROMPT_PHASE_3D_SOLUTION,
+    [
+      { label: "parsed_startup_data", value: solutionInput },
+      { label: "company_name", value: companyName },
+    ],
+    "flash"
+  );
+
+  const solution3D = solution_defensibility_json as Record<string, unknown>;
+  const solution_defensibility_score = avgScore(solution3D?.scores as Record<string, unknown>, [
     "10x_improvement_plausibility",
     "defensibility_potential",
-    "moat_compounding_potential",
-    "differentiation_clarity",
+    "competitive_edge_score",
   ]);
 
-  const marketPower = market_power_json as Record<string, unknown>;
-  const market_power_score = avgScore(marketPower, [
-    "TAM_plausibility_score",
-    "winner_take_most_potential",
-    "structural_tailwinds_score",
-    "market_fragmentation_score",
-    "venture_scale_probability_estimate",
-  ]);
+  // ——— Phase 4: Strategic Assumption (3 Flash) ———
+  const core_signal_scores = {
+    founder: founderB?.scores,
+    traction: {
+      traction_strength_score: tractionSignal?.traction_strength_score,
+      growth_acceleration_score: tractionSignal?.growth_acceleration_score,
+      stage_adjusted_signal_score: tractionSignal?.stage_adjusted_signal_score,
+    },
+    problem: problem3C?.scores,
+    solution: solution3D?.scores,
+  };
+  const core_assumption_json = await runWithTextMulti(
+    PROMPT_PHASE_4_ASSUMPTION,
+    [
+      { label: "parsed_startup_data", value: parsing_json },
+      { label: "thesis_fit_report", value: thesis_fit_json },
+      { label: "core_signal_scores", value: core_signal_scores },
+    ],
+    "flash"
+  );
 
+  // V2: no market phase; composite over 5 dimensions
   const composite_score =
     (thesis_fit_score +
       founder_signal_score +
       traction_signal_score +
       problem_quality_score +
-      solution_defensibility_score +
-      market_power_score) /
-    6;
+      solution_defensibility_score) /
+    5;
 
   return {
     parsing_json,
@@ -170,14 +229,14 @@ export async function runDealSourcingPipeline(
     traction_signal_json,
     problem_quality_3c_json,
     solution_defensibility_json,
-    market_power_json,
+    market_power_json: null,
     core_assumption_json,
     thesis_fit_score,
     founder_signal_score,
     traction_signal_score,
     problem_quality_score,
     solution_defensibility_score,
-    market_power_score,
+    market_power_score: 0,
     composite_score,
   };
 }

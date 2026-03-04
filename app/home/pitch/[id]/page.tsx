@@ -1,11 +1,10 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
-import { aggregateCommentary } from "@/lib/commentary";
+import { aggregateCommentaryStructured } from "@/lib/commentary";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-
-const SECTION_SEP = "\n\n";
+import { AnalysisAccordion } from "@/components/analysis-accordion";
 
 export default async function PitchAnalysisPage({
   params,
@@ -49,7 +48,7 @@ export default async function PitchAnalysisPage({
 
   if (resultError || !result) notFound();
 
-  const description = aggregateCommentary({
+  const structured = aggregateCommentaryStructured({
     parsing_json: result.parsing_json as Record<string, unknown> | null,
     problem_extraction_json: result.problem_extraction_json as Record<string, unknown> | null,
     solution_extraction_json: result.solution_extraction_json as Record<string, unknown> | null,
@@ -66,31 +65,29 @@ export default async function PitchAnalysisPage({
     core_assumption_json: result.core_assumption_json as Record<string, unknown> | null,
   });
 
-  const sections = description
-    .split(SECTION_SEP)
-    .map((block) => block.trim())
-    .filter(Boolean);
-
   return (
-    <main className="min-h-screen bg-white flex flex-col">
-      <div className="border-b border-gray-200 p-4 flex justify-between items-center">
-        <Link href="/home" className="text-sm text-gray-600 hover:text-gray-900">
+    <main className="min-h-screen bg-gray-50/50 flex flex-col">
+      <div className="border-b border-gray-200 bg-white p-4 flex justify-between items-center">
+        <Link
+          href="/home"
+          className="text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors"
+        >
           ← Back to home
         </Link>
       </div>
 
       <div className="flex-1 p-6 max-w-3xl mx-auto w-full space-y-6">
-        <Card>
+        <Card className="shadow-sm">
           <CardHeader className="pb-2">
             <div className="flex items-start justify-between gap-2">
-              <CardTitle className="text-lg font-medium pr-2">
+              <CardTitle className="text-lg font-semibold pr-2 text-gray-900">
                 {email.subject || "(No subject)"}
               </CardTitle>
-              <Badge variant="secondary" className="shrink-0">
-                Score: {(result.composite_score ?? 0).toFixed(1)}
+              <Badge variant="secondary" className="shrink-0 font-medium">
+                {(result.composite_score ?? 0).toFixed(1)}
               </Badge>
             </div>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm text-muted-foreground mt-1">
               From: {email.from_address}
               {email.date && (
                 <> · {new Date(email.date).toLocaleString()}</>
@@ -99,33 +96,15 @@ export default async function PitchAnalysisPage({
           </CardHeader>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Full analysis</CardTitle>
+        <Card className="shadow-sm">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-semibold text-gray-900">Analysis</CardTitle>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Expand a section to see details, evidence, and scores.
+            </p>
           </CardHeader>
-          <CardContent className="space-y-6">
-            {sections.map((block, i) => {
-              const firstLineEnd = block.indexOf("\n");
-              const title = firstLineEnd > 0 ? block.slice(0, firstLineEnd).trim() : block.slice(0, 80);
-              const body = firstLineEnd > 0 ? block.slice(firstLineEnd).trim() : "";
-              const isHeading = /^[A-Za-z][A-Za-z\s/]+(\s\([^)]+\))?$/.test(title) && body.length > 0;
-              return (
-                <section key={i} className="border-b border-gray-100 pb-4 last:border-0 last:pb-0">
-                  {isHeading ? (
-                    <>
-                      <h3 className="text-sm font-semibold text-gray-800 mb-2">{title}</h3>
-                      <div className="text-sm text-gray-600 whitespace-pre-wrap pl-0">
-                        {body}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="text-sm text-gray-600 whitespace-pre-wrap">
-                      {block}
-                    </div>
-                  )}
-                </section>
-              );
-            })}
+          <CardContent className="pt-0">
+            <AnalysisAccordion data={structured} />
           </CardContent>
         </Card>
       </div>

@@ -1,11 +1,10 @@
 import { GoogleGenerativeAI, type GenerativeModel } from "@google/generative-ai";
 
-// Deal-sourcing: flash_lite (Phase 1,2,3C,3D), flash (Phase 3A,3B,3E), heavy (Phase 4)
-const FLASH_LITE = process.env.GEMINI_MODEL_FLASH_LITE ?? process.env.GEMINI_MODEL_FLASH ?? "gemini-2.5-flash-lite";
-const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH ?? "gemini-2.5-flash";
-const WEB_HEAVY_MODEL = process.env.GEMINI_MODEL_WEB_HEAVY ?? "gemini-3-flash-preview";
+// V2: Only 3.1 Flash Lite and 3 Flash (see Prompts V2-2.md)
+const FLASH_LITE = process.env.GEMINI_MODEL_FLASH_LITE ?? "gemini-3.1-flash-lite-preview";
+const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH ?? "gemini-3-flash-preview";
 
-export type ModelTier = "flash_lite" | "flash" | "heavy";
+export type ModelTier = "flash_lite" | "flash";
 
 function getClient(): GoogleGenerativeAI {
   const key = process.env.GEMINI_API_KEY;
@@ -18,7 +17,7 @@ function getModel(name: string): GenerativeModel {
 }
 
 export function getModelByTier(tier: ModelTier): GenerativeModel {
-  const name = tier === "flash_lite" ? FLASH_LITE : tier === "flash" ? FLASH_MODEL : WEB_HEAVY_MODEL;
+  const name = tier === "flash_lite" ? FLASH_LITE : FLASH_MODEL;
   return getModel(name);
 }
 
@@ -83,6 +82,24 @@ export async function runWithPdf(
       },
       { text: prompt + "\n\nReturn strict JSON only, no other text." },
     ]);
+    const response = result.response;
+    const text = response.text();
+    if (!text) throw new Error("Empty Gemini response");
+    return parseJsonFromResponse(text);
+  });
+}
+
+/**
+ * Run Gemini with prompt only (no JSON payload). Returns parsed JSON.
+ * Used for Founder A/B where inputs are injected into the prompt.
+ */
+export async function runWithPromptOnly(
+  prompt: string,
+  modelTier: ModelTier = "flash_lite"
+): Promise<unknown> {
+  return withRetry(async () => {
+    const model = getModelByTier(modelTier);
+    const result = await model.generateContent(prompt + "\n\nReturn strict JSON only, no other text.");
     const response = result.response;
     const text = response.text();
     if (!text) throw new Error("Empty Gemini response");

@@ -46,8 +46,8 @@ export async function runPitchDeckPipeline(pdfBuffer: Buffer): Promise<PipelineR
 
   // Steps 4–5: JSON + web (heavy model)
   const [problem_web_json, solution_web_json] = await Promise.all([
-    runWithText(PROMPT_PROBLEM_WEB, problem_extraction_json, "heavy"),
-    runWithText(PROMPT_SOLUTION_WEB, solution_extraction_json, "heavy"),
+    runWithText(PROMPT_PROBLEM_WEB, problem_extraction_json, "flash"),
+    runWithText(PROMPT_SOLUTION_WEB, solution_extraction_json, "flash"),
   ]);
 
   // Steps 6–7: parsing_json + web (Flash Lite)
