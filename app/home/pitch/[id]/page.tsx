@@ -4,7 +4,7 @@ import Link from "next/link";
 import { aggregateCommentaryStructured } from "@/lib/commentary";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { AnalysisAccordion } from "@/components/analysis-accordion";
+import { AnalysisAccordion } from "./analysis-accordion";
 
 export default async function PitchAnalysisPage({
   params,
