@@ -553,8 +553,9 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const p3 = input.problem_quality_3c_json as Record<string, unknown> | undefined;
   const problemObj = input.parsing_json?.problem as Record<string, unknown> | undefined;
   const sigP = p3?.signal_interpretation as Record<string, unknown> | undefined;
+  const problemSummaryFromAggregation = getStr(p3 ?? null, "summary_text");
   const problemSummary =
-    getStr(p3 ?? null, "summary_text") ??
+    problemSummaryFromAggregation ??
     getStr(sigP ?? null, "problem_quality_summary") ??
     getStr(p3 ?? null, "problem_quality_summary") ??
     getStr(input.problem_web_json ?? null, "problem_quality_commentary");
@@ -579,8 +580,9 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const solutionObj = input.parsing_json?.solution as Record<string, unknown> | undefined;
   const s3 = input.solution_defensibility_json as Record<string, unknown> | undefined;
   const sigS = s3?.signal_interpretation as Record<string, unknown> | undefined;
+  const solutionSummaryFromAggregation = getStr(s3 ?? null, "summary_text");
   const solutionSummaryText =
-    getStr(s3 ?? null, "summary_text") ??
+    solutionSummaryFromAggregation ??
     getStr(sigS ?? null, "solution_summary") ??
     getStr(s3 ?? null, "solution_summary") ??
     getStr(input.solution_web_json ?? null, "solution_quality_commentary");
@@ -616,8 +618,9 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const f3 = input.founder_signal_json as Record<string, unknown> | undefined;
   const collective = f3?.collective as Record<string, unknown> | undefined;
   const sigInt = collective?.signal_interpretation as Record<string, unknown> | undefined;
+  const founderSummaryFromAggregation = getStr(f3 ?? null, "summary_text");
   const founderSummaryText =
-    getStr(f3 ?? null, "summary_text") ??
+    founderSummaryFromAggregation ??
     getStr(sigInt ?? null, "founder_signal_summary") ??
     getStr(f3 ?? null, "founder_signal_summary") ??
     getStr(input.founder_web_json ?? null, "founder_team_quality_commentary");
@@ -650,8 +653,9 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   if (metricsVal) { add(metricsVal, "ARR", "arr"); add(metricsVal, "Customers", "customers"); add(metricsVal, "Revenue", "revenue"); }
   if (fundVal) { add(fundVal, "Raising", "raising_amount"); const r = getStr(fundVal, "round_type_or_stage") ?? getStr(fundVal, "round_type"); if (r) fromDeckTraction.push(`Round: ${r}`); }
   const t3 = input.traction_signal_json as Record<string, unknown> | undefined;
+  const tractionSummaryFromAggregation = getStr(t3 ?? null, "summary_text");
   const tSummaryText =
-    getStr(t3 ?? null, "summary_text") ??
+    tractionSummaryFromAggregation ??
     getStr(t3 ?? null, "signal_summary") ??
     getStr(input.metrics_web_json ?? null, "metrics_quality_commentary");
   const tractionDetails: string[] = [];
@@ -669,16 +673,21 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const core = input.core_assumption_json as Record<string, unknown> | null | undefined;
   const assumptionsSummary: string[] = [];
   const assumptionsDetails: string[] = [];
+  // Prefer the aggregation prompt's prose summary (no bullets); fall back to raw assumptions only if missing.
+  const assumptionsSummaryText = getStr(core ?? null, "summary_text");
+  if (assumptionsSummaryText) {
+    assumptionsSummary.push(assumptionsSummaryText);
+  }
   if (core) {
     const assumptions = arrOfStrings(core.critical_assumptions ?? core.core_assumptions);
     if (assumptions.length > 0) {
-      assumptionsSummary.push(assumptions.slice(0, 2).map((a) => `• ${a}`).join(" "));
+      if (!assumptionsSummaryText) assumptionsSummary.push(assumptions.slice(0, 2).map((a) => `• ${a}`).join(" "));
       assumptionsDetails.push("Critical assumptions\n" + assumptions.map((a) => "• " + a).join("\n"));
     }
     const linchpin = core.the_linchpin_assumption as Record<string, unknown> | undefined;
     const linchpinDesc = linchpin ? getStr(linchpin, "description") : getStr(core, "dominant_fragile_assumption");
     if (linchpinDesc) {
-      assumptionsSummary.push(linchpinDesc.slice(0, 120) + (linchpinDesc.length > 120 ? "…" : ""));
+      if (!assumptionsSummaryText) assumptionsSummary.push(linchpinDesc.slice(0, 120) + (linchpinDesc.length > 120 ? "…" : ""));
       assumptionsDetails.push("Linchpin\n" + linchpinDesc);
       if (linchpin && typeof linchpin.why_it_is_fragile === "string") assumptionsDetails.push("Why fragile: " + linchpin.why_it_is_fragile);
     }
@@ -714,19 +723,19 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
 
   return {
     problem: buildSection(
-      [...fromDeckProblem, problemSummary ?? ""].filter(Boolean),
+      problemSummaryFromAggregation ? [problemSummaryFromAggregation] : [...fromDeckProblem, problemSummary ?? ""].filter(Boolean),
       problemDetails
     ),
     solution: buildSection(
-      [...fromDeckSolution, solutionSummaryText ?? ""].filter(Boolean),
+      solutionSummaryFromAggregation ? [solutionSummaryFromAggregation] : [...fromDeckSolution, solutionSummaryText ?? ""].filter(Boolean),
       solutionDetails
     ),
     founderTeam: buildSection(
-      [...fromDeckTeam, founderSummaryText ?? ""].filter(Boolean),
+      founderSummaryFromAggregation ? [founderSummaryFromAggregation] : [...fromDeckTeam, founderSummaryText ?? ""].filter(Boolean),
       founderDetails
     ),
     traction: buildSection(
-      [...fromDeckTraction, tSummaryText ?? ""].filter(Boolean),
+      tractionSummaryFromAggregation ? [tractionSummaryFromAggregation] : [...fromDeckTraction, tSummaryText ?? ""].filter(Boolean),
       tractionDetails
     ),
     assumptions: buildSection(
