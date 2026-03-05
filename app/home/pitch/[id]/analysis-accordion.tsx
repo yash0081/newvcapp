@@ -14,6 +14,40 @@ const SECTION_CONFIG: { key: keyof StructuredAnalysis; label: string; icon: Reac
   { key: "thesisFit", label: "Thesis fit", icon: Scale },
 ];
 
+/** Render details text with labels (text before ": ") bolded for readability. */
+function DetailsContent({ text }: { text: string }) {
+  const blocks = text.split(/\n\n+/).filter(Boolean);
+  return (
+    <div className="space-y-3 text-sm text-gray-600 leading-relaxed">
+      {blocks.map((block, i) => {
+        const lines = block.split("\n").filter(Boolean);
+        return (
+          <div key={i} className="space-y-1">
+            {lines.map((line, j) => {
+              const colonIdx = line.indexOf(": ");
+              if (colonIdx > 0) {
+                const label = line.slice(0, colonIdx + 1);
+                const value = line.slice(colonIdx + 2);
+                return (
+                  <p key={j}>
+                    <span className="font-semibold text-gray-800">{label}</span>
+                    {value}
+                  </p>
+                );
+              }
+              return (
+                <p key={j} className="font-semibold text-gray-800 pt-0.5">
+                  {line}
+                </p>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
   const [openSet, setOpenSet] = useState<Set<keyof StructuredAnalysis>>(new Set());
 
@@ -24,6 +58,7 @@ export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
         if (!section || (!section.summary && !section.details)) return null;
         const isOpen = openSet.has(key);
         const hasDetails = section.details && section.details.trim().length > 0;
+        const hasSummary = section.summary && section.summary !== "No summary.";
 
         return (
           <div
@@ -55,8 +90,8 @@ export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
               </span>
               <span className="min-w-0 flex-1">
                 <span className="font-medium text-gray-900">{label}</span>
-                <p className="mt-0.5 line-clamp-2 text-sm text-gray-500">
-                  {section.summary === "No summary." ? "—" : section.summary}
+                <p className="mt-0.5 text-sm text-gray-500 whitespace-pre-wrap">
+                  {hasSummary ? section.summary : "—"}
                 </p>
               </span>
               {hasDetails && (
@@ -66,9 +101,10 @@ export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
               )}
             </button>
             {hasDetails && isOpen && (
-              <div className="border-t border-gray-100 px-4 pb-4 pt-2">
-                <div className="pl-11 text-sm text-gray-600 whitespace-pre-wrap leading-relaxed">
-                  {section.details}
+              <div className="border-t border-gray-100 px-4 pb-4 pt-3">
+                <div className="pl-11">
+                  <p className="font-medium text-gray-800 mb-2 text-sm">In-depth analysis</p>
+                  <DetailsContent text={section.details} />
                 </div>
               </div>
             )}
