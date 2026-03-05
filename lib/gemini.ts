@@ -4,12 +4,12 @@ import { GoogleGenerativeAI, type GenerativeModel } from "@google/generative-ai"
 const FLASH_LITE = process.env.GEMINI_MODEL_FLASH_LITE ?? "gemini-3.1-flash-lite-preview";
 const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH ?? "gemini-3-flash-preview";
 
-// Gemma summarization model (can be 1B/4B/12B/27B).
+// Gemini model used for JSON aggregation summaries (e.g. Gemini 2.5 Flash Lite).
 // MUST be set explicitly in the environment; no silent default.
-if (!process.env.GEMMA_SUMMARY_MODEL) {
-  throw new Error("GEMMA_SUMMARY_MODEL is not set (e.g. gemma-3-4b-it).");
+if (!process.env.GEMINI_MODEL_FLASH_SUMMARY) {
+  throw new Error("GEMINI_MODEL_FLASH_SUMMARY is not set (e.g. gemini-2.5-flash-lite).");
 }
-export const GEMMA_SUMMARY_MODEL = process.env.GEMMA_SUMMARY_MODEL;
+export const GEMINI_MODEL_FLASH_SUMMARY = process.env.GEMINI_MODEL_FLASH_SUMMARY;
 
 export type ModelTier = "flash_lite" | "flash";
 

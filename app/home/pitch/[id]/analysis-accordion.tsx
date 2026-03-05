@@ -14,8 +14,39 @@ const SECTION_CONFIG: { key: keyof StructuredAnalysis; label: string; icon: Reac
   { key: "thesisFit", label: "Thesis fit", icon: Scale },
 ];
 
-/** Render details text with labels (text before ": ") bolded for readability. */
-function DetailsContent({ text }: { text: string }) {
+/** Match "Label: " or "Label; " or "Label;" for bold prefix; ensures a space before the value. */
+function splitLabelValue(line: string): { label: string; value: string } | null {
+  const colonSpace = line.indexOf(": ");
+  const semiSpace = line.indexOf("; ");
+  const semiOnly = line.indexOf(";");
+  let cut = -1;
+  let labelEnd = 0;
+  if (colonSpace > 0) {
+    cut = colonSpace + 2;
+    labelEnd = colonSpace + 1;
+  } else if (semiSpace > 0) {
+    cut = semiSpace + 2;
+    labelEnd = semiSpace + 1;
+  } else if (semiOnly > 0) {
+    cut = semiOnly + 1;
+    labelEnd = semiOnly + 1;
+  }
+  if (cut <= 0) return null;
+  return {
+    label: line.slice(0, labelEnd),
+    value: line.slice(cut).trimStart(),
+  };
+}
+
+/** Render details text with labels (text before ": " or "; ") bolded; always a space between label and value. */
+function DetailsContent({
+  text,
+  sectionKey,
+}: {
+  text: string;
+  sectionKey?: keyof StructuredAnalysis;
+}) {
+  const isAssumptions = sectionKey === "assumptions";
   const blocks = text.split(/\n\n+/).filter(Boolean);
   return (
     <div className="space-y-3 text-sm text-gray-600 leading-relaxed">
@@ -24,19 +55,25 @@ function DetailsContent({ text }: { text: string }) {
         return (
           <div key={i} className="space-y-1">
             {lines.map((line, j) => {
-              const colonIdx = line.indexOf(": ");
-              if (colonIdx > 0) {
-                const label = line.slice(0, colonIdx + 1);
-                const value = line.slice(colonIdx + 2);
+              const parts = splitLabelValue(line);
+              if (parts) {
                 return (
                   <p key={j}>
-                    <span className="font-semibold text-gray-800">{label}</span>
-                    {value}
+                    <span className="font-semibold text-gray-800">{parts.label}</span>{" "}
+                    {parts.value}
+                  </p>
+                );
+              }
+              // Standalone line: bold only in non-assumptions sections; assumptions show as normal prose
+              if (!isAssumptions) {
+                return (
+                  <p key={j} className="font-semibold text-gray-800 pt-0.5">
+                    {line}
                   </p>
                 );
               }
               return (
-                <p key={j} className="font-semibold text-gray-800 pt-0.5">
+                <p key={j} className="pt-0.5">
                   {line}
                 </p>
               );
@@ -104,7 +141,7 @@ export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
               <div className="border-t border-gray-100 px-4 pb-4 pt-3">
                 <div className="pl-11">
                   <p className="font-medium text-gray-800 mb-2 text-sm">In-depth analysis</p>
-                  <DetailsContent text={section.details} />
+                  <DetailsContent text={section.details} sectionKey={key} />
                 </div>
               </div>
             )}

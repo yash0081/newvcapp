@@ -9,7 +9,7 @@ import {
   runWithTextMulti,
   runWithPromptOnly,
   runWithTextMultiOnModel,
-  GEMMA_SUMMARY_MODEL,
+  GEMINI_MODEL_FLASH_SUMMARY,
 } from "@/lib/gemini";
 import {
   PROMPT_PHASE_1_PARSER,
@@ -20,11 +20,11 @@ import {
   PROMPT_PHASE_3C_PROBLEM,
   PROMPT_PHASE_3D_SOLUTION,
   PROMPT_PHASE_4_ASSUMPTION,
-  GEMMA_SUMMARY_FOUNDER_PROMPT,
-  GEMMA_SUMMARY_TRACTION_PROMPT,
-  GEMMA_SUMMARY_PROBLEM_PROMPT,
-  GEMMA_SUMMARY_SOLUTION_PROMPT,
-  GEMMA_SUMMARY_ASSUMPTIONS_PROMPT,
+  SUMMARY_FOUNDER_PROMPT,
+  SUMMARY_TRACTION_PROMPT,
+  SUMMARY_PROBLEM_PROMPT,
+  SUMMARY_SOLUTION_PROMPT,
+  SUMMARY_ASSUMPTIONS_PROMPT,
 } from "@/lib/deal-sourcing-prompts";
 
 export interface DealSourcingResult {
@@ -86,15 +86,16 @@ function getTeamForFounderA(parsing: Record<string, unknown>): { name: string; r
 
 async function summarizeSection(
   prompt: string,
-  inputs: { label: string; value: unknown }[]
+  inputs: { label: string; value: unknown }[],
+  resultKey: string
 ): Promise<string | null> {
   try {
     const result = (await runWithTextMultiOnModel(
-      GEMMA_SUMMARY_MODEL,
+      GEMINI_MODEL_FLASH_SUMMARY,
       prompt,
       inputs
     )) as Record<string, unknown>;
-    const summary = result?.summary;
+    const summary = (result?.[resultKey] ?? result?.summary) as string | undefined;
     return typeof summary === "string" && summary.trim() ? summary.trim() : null;
   } catch {
     return null;
@@ -242,32 +243,44 @@ export async function runDealSourcingPipeline(
     "flash"
   );
 
-  // ——— Section summaries via Gemma-style aggregation prompts (using flash_lite here) ———
+  // ——— Section summaries via aggregation prompts (GEMINI_MODEL_FLASH_SUMMARY) ———
   const founder_summary_text =
-    (await summarizeSection(GEMMA_SUMMARY_FOUNDER_PROMPT, [
-      { label: "founder_data", value: perFounderResults },
-      { label: "team_density_data", value: founderB },
-    ])) ?? "";
+    (await summarizeSection(
+      SUMMARY_FOUNDER_PROMPT,
+      [
+        { label: "founder_data", value: perFounderResults },
+        { label: "team_density_data", value: founderB },
+      ],
+      "human_capital_summary"
+    )) ?? "";
 
   const traction_summary_text =
-    (await summarizeSection(GEMMA_SUMMARY_TRACTION_PROMPT, [
-      { label: "traction_data", value: tractionSignal },
-    ])) ?? "";
+    (await summarizeSection(
+      SUMMARY_TRACTION_PROMPT,
+      [{ label: "traction_data", value: tractionSignal }],
+      "traction_summary"
+    )) ?? "";
 
   const problem_summary_text =
-    (await summarizeSection(GEMMA_SUMMARY_PROBLEM_PROMPT, [
-      { label: "problem_customer_data", value: problem3C },
-    ])) ?? "";
+    (await summarizeSection(
+      SUMMARY_PROBLEM_PROMPT,
+      [{ label: "problem_customer_data", value: problem3C }],
+      "problem_summary"
+    )) ?? "";
 
   const solution_summary_text =
-    (await summarizeSection(GEMMA_SUMMARY_SOLUTION_PROMPT, [
-      { label: "solution_defensibility_data", value: solution3D },
-    ])) ?? "";
+    (await summarizeSection(
+      SUMMARY_SOLUTION_PROMPT,
+      [{ label: "solution_defensibility_data", value: solution3D }],
+      "solution_summary"
+    )) ?? "";
 
   const assumptions_summary_text =
-    (await summarizeSection(GEMMA_SUMMARY_ASSUMPTIONS_PROMPT, [
-      { label: "risk_assumption_data", value: core_assumption_json },
-    ])) ?? "";
+    (await summarizeSection(
+      SUMMARY_ASSUMPTIONS_PROMPT,
+      [{ label: "risk_assumption_data", value: core_assumption_json }],
+      "risk_summary"
+    )) ?? "";
 
   const enriched_founder_signal_json = {
     per_founder: perFounderResults,
