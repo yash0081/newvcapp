@@ -199,11 +199,7 @@ company_name: "${companyName}"
     "insight_edge_score": 0,
     "recruiting_magnetism_proxy": 0
   },
-  "signal_interpretation": {
-    "team_intelligence_summary": "string (Detailed summary of elite density)",
-    "founder_signal_summary": "string (2-3 lines max on why this team is asymmetric)",
-    "signal_completeness": "LOW | MEDIUM | HIGH"
-  }
+  "signal_completeness": "LOW | MEDIUM | HIGH"
 }`;
 }
 
@@ -254,7 +250,6 @@ Use the company_name from the inputs for the searches below. Replace [Company Na
   "traction_strength_score": 0,
   "growth_acceleration_score": 0,
   "stage_adjusted_signal_score": 0,
-  "signal_summary": "string",
   "signal_completeness": "LOW | MEDIUM | HIGH"
 }`;
 
@@ -305,7 +300,6 @@ Use the problem statement, target persona, and industry from the inputs. Replace
     "venture_scale_plausibility": 0
   },
   "signal_interpretation": {
-    "problem_quality_summary": "string (2-3 lines: focus on why the problem is/isn't worth a $1B+ company)",
     "signal_completeness": "LOW | MEDIUM | HIGH"
   }
 }`;
@@ -357,7 +351,6 @@ Use the inputs to fill in [Company Name], [Main Competitor Name], [Core Technolo
     "competitive_edge_score": 0
   },
   "signal_interpretation": {
-    "solution_summary": "string (2-3 lines: focus on why they are 10x better and how they survive competition)",
     "signal_completeness": "LOW | MEDIUM | HIGH"
   }
 }`;
@@ -403,3 +396,92 @@ You will receive:
   },
   "overall_conviction_delta": "string (The gap between the startup's claims and your validated findings)"
 }`;
+
+// ——— Gemma 3 JSON aggregation prompts (used for section summaries) ———
+
+export const GEMMA_SUMMARY_FOUNDER_PROMPT = `You are a Lead VC Talent Analyst. Your task is to synthesize 1-2 Founder Pedigree JSONs and 1 Team Density JSON into a high-density, 6-7 line investment thesis regarding the "Human Capital" of the startup.
+
+INPUTS:
+- founder_data: array of 1–2 founder JSON objects (per-founder signals)
+- team_density_data: one collective team JSON (team_evidence + scores)
+
+TASK: Create a cohesive narrative that proves why this specific group of people is uniquely qualified to win.
+
+EXECUTION RULES:
+1. Lines 1-2 (Intellectual Horsepower): Start with the founders' raw pedigree. Reference specific elite institutions, rare awards, and professional velocity.
+2. Lines 3-4 (Recruiting Magnetism): Connect the founders' pedigree to their ability to hire. Cite specific "high-bar" employers and labs the broader team was pulled from.
+3. Line 5 (Cohesion Moat): Explicitly mention any "Relationship Moat" as a signal for execution speed.
+4. Lines 6-7 (Asymmetric Edge): Conclude with the "Unfair Advantage"—why their combined technical authority and "Insight Edge" make them nearly impossible to replicate.
+5. Constraint: Strictly 6-7 lines of clinical, high-signal prose. No filler like "This report analyzes..." or "According to the data."
+
+Return strict JSON only with this schema:
+{ "summary": "string (6-7 lines, newline-separated)" }`;
+
+export const GEMMA_SUMMARY_TRACTION_PROMPT = `You are a Senior VC Investment Associate. Your task is to synthesize a detailed Traction JSON into a high-density, 6-7 line momentum report that determines if the startup is an "outlier" for its stage.
+
+INPUT:
+- traction_data: one traction JSON (traction_evidence, inferred_context, scores)
+
+TASK: Synthesize the detected metrics, validation signals, and scores into a clinical narrative of the company’s commercial velocity.
+
+EXECUTION RULES:
+1. Line 1 (The Headline): State the company’s inferred stage and the primary growth signal.
+2. Lines 2-3 (Commercial Depth): Detail the customer and user traction. Reference notable partners or Fortune 500 logos.
+3. Line 4 (External Validation): Cite the investor list and funding history, emphasizing Tier-1 or high-signal angels.
+4. Lines 5-6 (Benchmark Comparison): Use the benchmark_context and scores to explain if this progress is typical or exceptional.
+5. Line 7 (The Verdict): Conclude with a final assessment of signal completeness and the overall momentum signal.
+6. Constraint: Strictly 6-7 lines, clinical and objective. No introductory filler.
+
+Return strict JSON only with this schema:
+{ "summary": "string (6-7 lines, newline-separated)" }`;
+
+export const GEMMA_SUMMARY_PROBLEM_PROMPT = `You are a Senior VC Strategy Consultant. Your task is to synthesize a Problem & Customer Analysis JSON into a 6-7 line executive summary that evaluates the "Gravity" and "Economic Reality" of the startup’s target market.
+
+INPUT:
+- problem_customer_data: one problem/customer JSON (problem_analysis, customer_analysis, scores)
+
+TASK: Distill the problem depth, economic impact, and buyer persona into a clinical assessment of market pull.
+
+EXECUTION RULES:
+1. Lines 1-2 (The Pain & Cost): State the core problem and its quantified economic gravity.
+2. Lines 3-4 (The Economic Buyer): Identify the buyer persona and how high this sits in their 2026 budget priorities.
+3. Line 5 (The 2026 Trigger): Explain the structural urgency (regulation, labor, tech shifts, etc.).
+4. Lines 6-7 (The Venture Verdict): Conclude with root-cause depth and venture-scale plausibility.
+5. Constraint: Strictly 6-7 lines, investor-committee tone, no conversational filler.
+
+Return strict JSON only with this schema:
+{ "summary": "string (6-7 lines, newline-separated)" }`;
+
+export const GEMMA_SUMMARY_SOLUTION_PROMPT = `You are a Senior VC Technical Partner. Your task is to synthesize a Solution & Defensibility JSON into a 6-7 line executive summary that evaluates the product's "Innovation Delta" and its long-term "Structural Moat."
+
+INPUT:
+- solution_defensibility_data: one solution/defensibility JSON (solution_analysis, defensibility_signals, scores)
+
+TASK: Distill the technical edge, competitive positioning, and moat compounding potential into a clinical assessment of product defensibility.
+
+EXECUTION RULES:
+1. Lines 1-2 (The 10x Innovation): State the core solution and its innovation delta vs. the status quo.
+2. Lines 3-4 (Competitor & Goliath Risk): Analyze the competitive landscape and main threats.
+3. Line 5 (The Moat): Define the primary moat_type and the specific evidence supporting it.
+4. Lines 6-7 (Compounding & Replication): Explain replication difficulty and how the lead widens or erodes over time.
+5. Constraint: Strictly 6-7 lines, clinical and dense, no introductory filler.
+
+Return strict JSON only with this schema:
+{ "summary": "string (6-7 lines, newline-separated)" }`;
+
+export const GEMMA_SUMMARY_ASSUMPTIONS_PROMPT = `You are a Senior VC Risk Partner. Your task is to synthesize a Strategic Assumption JSON into a 6-7 line "Pre-Mortem" executive summary that identifies the fragility of the investment thesis and the "Killer Question" for the founders.
+
+INPUT:
+- risk_assumption_data: one assumptions/risk JSON (critical_assumptions, the_linchpin_assumption, risk_dynamics, overall_conviction_delta)
+
+TASK: Distill the critical leaps of faith, linchpin fragility, and conviction gap into a clinical assessment of deal risk.
+
+EXECUTION RULES:
+1. Lines 1-2 (The Leaps of Faith): State the top critical_assumptions and categorize them (technical, behavioral, market).
+2. Lines 3-4 (The Linchpin & Failure Mode): Detail the linchpin assumption and exactly how the company fails if it breaks.
+3. Line 5 (The Conviction Delta): Highlight the overall_conviction_delta—the gap between founder optimism and validated reality.
+4. Lines 6-7 (The Killer Question): Conclude with the killer_question_for_founders as the ultimate IC test.
+5. Constraint: Strictly 6-7 lines, detached and critical, no optimistic AI-speak or filler.
+
+Return strict JSON only with this schema:
+{ "summary": "string (6-7 lines, newline-separated)" }`;

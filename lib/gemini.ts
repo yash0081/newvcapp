@@ -1,8 +1,15 @@
 import { GoogleGenerativeAI, type GenerativeModel } from "@google/generative-ai";
 
-// V2: Only 3.1 Flash Lite and 3 Flash (see Prompts V2-2.md)
+// V2: Gemini models for main pipeline + Gemma model for summaries.
 const FLASH_LITE = process.env.GEMINI_MODEL_FLASH_LITE ?? "gemini-3.1-flash-lite-preview";
 const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH ?? "gemini-3-flash-preview";
+
+// Gemma summarization model (can be 1B/4B/12B/27B).
+// MUST be set explicitly in the environment; no silent default.
+if (!process.env.GEMMA_SUMMARY_MODEL) {
+  throw new Error("GEMMA_SUMMARY_MODEL is not set (e.g. gemma-3-4b-it).");
+}
+export const GEMMA_SUMMARY_MODEL = process.env.GEMMA_SUMMARY_MODEL;
 
 export type ModelTier = "flash_lite" | "flash";
 
@@ -146,6 +153,29 @@ export async function runWithTextMulti(
     const response = result.response;
     const text = response.text();
     if (!text) throw new Error("Empty Gemini response");
+    return parseJsonFromResponse(text);
+  });
+}
+
+/** Run with multiple text inputs on an explicit model name (e.g. Gemma). */
+export async function runWithTextMultiOnModel(
+  modelName: string,
+  prompt: string,
+  inputs: { label: string; value: unknown }[]
+): Promise<unknown> {
+  return withRetry(async () => {
+    const model = getModel(modelName);
+    const parts = inputs
+      .map(({ label, value }) => {
+        const str = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+        return `${label}:\n${str}`;
+      })
+      .join("\n\n");
+    const fullPrompt = `${parts}\n\n---\n\n${prompt}\n\nReturn strict JSON only, no other text.`;
+    const result = await model.generateContent(fullPrompt);
+    const response = result.response;
+    const text = response.text();
+    if (!text) throw new Error("Empty model response");
     return parseJsonFromResponse(text);
   });
 }

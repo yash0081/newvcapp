@@ -553,7 +553,11 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const p3 = input.problem_quality_3c_json as Record<string, unknown> | undefined;
   const problemObj = input.parsing_json?.problem as Record<string, unknown> | undefined;
   const sigP = p3?.signal_interpretation as Record<string, unknown> | undefined;
-  const problemSummary = getStr(sigP ?? null, "problem_quality_summary") ?? getStr(p3 ?? null, "problem_quality_summary") ?? getStr(input.problem_web_json ?? null, "problem_quality_commentary");
+  const problemSummary =
+    getStr(p3 ?? null, "summary_text") ??
+    getStr(sigP ?? null, "problem_quality_summary") ??
+    getStr(p3 ?? null, "problem_quality_summary") ??
+    getStr(input.problem_web_json ?? null, "problem_quality_commentary");
   const fromDeckProblem: string[] = [];
   if (problemObj) {
     const s = getStr(problemObj, "problem_statement");
@@ -575,7 +579,11 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const solutionObj = input.parsing_json?.solution as Record<string, unknown> | undefined;
   const s3 = input.solution_defensibility_json as Record<string, unknown> | undefined;
   const sigS = s3?.signal_interpretation as Record<string, unknown> | undefined;
-  const solutionSummaryText = getStr(sigS ?? null, "solution_summary") ?? getStr(s3 ?? null, "solution_summary") ?? getStr(input.solution_web_json ?? null, "solution_quality_commentary");
+  const solutionSummaryText =
+    getStr(s3 ?? null, "summary_text") ??
+    getStr(sigS ?? null, "solution_summary") ??
+    getStr(s3 ?? null, "solution_summary") ??
+    getStr(input.solution_web_json ?? null, "solution_quality_commentary");
   const fromDeckSolution: string[] = [];
   if (solutionObj) {
     const s = getStr(solutionObj, "solution_summary");
@@ -608,7 +616,11 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const f3 = input.founder_signal_json as Record<string, unknown> | undefined;
   const collective = f3?.collective as Record<string, unknown> | undefined;
   const sigInt = collective?.signal_interpretation as Record<string, unknown> | undefined;
-  const founderSummaryText = getStr(sigInt ?? null, "founder_signal_summary") ?? getStr(f3 ?? null, "founder_signal_summary") ?? getStr(input.founder_web_json ?? null, "founder_team_quality_commentary");
+  const founderSummaryText =
+    getStr(f3 ?? null, "summary_text") ??
+    getStr(sigInt ?? null, "founder_signal_summary") ??
+    getStr(f3 ?? null, "founder_signal_summary") ??
+    getStr(input.founder_web_json ?? null, "founder_team_quality_commentary");
   const founderDetails: string[] = [];
   const perFounder = Array.isArray(f3?.per_founder) ? f3.per_founder : [];
   if (perFounder.length > 0) {
@@ -638,7 +650,10 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   if (metricsVal) { add(metricsVal, "ARR", "arr"); add(metricsVal, "Customers", "customers"); add(metricsVal, "Revenue", "revenue"); }
   if (fundVal) { add(fundVal, "Raising", "raising_amount"); const r = getStr(fundVal, "round_type_or_stage") ?? getStr(fundVal, "round_type"); if (r) fromDeckTraction.push(`Round: ${r}`); }
   const t3 = input.traction_signal_json as Record<string, unknown> | undefined;
-  const tSummaryText = getStr(t3 ?? null, "signal_summary") ?? getStr(input.metrics_web_json ?? null, "metrics_quality_commentary");
+  const tSummaryText =
+    getStr(t3 ?? null, "summary_text") ??
+    getStr(t3 ?? null, "signal_summary") ??
+    getStr(input.metrics_web_json ?? null, "metrics_quality_commentary");
   const tractionDetails: string[] = [];
   const evT = t3?.traction_evidence as Record<string, unknown> | undefined;
   if (evT) {

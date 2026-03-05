@@ -3,7 +3,14 @@
  * Flow: Phase 1 (PDF) → Phase 2 (Thesis; gate) → Founder A per founder → Founder B → Traction → 3C Problem → 3D Solution → Phase 4.
  * Models: 3.1 Flash Lite (flash_lite), 3 Flash (flash).
  */
-import { runWithPdf, runWithText, runWithTextMulti, runWithPromptOnly } from "@/lib/gemini";
+import {
+  runWithPdf,
+  runWithText,
+  runWithTextMulti,
+  runWithPromptOnly,
+  runWithTextMultiOnModel,
+  GEMMA_SUMMARY_MODEL,
+} from "@/lib/gemini";
 import {
   PROMPT_PHASE_1_PARSER,
   PROMPT_PHASE_2_THESIS,
@@ -13,6 +20,11 @@ import {
   PROMPT_PHASE_3C_PROBLEM,
   PROMPT_PHASE_3D_SOLUTION,
   PROMPT_PHASE_4_ASSUMPTION,
+  GEMMA_SUMMARY_FOUNDER_PROMPT,
+  GEMMA_SUMMARY_TRACTION_PROMPT,
+  GEMMA_SUMMARY_PROBLEM_PROMPT,
+  GEMMA_SUMMARY_SOLUTION_PROMPT,
+  GEMMA_SUMMARY_ASSUMPTIONS_PROMPT,
 } from "@/lib/deal-sourcing-prompts";
 
 export interface DealSourcingResult {
@@ -70,6 +82,23 @@ function getTeamForFounderA(parsing: Record<string, unknown>): { name: string; r
     return { name, role };
   });
   return members;
+}
+
+async function summarizeSection(
+  prompt: string,
+  inputs: { label: string; value: unknown }[]
+): Promise<string | null> {
+  try {
+    const result = (await runWithTextMultiOnModel(
+      GEMMA_SUMMARY_MODEL,
+      prompt,
+      inputs
+    )) as Record<string, unknown>;
+    const summary = result?.summary;
+    return typeof summary === "string" && summary.trim() ? summary.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function runDealSourcingPipeline(
@@ -213,6 +242,59 @@ export async function runDealSourcingPipeline(
     "flash"
   );
 
+  // ——— Section summaries via Gemma-style aggregation prompts (using flash_lite here) ———
+  const founder_summary_text =
+    (await summarizeSection(GEMMA_SUMMARY_FOUNDER_PROMPT, [
+      { label: "founder_data", value: perFounderResults },
+      { label: "team_density_data", value: founderB },
+    ])) ?? "";
+
+  const traction_summary_text =
+    (await summarizeSection(GEMMA_SUMMARY_TRACTION_PROMPT, [
+      { label: "traction_data", value: tractionSignal },
+    ])) ?? "";
+
+  const problem_summary_text =
+    (await summarizeSection(GEMMA_SUMMARY_PROBLEM_PROMPT, [
+      { label: "problem_customer_data", value: problem3C },
+    ])) ?? "";
+
+  const solution_summary_text =
+    (await summarizeSection(GEMMA_SUMMARY_SOLUTION_PROMPT, [
+      { label: "solution_defensibility_data", value: solution3D },
+    ])) ?? "";
+
+  const assumptions_summary_text =
+    (await summarizeSection(GEMMA_SUMMARY_ASSUMPTIONS_PROMPT, [
+      { label: "risk_assumption_data", value: core_assumption_json },
+    ])) ?? "";
+
+  const enriched_founder_signal_json = {
+    per_founder: perFounderResults,
+    collective: founderBCheck,
+    summary_text: founder_summary_text,
+  };
+
+  const enriched_traction_signal_json = {
+    ...(tractionSignal ?? {}),
+    summary_text: traction_summary_text,
+  };
+
+  const enriched_problem_quality_3c_json = {
+    ...(problem3C ?? {}),
+    summary_text: problem_summary_text,
+  };
+
+  const enriched_solution_defensibility_json = {
+    ...(solution3D ?? {}),
+    summary_text: solution_summary_text,
+  };
+
+  const enriched_core_assumption_json = {
+    ...(core_assumption_json as Record<string, unknown>),
+    summary_text: assumptions_summary_text,
+  };
+
   // V2: no market phase; composite over 5 dimensions
   const composite_score =
     (thesis_fit_score +
@@ -225,12 +307,12 @@ export async function runDealSourcingPipeline(
   return {
     parsing_json,
     thesis_fit_json,
-    founder_signal_json,
-    traction_signal_json,
-    problem_quality_3c_json,
-    solution_defensibility_json,
+    founder_signal_json: enriched_founder_signal_json,
+    traction_signal_json: enriched_traction_signal_json,
+    problem_quality_3c_json: enriched_problem_quality_3c_json,
+    solution_defensibility_json: enriched_solution_defensibility_json,
     market_power_json: null,
-    core_assumption_json,
+    core_assumption_json: enriched_core_assumption_json,
     thesis_fit_score,
     founder_signal_score,
     traction_signal_score,
