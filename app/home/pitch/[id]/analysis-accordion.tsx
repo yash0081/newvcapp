@@ -47,7 +47,8 @@ function DetailsContent({
   text: string;
   sectionKey?: keyof StructuredAnalysis;
 }) {
-  const isAssumptions = sectionKey === "assumptions";
+  const isAssumptionsOrQuestions =
+    sectionKey === "assumptions" || sectionKey === "questions";
   const blocks = text.split(/\n\n+/).filter(Boolean);
   return (
     <div className="space-y-3 text-sm text-gray-600 leading-relaxed">
@@ -65,8 +66,8 @@ function DetailsContent({
                   </p>
                 );
               }
-              // Standalone line: bold only in non-assumptions sections; assumptions show as normal prose
-              if (!isAssumptions) {
+              // Standalone line: bold only in problem/solution/founder/traction/thesis; assumptions/questions show as normal prose
+              if (!isAssumptionsOrQuestions) {
                 return (
                   <p key={j} className="font-semibold text-gray-800 pt-0.5">
                     {line}

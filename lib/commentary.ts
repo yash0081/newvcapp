@@ -714,16 +714,9 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
     interrogations.forEach((item, idx) => {
       const r = item as Record<string, unknown>;
       const assumption = getStr(r, "assumption");
-      const steps = r.procedure_steps as Record<string, unknown> | undefined;
       const killer = r.killer_questions as Record<string, unknown> | undefined;
       const lines: string[] = [];
       if (assumption) lines.push(`Assumption ${idx + 1}: ${assumption}`);
-      if (steps) {
-        const mustTrue = getStr(steps, "must_true");
-        const inversion = getStr(steps, "inversion");
-        if (mustTrue) lines.push(`Must-true: ${mustTrue}`);
-        if (inversion) lines.push(`Inversion: ${inversion}`);
-      }
       if (killer) {
         const evQ = getStr(killer, "evidence");
         const behQ = getStr(killer, "behavioral_proof");
@@ -774,12 +767,7 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
     if (credQs.length > 0) {
       questionsDetails.push("Conviction delta questions\n" + credQs.join("\n"));
     }
-    const secondOrder = Array.isArray(structuralQ.second_order_dependencies)
-      ? arrOfStrings(structuralQ.second_order_dependencies)
-      : [];
-    if (secondOrder.length > 0) {
-      questionsDetails.push("Second-order dependencies\n" + secondOrder.join("\n"));
-    }
+    // We intentionally do not surface second_order_dependencies in the UI.
   }
 
   // No summary text for questions section — only show detailed questions when expanded.
