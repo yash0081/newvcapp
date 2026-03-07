@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { StructuredAnalysis } from "@/lib/commentary";
-import { ChevronDown, ChevronRight, Lightbulb, Users, TrendingUp, Target, Puzzle, Scale } from "lucide-react";
+import { ChevronDown, ChevronRight, Lightbulb, Users, TrendingUp, Target, Puzzle, Scale, HelpCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const SECTION_CONFIG: { key: keyof StructuredAnalysis; label: string; icon: React.ElementType }[] = [
@@ -12,6 +12,7 @@ const SECTION_CONFIG: { key: keyof StructuredAnalysis; label: string; icon: Reac
   { key: "traction", label: "Traction", icon: TrendingUp },
   { key: "assumptions", label: "Assumptions", icon: Puzzle },
   { key: "thesisFit", label: "Thesis fit", icon: Scale },
+   { key: "questions", label: "Questions to ask", icon: HelpCircle },
 ];
 
 /** Match "Label: " or "Label; " or "Label;" for bold prefix; ensures a space before the value. */

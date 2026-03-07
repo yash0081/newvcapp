@@ -540,6 +540,7 @@ export interface StructuredAnalysis {
   traction: AnalysisSection;
   assumptions: AnalysisSection;
   thesisFit: AnalysisSection;
+  questions: AnalysisSection;
 }
 
 function buildSection(summaryParts: string[], detailsParts: string[]): AnalysisSection {
@@ -702,6 +703,87 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
     if (delta) assumptionsDetails.push("Conviction delta\n" + delta);
   }
 
+  // Question generation outputs (from PROMPT_QUESTIONS_FIRST_ORDER / PROMPT_QUESTIONS_STRUCTURAL)
+  const questionsSummary: string[] = [];
+  const questionsDetails: string[] = [];
+  const firstOrderQ = core?.first_order_questions as Record<string, unknown> | undefined;
+  if (firstOrderQ) {
+    const interrogations = Array.isArray(firstOrderQ.critical_assumption_interrogation)
+      ? (firstOrderQ.critical_assumption_interrogation as unknown[])
+      : [];
+    interrogations.forEach((item, idx) => {
+      const r = item as Record<string, unknown>;
+      const assumption = getStr(r, "assumption");
+      const steps = r.procedure_steps as Record<string, unknown> | undefined;
+      const killer = r.killer_questions as Record<string, unknown> | undefined;
+      const lines: string[] = [];
+      if (assumption) lines.push(`Assumption ${idx + 1}: ${assumption}`);
+      if (steps) {
+        const mustTrue = getStr(steps, "must_true");
+        const inversion = getStr(steps, "inversion");
+        if (mustTrue) lines.push(`Must-true: ${mustTrue}`);
+        if (inversion) lines.push(`Inversion: ${inversion}`);
+      }
+      if (killer) {
+        const evQ = getStr(killer, "evidence");
+        const behQ = getStr(killer, "behavioral_proof");
+        const failQ = getStr(killer, "failure_boundary");
+        const contraQ = getStr(killer, "contradictory_signal");
+        if (evQ) lines.push(`Evidence question: ${evQ}`);
+        if (behQ) lines.push(`Behavioral proof question: ${behQ}`);
+        if (failQ) lines.push(`Failure boundary question: ${failQ}`);
+        if (contraQ) lines.push(`Contradictory signal question: ${contraQ}`);
+      }
+      if (lines.length) questionsDetails.push(lines.join("\n"));
+    });
+    const linchpinQ = firstOrderQ.linchpin_questions as Record<string, unknown> | undefined;
+    if (linchpinQ) {
+      const lines: string[] = [];
+      const real = getStr(linchpinQ, "real_world_evidence");
+      const structural = getStr(linchpinQ, "structural_dependency_test");
+      const market = getStr(linchpinQ, "market_contradiction");
+      if (real) lines.push(`Linchpin real-world evidence: ${real}`);
+      if (structural) lines.push(`Linchpin structural dependency test: ${structural}`);
+      if (market) lines.push(`Linchpin market contradiction: ${market}`);
+      if (lines.length) questionsDetails.push(lines.join("\n"));
+    }
+  }
+
+  const structuralQ = core?.structural_auditor_questions as Record<string, unknown> | undefined;
+  if (structuralQ) {
+    const dep = structuralQ.dependency_chain_questions as Record<string, unknown> | undefined;
+    if (dep) {
+      const lines: string[] = [];
+      const weakest = getStr(dep, "weakest_link_verification");
+      const unvalidated = getStr(dep, "unvalidated_step_check");
+      const cascade = getStr(dep, "cascade_failure_test");
+      if (weakest) lines.push(`Weakest-link verification: ${weakest}`);
+      if (unvalidated) lines.push(`Unvalidated-step check: ${unvalidated}`);
+      if (cascade) lines.push(`Cascade-failure test: ${cascade}`);
+      if (lines.length) questionsDetails.push(lines.join("\n"));
+    }
+    const failureQs = Array.isArray(structuralQ.failure_mode_questions)
+      ? arrOfStrings(structuralQ.failure_mode_questions)
+      : [];
+    if (failureQs.length > 0) {
+      questionsDetails.push("Failure mode questions\n" + failureQs.join("\n"));
+    }
+    const credQs = Array.isArray(structuralQ.conviction_delta_credibility_questions)
+      ? arrOfStrings(structuralQ.conviction_delta_credibility_questions)
+      : [];
+    if (credQs.length > 0) {
+      questionsDetails.push("Conviction delta questions\n" + credQs.join("\n"));
+    }
+    const secondOrder = Array.isArray(structuralQ.second_order_dependencies)
+      ? arrOfStrings(structuralQ.second_order_dependencies)
+      : [];
+    if (secondOrder.length > 0) {
+      questionsDetails.push("Second-order dependencies\n" + secondOrder.join("\n"));
+    }
+  }
+
+  // No summary text for questions section — only show detailed questions when expanded.
+
   const t2 = input.thesis_fit_json as Record<string, unknown> | undefined;
   const thesisSummary: string[] = [];
   const thesisDetails: string[] = [];
@@ -745,6 +827,10 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
     thesisFit: buildSection(
       thesisSummary.length > 0 ? thesisSummary : ["No thesis evaluation."],
       thesisDetails
+    ),
+    questions: buildSection(
+      [],
+      questionsDetails
     ),
   };
 }

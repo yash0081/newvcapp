@@ -25,6 +25,8 @@ import {
   SUMMARY_PROBLEM_PROMPT,
   SUMMARY_SOLUTION_PROMPT,
   SUMMARY_ASSUMPTIONS_PROMPT,
+  PROMPT_QUESTIONS_FIRST_ORDER,
+  PROMPT_QUESTIONS_STRUCTURAL,
 } from "@/lib/deal-sourcing-prompts";
 
 export interface DealSourcingResult {
@@ -282,6 +284,19 @@ export async function runDealSourcingPipeline(
       "risk_summary"
     )) ?? "";
 
+  // ——— Question generation via assumptions JSON (Gemini 3 Flash) ———
+  const first_order_questions_json = await runWithTextMulti(
+    PROMPT_QUESTIONS_FIRST_ORDER,
+    [{ label: "parsed_assumptions_json", value: core_assumption_json }],
+    "flash"
+  );
+
+  const structural_questions_json = await runWithTextMulti(
+    PROMPT_QUESTIONS_STRUCTURAL,
+    [{ label: "parsed_assumptions_json", value: core_assumption_json }],
+    "flash"
+  );
+
   const enriched_founder_signal_json = {
     per_founder: perFounderResults,
     collective: founderBCheck,
@@ -306,6 +321,8 @@ export async function runDealSourcingPipeline(
   const enriched_core_assumption_json = {
     ...(core_assumption_json as Record<string, unknown>),
     summary_text: assumptions_summary_text,
+    first_order_questions: first_order_questions_json,
+    structural_auditor_questions: structural_questions_json,
   };
 
   // V2: no market phase; composite over 5 dimensions

@@ -538,3 +538,87 @@ JSON
 {
   "risk_summary": "string (3-4 lines of clinical prose focusing on validated fragility, failure modes, and the pivotal test for founders)"
 }`;
+
+// ——— Question Generation Prompts (Gemini 3 Flash) ———
+
+export const PROMPT_QUESTIONS_FIRST_ORDER = `You are a Venture Capital Interrogator. Your task is to execute a specific 4-step questioning procedure on a startup's core assumptions.
+
+**PROCEDURE:**
+
+1. **Rewrite as "Must-True":** Convert the assumption into a statement that must be 100% accurate for the deal to work.
+2. **Identify the Inversion:** Find the fastest way that statement could be false.
+3. **Generate Questions via Critical Operators:**
+   * **Evidence:** What data proves the claim right now?
+   * **Behavioral Proof:** What % of users are actually doing this?
+   * **Failure Boundary:** At what point does the claim stop holding?
+   * **Contradictory Signal:** What metric would prove this is wrong?
+
+**EXAMPLES FOR THE MODEL:**
+
+* *Assumption:* "Enterprises will replace manual SDRs with our agent."
+* *Must-True:* Enterprises are willing to fully automate outbound revenue.
+* *Inversion:* Enterprises fear brand damage and prefer human-in-the-loop.
+* *Evidence Question:* "What specific security or brand-safety audit results do you have from a Fortune 500 client?"
+* *Behavioral Question:* "What % of users have 'Full Autonomy' enabled versus 'Draft Only' mode?"
+
+**INPUT:** {parsed_assumptions_json}
+
+**OUTPUT SCHEMA:**
+
+JSON
+{
+  "critical_assumption_interrogation": [
+    {
+      "assumption": "string",
+      "procedure_steps": {
+        "must_true": "string",
+        "inversion": "string"
+      },
+      "killer_questions": {
+        "evidence": "string",
+        "behavioral_proof": "string",
+        "failure_boundary": "string",
+        "contradictory_signal": "string"
+      }
+    }
+  ],
+  "linchpin_questions": {
+    "real_world_evidence": "string",
+    "structural_dependency_test": "string",
+    "market_contradiction": "string"
+  }
+}`;
+
+export const PROMPT_QUESTIONS_STRUCTURAL = `You are a VC Risk Architect. Your goal is to identify "Second-Order" risks by auditing the dependency chain and failure mechanisms.
+
+**PROCEDURE:**
+
+1. **Failure Mechanism Inversion:** Convert the failure mode (how the company dies) into a verification question.
+2. **Dependency Chain Audit:** Identify the weakest link. Generate questions for:
+   * The weakest dependency.
+   * The unvalidated production step.
+   * The consequence of a single-step failure.
+3. **Conviction Delta:** Convert the gap between "Founder Claim" and "Market Reality" into a credibility question.
+
+**EXAMPLES FOR THE MODEL:**
+
+* *Failure Mode:* "High Churn due to Integration Friction."
+* *Verification Question:* "What is the average 'Time to Value' (TTV) in hours for your last 5 customers, and where did they get stuck?"
+* *Dependency Chain:* (API -> Clean Data -> Prediction).
+* *Weakest Link Question:* "Since you depend on [Third Party API], what is your fallback if their latency exceeds 500ms or their pricing doubles?"
+
+**INPUT:** {parsed_assumptions_json}
+
+**OUTPUT SCHEMA:**
+
+JSON
+{
+  "dependency_chain_questions": {
+    "weakest_link_verification": "string",
+    "unvalidated_step_check": "string",
+    "cascade_failure_test": "string"
+  },
+  "failure_mode_questions": ["string"],
+  "conviction_delta_credibility_questions": ["string"],
+  "second_order_dependencies": ["string"]
+}`;
