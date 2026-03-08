@@ -1,13 +1,13 @@
 import { GoogleGenerativeAI, type GenerativeModel } from "@google/generative-ai";
 
-// V2: Gemini models for main pipeline + Gemma model for summaries.
+// V2: Gemini models for main pipeline + summary model.
 const FLASH_LITE = process.env.GEMINI_MODEL_FLASH_LITE ?? "gemini-3.1-flash-lite-preview";
 const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH ?? "gemini-3-flash-preview";
 
-// Gemini model used for JSON aggregation summaries (e.g. Gemini 2.5 Flash Lite).
+// Gemini model used for JSON aggregation summaries (e.g. Gemini 3.1 Flash Lite or 2.5 Flash).
 // MUST be set explicitly in the environment; no silent default.
 if (!process.env.GEMINI_MODEL_FLASH_SUMMARY) {
-  throw new Error("GEMINI_MODEL_FLASH_SUMMARY is not set (e.g. gemini-2.5-flash-lite).");
+  throw new Error("GEMINI_MODEL_FLASH_SUMMARY is not set (e.g. gemini-3.1-flash-lite-preview or gemini-2.5-flash).");
 }
 export const GEMINI_MODEL_FLASH_SUMMARY = process.env.GEMINI_MODEL_FLASH_SUMMARY;
 

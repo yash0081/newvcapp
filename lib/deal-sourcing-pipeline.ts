@@ -181,7 +181,7 @@ export async function runDealSourcingPipeline(
     "stage_adjusted_signal_score",
   ]);
 
-  // ——— Phase 3C: Problem (3 Flash) ———
+  // ——— Phase 3C: Problem (3.1 Flash Lite) ———
   const problemInput = {
     problem: parsing.problem,
     company_overview: parsing.company_overview,
@@ -192,7 +192,7 @@ export async function runDealSourcingPipeline(
       { label: "parsed_startup_data", value: problemInput },
       { label: "company_name", value: companyName },
     ],
-    "flash"
+    "flash_lite"
   );
 
   const problem3C = problem_quality_3c_json as Record<string, unknown>;
@@ -203,7 +203,7 @@ export async function runDealSourcingPipeline(
     "venture_scale_plausibility",
   ]);
 
-  // ——— Phase 3D: Solution (3 Flash) ———
+  // ——— Phase 3D: Solution (3.1 Flash Lite) ———
   const solutionInput = {
     solution: parsing.solution,
     company_overview: parsing.company_overview,
@@ -214,7 +214,7 @@ export async function runDealSourcingPipeline(
       { label: "parsed_startup_data", value: solutionInput },
       { label: "company_name", value: companyName },
     ],
-    "flash"
+    "flash_lite"
   );
 
   const solution3D = solution_defensibility_json as Record<string, unknown>;
