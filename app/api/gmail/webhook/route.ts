@@ -1,6 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getGmailClient, fetchNewEmails } from "@/lib/gmail";
-import { processPitchDecksForConnection } from "@/lib/process-pitch-decks";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(request: NextRequest) {
@@ -100,21 +99,23 @@ export async function POST(request: NextRequest) {
       .update({ history_id: result.newHistoryId })
       .eq("id", conn.id);
 
-    // Run pitch deck scoring in-process (no fetch to same app — avoids ECONNRESET on Vercel)
-    if (newMessageIds.length > 0) {
-      try {
-        await processPitchDecksForConnection(
-          admin,
-          {
-            id: conn.id,
-            user_id: conn.user_id,
-            access_token: conn.access_token,
-            refresh_token: conn.refresh_token ?? null,
+    // Trigger pitch deck scoring for the new emails (fire-and-forget; don't block webhook response)
+    if (newMessageIds.length > 0 && process.env.INTERNAL_SECRET) {
+      const baseUrl = process.env.VERCEL_URL
+        ? `https://${process.env.VERCEL_URL}`
+        : process.env.NEXT_PUBLIC_APP_URL;
+      if (baseUrl) {
+        fetch(`${baseUrl}/api/gmail/process-pitch-decks`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-internal-secret": process.env.INTERNAL_SECRET,
           },
-          newMessageIds
-        );
-      } catch (err) {
-        console.error("Webhook: pitch deck scoring failed", err);
+          body: JSON.stringify({
+            messageIds: newMessageIds,
+            emailAddress: conn.email,
+          }),
+        }).catch((err) => console.error("Webhook: trigger scoring failed", err));
       }
     }
 
