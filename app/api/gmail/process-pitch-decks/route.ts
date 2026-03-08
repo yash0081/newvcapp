@@ -58,10 +58,8 @@ export async function POST(request: NextRequest) {
 
   if (result.total === 0 && messageIdsFilter?.length) {
     return NextResponse.json({
-      processed: 0,
-      total: 0,
-      message: "No matching emails to process",
       ...result,
+      message: "No matching emails to process",
     });
   }
 
