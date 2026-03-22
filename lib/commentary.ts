@@ -4,6 +4,8 @@
  * Supports legacy pipeline fields where present.
  */
 
+import { normalizeScore0to10 } from "@/lib/model-scores";
+
 export interface CommentaryInputs {
   parsing_json: Record<string, unknown> | null;
   problem_extraction_json?: Record<string, unknown> | null;
@@ -19,6 +21,16 @@ export interface CommentaryInputs {
   solution_defensibility_json?: Record<string, unknown> | null;
   market_power_json?: Record<string, unknown> | null;
   core_assumption_json?: Record<string, unknown> | null;
+  /** V2-2 aggregation prompt outputs (previews); separate from agent JSONs. */
+  pipeline_summaries?: {
+    founder?: string;
+    traction?: string;
+    problem?: string;
+    solution?: string;
+    assumptions?: string;
+  } | null;
+  questions_first_order_json?: Record<string, unknown> | null;
+  questions_structural_json?: Record<string, unknown> | null;
 }
 
 const SECTION_SEP = "\n\n";
@@ -27,6 +39,78 @@ function getStr(obj: Record<string, unknown> | null, key: string): string | null
   if (!obj) return null;
   const v = obj[key];
   return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+/** Thesis UI: segment first, score in parentheses (no "Score:" — avoids accordion bold-label bugs). */
+function formatThesisFitEvaluationLines(
+  ind?: Record<string, unknown>,
+  stg?: Record<string, unknown>,
+  fund?: Record<string, unknown>
+): string[] {
+  const lines: string[] = [];
+  if (ind && (ind.score != null || getStr(ind, "startup_industry"))) {
+    const label = getStr(ind, "startup_industry") || "—";
+    const sc = ind.score;
+    lines.push(`Industry — ${label} (${sc ?? "—"}/10)`);
+  }
+  if (stg && (stg.score != null || getStr(stg, "stage"))) {
+    const label = getStr(stg, "stage") || "—";
+    const sc = stg.score;
+    lines.push(`Stage — ${label} (${sc ?? "—"}/10)`);
+  }
+  if (fund && (fund.score != null || getStr(fund, "funding"))) {
+    const label = getStr(fund, "funding") || "—";
+    const sc = fund.score;
+    lines.push(`Funding fit — ${label} (${sc ?? "—"}/10)`);
+  }
+  return lines;
+}
+
+/** Build thesis `details` text: optional preamble, then `Scores` + dimension lines (UI shows scores at bottom). */
+function buildThesisDetailsBodyWithScores(args: {
+  evalLines: string[];
+  scorePreamble: string | null;
+  hasStructuredScores: boolean;
+}): string {
+  const { evalLines, scorePreamble, hasStructuredScores } = args;
+  const chunks: string[] = [];
+  if (scorePreamble && !hasStructuredScores) chunks.push(scorePreamble);
+  if (evalLines.length > 0) {
+    chunks.push(`Scores\n${evalLines.join("\n")}`);
+  }
+  return chunks.join("\n\n");
+}
+
+/**
+ * Models often prepend "Industry 5, Stage 1, Funding 1" before real reasoning.
+ * Keep summary prose-first; optional score-only preamble is returned for details (append after structured lines).
+ */
+function partitionThesisAlignmentReasoning(reasoning: string): {
+  prose: string;
+  scorePreamble: string | null;
+} {
+  const trimmed = reasoning.trim();
+  if (!trimmed) return { prose: "", scorePreamble: null };
+
+  const blocks = trimmed.split(/\n\n+/);
+  if (blocks.length >= 2) {
+    const first = blocks[0];
+    const looksLikeScoreDump =
+      first.length < 520 &&
+      /\d/.test(first) &&
+      /industry/i.test(first) &&
+      /stage/i.test(first) &&
+      /fund/i.test(first) &&
+      first.split(/[.!?]+/).filter((s) => s.trim().length > 20).length <= 2;
+    if (looksLikeScoreDump) {
+      return {
+        prose: blocks.slice(1).join("\n\n").trim(),
+        scorePreamble: first.trim(),
+      };
+    }
+  }
+
+  return { prose: trimmed, scorePreamble: null };
 }
 
 function pickCompanyName(input: CommentaryInputs): string | null {
@@ -42,6 +126,54 @@ function arrOfStrings(val: unknown): string[] {
   return val.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((s) => s.trim());
 }
 
+/** Remove common model echo where the assistant pastes the system prompt / schema after the real answer. */
+export function stripModelPromptEcho(text: string): string {
+  if (!text || typeof text !== "string") return text;
+  let out = text;
+  const cutPatterns = [
+    /\n+(You are a Venture Capital[\s\S]*)$/i,
+    /\n+(INPUTS:[\s\S]*)$/i,
+    /\n+(\*{0,2}OUTPUT SCHEMA\*{0,2}:[\s\S]*)$/i,
+    /\n+(OUTPUT SCHEMA:[\s\S]*)$/i,
+    /\n+(SEARCH EXECUTION LIST[\s\S]*)$/i,
+    /\n+(RULES:[\s\S]*)$/i,
+    /\n+(CONSTRAINTS:[\s\S]*)$/i,
+  ];
+  for (const re of cutPatterns) {
+    out = out.replace(re, "").trimEnd();
+  }
+  return out;
+}
+
+/** Keep aggregation / preview summaries short (UI); does not alter "No summary." */
+export function clampSummarySentences(text: string, maxSentences = 3): string {
+  const t = stripModelPromptEcho(text).trim();
+  if (!t || t === "No summary.") return text;
+  const parts = t.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [t];
+  const trimmed = parts.map((s) => s.trim()).filter(Boolean);
+  if (trimmed.length <= maxSentences) return trimmed.join(" ");
+  return trimmed.slice(0, maxSentences).join(" ");
+}
+
+export function sanitizeStructuredAnalysis(s: StructuredAnalysis): StructuredAnalysis {
+  const mapSection = (sec: AnalysisSection): AnalysisSection => ({
+    summary:
+      sec.summary === "No summary."
+        ? sec.summary
+        : clampSummarySentences(sec.summary, 3),
+    details: stripModelPromptEcho(sec.details),
+  });
+  return {
+    problem: mapSection(s.problem),
+    solution: mapSection(s.solution),
+    founderTeam: mapSection(s.founderTeam),
+    traction: mapSection(s.traction),
+    assumptions: mapSection(s.assumptions),
+    thesisFit: mapSection(s.thesisFit),
+    questions: mapSection(s.questions),
+  };
+}
+
 /** Format an evidence object: only non-null/non-empty; optional label map for keys. */
 function formatEvidence(
   obj: Record<string, unknown> | null | undefined,
@@ -53,8 +185,22 @@ function formatEvidence(
     if (value === null || value === undefined) continue;
     const label = keyLabels?.[key] ?? key.replace(/_/g, " ");
     if (Array.isArray(value)) {
-      const strs = arrOfStrings(value);
-      if (strs.length > 0) lines.push(`${label}: ${strs.join("; ")}`);
+      if (value.length === 0) continue;
+      const first = value[0];
+      if (typeof first === "object" && first !== null && !Array.isArray(first)) {
+        const rows = value.map((item, i) => {
+          const o = item as Record<string, unknown>;
+          const name = getStr(o, "name") ?? `Item ${i + 1}`;
+          const cat = getStr(o, "category");
+          const threat = getStr(o, "threat_assessment");
+          const bits = [name, cat, threat].filter(Boolean);
+          return bits.join(" — ");
+        });
+        lines.push(`${label}:\n  ${rows.join("\n  ")}`);
+      } else {
+        const strs = arrOfStrings(value);
+        if (strs.length > 0) lines.push(`${label}: ${strs.join("; ")}`);
+      }
     } else if (typeof value === "boolean") {
       lines.push(`${label}: ${value ? "Yes" : "No"}`);
     } else if (typeof value === "string" && value.trim()) {
@@ -90,10 +236,15 @@ function scoresLine(obj: Record<string, unknown> | null | undefined, keys: strin
   const parts: string[] = [];
   for (const k of keys) {
     const v = obj[k];
-    if (typeof v === "number" && !Number.isNaN(v)) parts.push(`${k.replace(/_/g, " ")}: ${v}`);
-    else if (typeof v === "string") {
-      const n = parseFloat(v);
-      if (!Number.isNaN(n)) parts.push(`${k.replace(/_/g, " ")}: ${n}`);
+    if (typeof v === "number" && !Number.isNaN(v)) {
+      const n = normalizeScore0to10(v);
+      parts.push(`${k.replace(/_/g, " ")}: ${Number.isInteger(n) ? n : n.toFixed(1)}`);
+    } else if (typeof v === "string") {
+      const parsed = parseFloat(v);
+      if (!Number.isNaN(parsed)) {
+        const n = normalizeScore0to10(parsed);
+        parts.push(`${k.replace(/_/g, " ")}: ${Number.isInteger(n) ? n : n.toFixed(1)}`);
+      }
     }
   }
   const completeness = getStr(obj, "signal_completeness");
@@ -379,19 +530,32 @@ function buildThesis(input: CommentaryInputs, out: string[]) {
   const ind = t2.industry_evaluation as Record<string, unknown> | undefined;
   const stg = t2.stage_evaluation as Record<string, unknown> | undefined;
   const fund = t2.funding_evaluation as Record<string, unknown> | undefined;
+  const rawReasoning =
+    getStr(t2, "overall_thesis_alignment_reasoning") ?? getStr(t2, "thesis_alignment_reasoning");
+
+  let scorePreamble: string | null = null;
+  if (rawReasoning) {
+    const part = partitionThesisAlignmentReasoning(rawReasoning);
+    scorePreamble = part.scorePreamble;
+    if (part.prose) out.push("Thesis fit reasoning\n" + part.prose);
+  }
+
   const hasV2Scores = ind || stg || fund;
-  if (hasV2Scores) {
-    const parts: string[] = [];
-    if (ind && (ind.score != null || ind.startup_industry)) parts.push(`Industry: score ${ind.score ?? "—"}${getStr(ind, "startup_industry") ? `, ${ind.startup_industry}` : ""}`);
-    if (stg && (stg.score != null || stg.stage)) parts.push(`Stage: score ${stg.score ?? "—"}${getStr(stg, "stage") ? `, ${stg.stage}` : ""}`);
-    if (fund && (fund.score != null || fund.funding)) parts.push(`Funding: score ${fund.score ?? "—"}${getStr(fund, "funding") ? `, ${fund.funding}` : ""}`);
-    if (parts.length > 0) out.push("Thesis fit scores\n" + parts.join(" · "));
+  const evalLines = hasV2Scores ? formatThesisFitEvaluationLines(ind, stg, fund) : [];
+  if (evalLines.length > 0) {
+    out.push(`Scores\n${evalLines.join("\n")}`);
   } else {
     const scoreStr = scoresLine(t2, ["sector_fit_score", "stage_fit_score", "geo_fit_score", "check_size_fit_score"]);
-    if (scoreStr) out.push("Thesis fit scores\n" + scoreStr);
+    if (scoreStr) out.push(`Scores\n${scoreStr}`);
   }
-  const reasoning = getStr(t2, "overall_thesis_alignment_reasoning") ?? getStr(t2, "thesis_alignment_reasoning");
-  if (reasoning) out.push("Thesis fit reasoning\n" + reasoning);
+
+  if (scorePreamble && !hasV2Scores) {
+    const legacy = scoresLine(t2, ["sector_fit_score", "stage_fit_score", "geo_fit_score", "check_size_fit_score"]);
+    if (!legacy) {
+      out.push(`Scores\n${scorePreamble}`);
+    }
+  }
+
   if (t2.auto_reject_flag === true) out.push("Thesis auto-reject\nThis deal was auto-rejected (thesis mismatch).");
 }
 
@@ -554,7 +718,8 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const p3 = input.problem_quality_3c_json as Record<string, unknown> | undefined;
   const problemObj = input.parsing_json?.problem as Record<string, unknown> | undefined;
   const sigP = p3?.signal_interpretation as Record<string, unknown> | undefined;
-  const problemSummaryFromAggregation = getStr(p3 ?? null, "summary_text");
+  const problemSummaryFromAggregation =
+    getStr(input.pipeline_summaries ?? null, "problem") ?? getStr(p3 ?? null, "summary_text");
   const problemSummary =
     problemSummaryFromAggregation ??
     getStr(sigP ?? null, "problem_quality_summary") ??
@@ -581,7 +746,8 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const solutionObj = input.parsing_json?.solution as Record<string, unknown> | undefined;
   const s3 = input.solution_defensibility_json as Record<string, unknown> | undefined;
   const sigS = s3?.signal_interpretation as Record<string, unknown> | undefined;
-  const solutionSummaryFromAggregation = getStr(s3 ?? null, "summary_text");
+  const solutionSummaryFromAggregation =
+    getStr(input.pipeline_summaries ?? null, "solution") ?? getStr(s3 ?? null, "summary_text");
   const solutionSummaryText =
     solutionSummaryFromAggregation ??
     getStr(sigS ?? null, "solution_summary") ??
@@ -599,6 +765,7 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const solutionDetails: string[] = [];
   if (solAnalysis) solutionDetails.push("Analysis\n" + formatEvidence(solAnalysis, { stated_solution_ref: "Stated solution", technical_moat_evidence: "Technical moat", competitor_landscape: "Competitors", differentiation_proof_points: "Differentiation" }).join("\n"));
   if (defSignals) solutionDetails.push("Defensibility\n" + formatEvidence(defSignals).join("\n"));
+  if (sigS) solutionDetails.push("Signal interpretation\n" + formatEvidence(sigS).join("\n"));
   const evS = s3?.solution_evidence as Record<string, unknown> | undefined;
   if (evS && !solAnalysis) solutionDetails.push("Evidence\n" + formatEvidence(evS).join("\n"));
   const sScores = (s3?.scores ?? s3) as Record<string, unknown> | undefined;
@@ -619,7 +786,8 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const f3 = input.founder_signal_json as Record<string, unknown> | undefined;
   const collective = f3?.collective as Record<string, unknown> | undefined;
   const sigInt = collective?.signal_interpretation as Record<string, unknown> | undefined;
-  const founderSummaryFromAggregation = getStr(f3 ?? null, "summary_text");
+  const founderSummaryFromAggregation =
+    getStr(input.pipeline_summaries ?? null, "founder") ?? getStr(f3 ?? null, "summary_text");
   const founderSummaryText =
     founderSummaryFromAggregation ??
     getStr(sigInt ?? null, "founder_signal_summary") ??
@@ -654,7 +822,8 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   if (metricsVal) { add(metricsVal, "ARR", "arr"); add(metricsVal, "Customers", "customers"); add(metricsVal, "Revenue", "revenue"); }
   if (fundVal) { add(fundVal, "Raising", "raising_amount"); const r = getStr(fundVal, "round_type_or_stage") ?? getStr(fundVal, "round_type"); if (r) fromDeckTraction.push(`Round: ${r}`); }
   const t3 = input.traction_signal_json as Record<string, unknown> | undefined;
-  const tractionSummaryFromAggregation = getStr(t3 ?? null, "summary_text");
+  const tractionSummaryFromAggregation =
+    getStr(input.pipeline_summaries ?? null, "traction") ?? getStr(t3 ?? null, "summary_text");
   const tSummaryText =
     tractionSummaryFromAggregation ??
     getStr(t3 ?? null, "signal_summary") ??
@@ -675,7 +844,8 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const assumptionsSummary: string[] = [];
   const assumptionsDetails: string[] = [];
   // Prefer the aggregation prompt's prose summary (no bullets); fall back to raw assumptions only if missing.
-  const assumptionsSummaryText = getStr(core ?? null, "summary_text");
+  const assumptionsSummaryText =
+    getStr(input.pipeline_summaries ?? null, "assumptions") ?? getStr(core ?? null, "summary_text");
   if (assumptionsSummaryText) {
     assumptionsSummary.push(assumptionsSummaryText);
   }
@@ -706,7 +876,8 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   // Question generation outputs (from PROMPT_QUESTIONS_FIRST_ORDER / PROMPT_QUESTIONS_STRUCTURAL)
   const questionsSummary: string[] = [];
   const questionsDetails: string[] = [];
-  const firstOrderQ = core?.first_order_questions as Record<string, unknown> | undefined;
+  const firstOrderQ = (input.questions_first_order_json ??
+    core?.first_order_questions) as Record<string, unknown> | undefined;
   if (firstOrderQ) {
     const interrogations = Array.isArray(firstOrderQ.critical_assumption_interrogation)
       ? (firstOrderQ.critical_assumption_interrogation as unknown[])
@@ -742,7 +913,8 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
     }
   }
 
-  const structuralQ = core?.structural_auditor_questions as Record<string, unknown> | undefined;
+  const structuralQ = (input.questions_structural_json ??
+    core?.structural_auditor_questions) as Record<string, unknown> | undefined;
   if (structuralQ) {
     const dep = structuralQ.dependency_chain_questions as Record<string, unknown> | undefined;
     if (dep) {
@@ -776,22 +948,36 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const thesisSummary: string[] = [];
   const thesisDetails: string[] = [];
   if (t2) {
-    const reasoning = getStr(t2, "overall_thesis_alignment_reasoning") ?? getStr(t2, "thesis_alignment_reasoning");
-    if (reasoning) thesisSummary.push(reasoning);
-    if (t2.auto_reject_flag === true) thesisSummary.push("Auto-reject: thesis mismatch.");
     const ind = t2.industry_evaluation as Record<string, unknown> | undefined;
     const stg = t2.stage_evaluation as Record<string, unknown> | undefined;
     const fund = t2.funding_evaluation as Record<string, unknown> | undefined;
-    if (ind || stg || fund) {
-      const parts: string[] = [];
-      if (ind) parts.push(`Industry: ${ind.score ?? "—"} ${getStr(ind, "startup_industry") ?? ""}`);
-      if (stg) parts.push(`Stage: ${stg.score ?? "—"} ${getStr(stg, "stage") ?? ""}`);
-      if (fund) parts.push(`Funding: ${fund.score ?? "—"} ${getStr(fund, "funding") ?? ""}`);
-      thesisDetails.push(parts.join("\n"));
+    const rawReasoning =
+      getStr(t2, "overall_thesis_alignment_reasoning") ?? getStr(t2, "thesis_alignment_reasoning");
+
+    if (rawReasoning) {
+      const { prose, scorePreamble } = partitionThesisAlignmentReasoning(rawReasoning);
+      if (prose) thesisSummary.push(prose);
+      const evalLines = formatThesisFitEvaluationLines(ind, stg, fund);
+      const body = buildThesisDetailsBodyWithScores({
+        evalLines,
+        scorePreamble,
+        hasStructuredScores: evalLines.length > 0,
+      });
+      if (body) thesisDetails.push(body);
+    } else {
+      const evalLines = formatThesisFitEvaluationLines(ind, stg, fund);
+      const body = buildThesisDetailsBodyWithScores({
+        evalLines,
+        scorePreamble: null,
+        hasStructuredScores: evalLines.length > 0,
+      });
+      if (body) thesisDetails.push(body);
     }
+
+    if (t2.auto_reject_flag === true) thesisSummary.push("Auto-reject: thesis mismatch.");
   }
 
-  return {
+  return sanitizeStructuredAnalysis({
     problem: buildSection(
       problemSummaryFromAggregation ? [problemSummaryFromAggregation] : [...fromDeckProblem, problemSummary ?? ""].filter(Boolean),
       problemDetails
@@ -820,7 +1006,7 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
       [],
       questionsDetails
     ),
-  };
+  });
 }
 
 /** Build a short preview string from structured analysis (e.g. for cards). */

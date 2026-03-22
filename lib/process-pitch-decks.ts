@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getGmailClient, getFullMessage, findPdfAttachments, getAttachment } from "@/lib/gmail";
 import { runDealSourcingPipeline } from "@/lib/deal-sourcing-pipeline";
+import { persistDealAnalysis } from "@/lib/persist-deal";
 
 const DEFAULT_MAX_PDF_BYTES = 10 * 1024 * 1024; // 10 MB
 const MIN_PDF_BYTES = 50 * 1024; // 50 KB
@@ -85,15 +86,6 @@ export async function processPitchDecksForConnection(
     emails = list;
   }
 
-  const emailIds = emails.map((e) => e.id);
-  const { data: existingResults } = await admin
-    .from("pitch_deck_results")
-    .select("email_id")
-    .in("email_id", emailIds);
-  const alreadyScored = new Set(
-    (existingResults ?? []).map((r) => (r as { email_id: string }).email_id)
-  );
-
   let processed = 0;
   let skippedNoPdf = 0;
   let skippedSize = 0;
@@ -103,12 +95,6 @@ export async function processPitchDecksForConnection(
 
   for (const email of emails) {
     try {
-      if (alreadyScored.has(email.id)) {
-        skippedAlreadyScored++;
-        debug.push({ gmail_message_id: email.gmail_message_id, reason: "already_scored" });
-        continue;
-      }
-
       const msg = await getFullMessage(gmail, email.gmail_message_id);
       const payload = msg.payload;
       if (!payload) {
@@ -138,33 +124,12 @@ export async function processPitchDecksForConnection(
 
       const result = await runDealSourcingPipeline(buffer, fundThesisStatement);
 
-      await admin
-        .from("pitch_deck_results")
-        .upsert(
-          {
-            email_id: email.id,
-            gmail_message_id: email.gmail_message_id,
-            gmail_attachment_id: first.attachmentId,
-            pdf_size_bytes: buffer.length,
-            parsing_json: result.parsing_json,
-            thesis_fit_json: result.thesis_fit_json,
-            founder_signal_json: result.founder_signal_json,
-            traction_signal_json: result.traction_signal_json,
-            problem_quality_3c_json: result.problem_quality_3c_json,
-            solution_defensibility_json: result.solution_defensibility_json,
-            market_power_json: result.market_power_json,
-            core_assumption_json: result.core_assumption_json,
-            thesis_fit_score: result.thesis_fit_score,
-            founder_signal_score: result.founder_signal_score,
-            traction_signal_score: result.traction_signal_score,
-            problem_quality_score: result.problem_quality_score,
-            solution_defensibility_score: result.solution_defensibility_score,
-            market_power_score: result.market_power_score,
-            composite_score: result.composite_score,
-            processed_at: new Date().toISOString(),
-          },
-          { onConflict: "email_id" }
-        );
+      await persistDealAnalysis({
+        admin,
+        userId: conn.user_id,
+        pdfUrl: null,
+        result,
+      });
       processed++;
       debug.push({ gmail_message_id: email.gmail_message_id, reason: "ok" });
     } catch (err) {
