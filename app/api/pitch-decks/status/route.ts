@@ -9,6 +9,7 @@ const STEP_ORDER = [
   "problem",
   "solution",
   "assumptions_questions",
+  "summaries",
 ] as const;
 
 export async function GET(request: NextRequest) {

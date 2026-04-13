@@ -1,146 +1,137 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { runDealSourcingPipeline, type PromptOutputStepName } from "@/lib/deal-sourcing-pipeline";
+import {
+  runDealSourcingPipeline,
+  type DealSourcingResult,
+  type PromptOutputStepName,
+  type PromptRunInputContext,
+} from "@/lib/deal-sourcing-pipeline";
+import type { DealSourcingPipelineStep } from "@/lib/deal-sourcing-types";
 import { persistDealAnalysis } from "@/lib/persist-deal";
+import { afterPersistIndexDealEmbedding } from "@/lib/similar-deals";
 
-export type PipelineStepId =
-  | "parse"
-  | "thesis"
-  | "founder"
-  | "traction"
-  | "problem"
-  | "solution"
-  | "assumptions_questions";
+export type { DealSourcingPipelineStep };
+export { PIPELINE_STEP_META } from "@/lib/deal-sourcing-types";
 
-const PLACEHOLDER_NAME = "Analyzing…";
+/** @deprecated Use DealSourcingPipelineStep */
+export type PipelineStepId = DealSourcingPipelineStep;
 
-/** Create one analysis run (deal + analysis + status) so we have an ID to track progress; pipeline runs in background and updates status when each prompt returns. */
-export async function createAnalysisShell(opts: {
-  admin: SupabaseClient;
-  userId: string;
-  pdfUrl?: string | null;
-}): Promise<{
-  dealId: string;
-  analysisId: string;
-  updateStatus: (step: PipelineStepId) => Promise<void>;
-}> {
-  const { admin, userId, pdfUrl } = opts;
+export type NdjsonProgressEvent =
+  | { type: "step"; step: DealSourcingPipelineStep }
+  | { type: "done"; dealId: string; analysisId: string }
+  | { type: "error"; message: string };
 
-  const { data: dealRow, error: dealError } = await admin
-    .from("deals")
-    .insert({
-      user_id: userId,
-      company_name: PLACEHOLDER_NAME,
-      website: null,
-      sector: null,
-      stage: null,
-      business_model: null,
-      geography: null,
-      deck_url: pdfUrl ?? null,
-    })
-    .select("id")
-    .single();
-
-  if (dealError || !dealRow) {
-    throw dealError ?? new Error("Failed to create deal");
-  }
-
-  const dealId = dealRow.id as string;
-
-  const { data: analysisRow, error: analysisError } = await admin
-    .from("deal_analyses")
-    .insert({
-      deal_id: dealId,
-      pipeline_version: 2,
-    })
-    .select("id")
-    .single();
-
-  if (analysisError || !analysisRow) {
-    throw analysisError ?? new Error("Failed to create deal_analyses row");
-  }
-
-  const analysisId = analysisRow.id as string;
-
-  await admin.from("analysis_status").insert({
-    analysis_id: analysisId,
-    status: "running",
-    current_step: null,
-  });
-
-  const updateStatus = async (step: PipelineStepId) => {
-    await admin
-      .from("analysis_status")
-      .update({
-        current_step: step,
-        status: "running",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("analysis_id", analysisId);
-  };
-
-  return { dealId, analysisId, updateStatus };
-}
-
-/** Run the pipeline and persist into the same deal/analysis. Calls updateStatus(step) after each prompt returns so the UI can show that step green. */
+/**
+ * Run pipeline and persist deal + analysis once at the end (no placeholder / shell rows).
+ * Intermediate prompt outputs are buffered and written to `deal_prompt_runs` after IDs exist.
+ */
 export async function runPipelineAndPersist(opts: {
   admin: SupabaseClient;
   userId: string;
-  dealId: string;
-  analysisId: string;
   pdfBuffer: Buffer;
   pdfUrl?: string | null;
   fundThesisStatement: string | null;
-  updateStatus: (step: PipelineStepId) => Promise<void>;
-}): Promise<void> {
-  const { admin, userId, dealId, analysisId, pdfBuffer, pdfUrl, fundThesisStatement, updateStatus } = opts;
+  onStep?: (step: DealSourcingPipelineStep) => void | Promise<void>;
+}): Promise<{ dealId: string; analysisId: string; result: DealSourcingResult }> {
+  const { admin, userId, pdfBuffer, pdfUrl, fundThesisStatement, onStep } = opts;
+
+  const promptOutputs: {
+    stepName: PromptOutputStepName;
+    output: unknown;
+    inputContext?: PromptRunInputContext | null;
+  }[] = [];
+
+  const persistPromptOutput = async (
+    stepName: PromptOutputStepName,
+    output: unknown,
+    inputContext?: PromptRunInputContext | null
+  ) => {
+    promptOutputs.push({ stepName, output, inputContext: inputContext ?? null });
+  };
+
+  const result = await runDealSourcingPipeline(
+    pdfBuffer,
+    fundThesisStatement,
+    onStep,
+    persistPromptOutput,
+    { admin, userId, excludeDealId: null }
+  );
+
+  const persisted = await persistDealAnalysis({
+    admin,
+    userId,
+    pdfUrl: pdfUrl ?? null,
+    result,
+  });
+
+  if (!persisted) {
+    throw new Error("Failed to persist analysis");
+  }
+
+  const { dealId, analysisId } = persisted;
 
   try {
-    const persistPromptOutput = async (stepName: PromptOutputStepName, output: unknown) => {
-      await admin.from("deal_prompt_runs").insert({
-        deal_id: dealId,
-        analysis_id: analysisId,
-        step_name: stepName,
-        model_name: null,
-        model_tier: null,
-        input_context: null,
-        output_json: output,
-        error_message: null,
-      });
-    };
-
-    const result = await runDealSourcingPipeline(
-      pdfBuffer,
-      fundThesisStatement,
-      updateStatus,
-      persistPromptOutput
-    );
-
-    await persistDealAnalysis({
-      admin,
-      userId,
-      pdfUrl: pdfUrl ?? null,
-      result,
-      existingDealId: dealId,
-      existingAnalysisId: analysisId,
-    });
-
-    await admin
-      .from("analysis_status")
-      .update({
-        status: "succeeded",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("analysis_id", analysisId);
-  } catch (err) {
-    console.error("Background analysis failed:", err);
-    await admin
-      .from("analysis_status")
-      .update({
-        status: "failed",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("analysis_id", analysisId);
-    throw err;
+    await afterPersistIndexDealEmbedding(admin, dealId);
+  } catch (e) {
+    console.warn("deal embedding index after persist:", e);
   }
-}
 
+  const insertPromptRun = async (args: {
+    step_name: string;
+    output_json: unknown;
+    input_context?: Record<string, unknown> | null;
+  }) => {
+    const { error } = await admin.from("deal_prompt_runs").insert({
+      deal_id: dealId,
+      analysis_id: analysisId,
+      step_name: args.step_name,
+      model_name: null,
+      model_tier: null,
+      input_context: args.input_context ?? null,
+      output_json: args.output_json,
+      error_message: null,
+    });
+    if (error) {
+      console.error("deal_prompt_runs insert failed:", args.step_name, error);
+    }
+  };
+
+  for (const row of promptOutputs) {
+    // Prompts V2-2: Founder A is one JSON per founder; Founder B is one collective JSON.
+    // Expand into separate deal_prompt_runs rows (full bundle still lives in raw_output + deal_pipeline_json_founder_signals).
+    if (row.stepName === "founder_signals") {
+      const bundle = row.output as {
+        per_founder?: unknown[];
+        collective?: unknown;
+      } | null;
+      const per = Array.isArray(bundle?.per_founder) ? bundle.per_founder : [];
+      for (let i = 0; i < per.length; i++) {
+        const item = per[i] as Record<string, unknown>;
+        const founderName =
+          typeof item.founder_name === "string" && item.founder_name.trim()
+            ? item.founder_name.trim()
+            : `founder_${i}`;
+        await insertPromptRun({
+          step_name: "founder_signal_a",
+          output_json: item,
+          input_context: { founder_index: i, founder_name: founderName },
+        });
+      }
+      if (bundle?.collective != null && typeof bundle.collective === "object") {
+        await insertPromptRun({
+          step_name: "founder_signal_b",
+          output_json: bundle.collective,
+        });
+      }
+      // Full `{ per_founder, collective }` is still in deal_analyses.raw_output and deal_pipeline_json_founder_signals
+      continue;
+    }
+
+    await insertPromptRun({
+      step_name: row.stepName,
+      output_json: row.output,
+      input_context: (row.inputContext as Record<string, unknown> | null | undefined) ?? null,
+    });
+  }
+
+  return { dealId, analysisId, result };
+}

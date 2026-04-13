@@ -2,26 +2,47 @@ import { VertexAI } from "@google-cloud/vertexai";
 import type { Tool } from "@google-cloud/vertexai";
 import { Storage } from "@google-cloud/storage";
 
-const PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT;
-const LOCATION = process.env.GOOGLE_CLOUD_LOCATION || "global";
-const GCS_BUCKET = process.env.VERTEX_GCS_BUCKET;
+type VertexEnv = {
+  projectId: string;
+  location: string;
+  gcsBucket: string | null;
+};
 
-if (!PROJECT_ID) {
-  throw new Error("GOOGLE_CLOUD_PROJECT is not set");
+function vertexEnv(): VertexEnv {
+  const projectId = process.env.GOOGLE_CLOUD_PROJECT;
+  if (!projectId) throw new Error("GOOGLE_CLOUD_PROJECT is not set");
+  return {
+    projectId,
+    location: process.env.GOOGLE_CLOUD_LOCATION || "global",
+    gcsBucket: process.env.VERTEX_GCS_BUCKET ?? null,
+  };
 }
 
-const vertex = new VertexAI({
-  project: PROJECT_ID,
-  location: LOCATION,
-});
+const vertexClients = new Map<string, VertexAI>();
+let storage: Storage | null = null;
 
-const storage = new Storage();
+function getVertexClient(): VertexAI {
+  const env = vertexEnv();
+  const key = `${env.projectId}:${env.location}`;
+  const cached = vertexClients.get(key);
+  if (cached) return cached;
+  const client = new VertexAI({
+    project: env.projectId,
+    location: env.location,
+  });
+  vertexClients.set(key, client);
+  return client;
+}
+
+function getStorageClient(): Storage {
+  if (!storage) storage = new Storage();
+  return storage;
+}
 
 /**
  * When true, Vertex `generateContent` requests attach the Google Search grounding tool
- * so the model can retrieve web results. Used for text steps (thesis, founders, …)
- * and, when enabled, **Phase 1 PDF parse** — `PROMPT_PHASE_1_PARSER` instructs searching
- * founders (e.g. CEO/CTO) to fill team fields, not only slide text.
+ * so the model can retrieve web results. Used for text steps (thesis, traction, resolve
+ * founding team, Founder A/B, …). **Phase 1 PDF parse** runs with search **off** (deck-only).
  *
  * @see https://cloud.google.com/vertex-ai/generative-ai/docs/grounding/grounding-with-google-search
  */
@@ -41,7 +62,67 @@ function resolveUseGrounding(includeGoogleSearch?: boolean): boolean {
 }
 
 export function getVertexModel(modelName: string) {
-  return vertex.getGenerativeModel({ model: modelName });
+  return getVertexClient().getGenerativeModel({ model: modelName });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isRetryableVertexStreamError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /429|RESOURCE_EXHAUSTED|resource exhausted|unavailable|UNAVAILABLE|DEADLINE_EXCEEDED|503|502/i.test(
+    msg
+  );
+}
+
+/**
+ * Stream plain text from a single user message (chat answers). No grounding by default.
+ * Retries the **whole** stream on rate limits / transient errors (exponential backoff + jitter).
+ */
+export async function* vertexStreamText(
+  modelName: string,
+  fullPrompt: string,
+  includeGoogleSearch?: boolean
+): AsyncGenerator<string, void, unknown> {
+  const useGrounding = resolveUseGrounding(includeGoogleSearch);
+  const req = {
+    contents: [
+      {
+        role: "user" as const,
+        parts: [{ text: fullPrompt }],
+      },
+    ],
+    ...(useGrounding ? { tools: groundingTools() } : {}),
+  };
+
+  const maxAttempts = 5;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const model = getVertexModel(modelName);
+      const streamResult = await model.generateContentStream(req);
+      for await (const chunk of streamResult.stream) {
+        const cands = chunk.candidates ?? [];
+        for (const c of cands) {
+          const parts = c?.content?.parts ?? [];
+          for (const p of parts) {
+            const t = (p as { text?: unknown }).text;
+            if (typeof t === "string" && t.length) yield t;
+          }
+        }
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (attempt >= maxAttempts || !isRetryableVertexStreamError(e)) {
+        throw e;
+      }
+      const base = Math.min(32_000, 1000 * 2 ** attempt);
+      await sleep(base + Math.random() * 500);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 export async function vertexRunWithText(
@@ -51,26 +132,79 @@ export async function vertexRunWithText(
 ): Promise<string> {
   const model = getVertexModel(modelName);
   const useGrounding = resolveUseGrounding(includeGoogleSearch);
-  const result = await model.generateContent({
+  const buildRequest = (withGrounding: boolean) => ({
     contents: [
       {
-        role: "user",
+        role: "user" as const,
         parts: [{ text: fullPrompt }],
       },
     ],
-    ...(useGrounding ? { tools: groundingTools() } : {}),
+    ...(withGrounding ? { tools: groundingTools() } : {}),
   });
 
-  const candidates = result.response.candidates ?? [];
-  const parts = candidates[0]?.content?.parts ?? [];
-  const text = parts
-    .map((p) => (p as { text?: string }).text ?? "")
-    .join("")
-    .trim();
-  if (!text) {
-    throw new Error("Empty Vertex AI response");
+  const pickText = (result: unknown): string => {
+    const candidates = ((result as { response?: { candidates?: unknown[] } })?.response?.candidates ?? []) as Array<{
+      content?: { parts?: unknown[] };
+    }>;
+
+    // Vertex sometimes returns strict JSON in a non-first candidate (especially with tools/grounding).
+    // We must pick a single best text span; concatenating multiple spans can corrupt JSON.
+    const candidateTexts: string[] = [];
+    for (const c of candidates) {
+      const parts = c?.content?.parts ?? [];
+      for (const p of parts) {
+        const t = (p as { text?: unknown }).text;
+        if (typeof t === "string") {
+          const tt = t.trim();
+          if (tt) candidateTexts.push(tt);
+        }
+      }
+    }
+
+    const directText =
+      typeof (result as { response?: { text?: unknown } }).response?.text === "string"
+        ? ((result as { response: { text: string } }).response.text as string).trim()
+        : "";
+
+    const scoreJsonish = (t: string): number => {
+      const s = t.trim();
+      let score = 0;
+      if (s.startsWith("```")) score += 100;
+      if (s.startsWith("{") || s.startsWith("[")) score += 60;
+      if (s.includes("\"overall_thesis_alignment_reasoning\"")) score += 20;
+      if (s.includes("\"critical_assumptions\"")) score += 20;
+      score += Math.min(30, (s.match(/{/g) ?? []).length * 2 + (s.match(/}/g) ?? []).length * 2);
+      score += Math.min(30, (s.match(/\[/g) ?? []).length + (s.match(/\]/g) ?? []).length);
+      score += Math.min(20, s.length / 200);
+      return score;
+    };
+
+    const bestCandidate =
+      candidateTexts.length > 0
+        ? candidateTexts.slice().sort((a, b) => scoreJsonish(b) - scoreJsonish(a))[0]
+        : "";
+
+    return (bestCandidate || directText).trim();
+  };
+
+  // Primary attempt (grounded or ungrounded based on caller).
+  const first = await model.generateContent(buildRequest(useGrounding));
+  const firstText = pickText(first);
+  if (firstText) return firstText;
+
+  // Retry same request once: Vertex occasionally returns empty candidate text payloads.
+  const second = await model.generateContent(buildRequest(useGrounding));
+  const secondText = pickText(second);
+  if (secondText) return secondText;
+
+  // If grounded mode produced no text, run one ungrounded fallback call.
+  if (useGrounding) {
+    const third = await model.generateContent(buildRequest(false));
+    const thirdText = pickText(third);
+    if (thirdText) return thirdText;
   }
-  return text;
+
+  throw new Error("Empty Vertex AI response (no usable JSON-ish text found)");
 }
 
 export async function vertexRunWithTextMulti(
@@ -96,10 +230,11 @@ export async function vertexRunWithPdf(
   prompt: string,
   includeGoogleSearch?: boolean
 ): Promise<string> {
-  if (!GCS_BUCKET) {
+  const { gcsBucket } = vertexEnv();
+  if (!gcsBucket) {
     throw new Error("VERTEX_GCS_BUCKET is not set");
   }
-  const bucket = storage.bucket(GCS_BUCKET);
+  const bucket = getStorageClient().bucket(gcsBucket);
   const fileName = `pitch-decks/${Date.now()}-${Math.random()
     .toString(36)
     .slice(2)}.pdf`;
@@ -109,7 +244,7 @@ export async function vertexRunWithPdf(
     contentType: "application/pdf",
   });
 
-  const fileUri = `gs://${GCS_BUCKET}/${fileName}`;
+  const fileUri = `gs://${gcsBucket}/${fileName}`;
 
   try {
     const model = getVertexModel(modelName);
@@ -135,14 +270,30 @@ export async function vertexRunWithPdf(
     });
 
     const candidates = result.response.candidates ?? [];
-    const parts = candidates[0]?.content?.parts ?? [];
-    const text = parts
-      .map((p) => (p as { text?: string }).text ?? "")
-      .join("")
-      .trim();
-    if (!text) {
-      throw new Error("Empty Vertex AI PDF response");
+    const candidateTexts: string[] = [];
+    for (const c of candidates) {
+      const parts = c?.content?.parts ?? [];
+      for (const p of parts) {
+        const t = (p as { text?: unknown }).text;
+        if (typeof t === "string") {
+          const tt = t.trim();
+          if (tt) candidateTexts.push(tt);
+        }
+      }
     }
+
+    const directText =
+      typeof (result as { response?: { text?: unknown } }).response?.text === "string"
+        ? ((result as { response: { text: string } }).response.text as string).trim()
+        : "";
+
+    const bestCandidate =
+      candidateTexts.length > 0
+        ? candidateTexts.slice().sort((a, b) => b.length - a.length)[0]
+        : "";
+
+    const text = (bestCandidate || directText).trim();
+    if (!text) throw new Error("Empty Vertex AI PDF response (no usable text found)");
     return text;
   } finally {
     // Best-effort cleanup; ignore errors

@@ -31,6 +31,7 @@ export interface CommentaryInputs {
   } | null;
   questions_first_order_json?: Record<string, unknown> | null;
   questions_structural_json?: Record<string, unknown> | null;
+  questions_combined_json?: Record<string, unknown> | null;
 }
 
 const SECTION_SEP = "\n\n";
@@ -126,6 +127,49 @@ function arrOfStrings(val: unknown): string[] {
   return val.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((s) => s.trim());
 }
 
+/** Legacy: separate corpus blobs from older pipeline runs (no longer appended per section). */
+export function formatUserCorpusContextBlock(c: unknown, title = "Similar deals in your corpus"): string | null {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+  const o = c as Record<string, unknown>;
+  const summary = typeof o.summary === "string" && o.summary.trim() ? o.summary.trim() : null;
+  const notes = Array.isArray(o.peer_pattern_notes) ? arrOfStrings(o.peer_pattern_notes) : [];
+  const parts: string[] = [];
+  if (summary) parts.push(summary);
+  if (notes.length > 0) parts.push(notes.map((n) => "• " + n).join("\n"));
+  if (parts.length === 0) return null;
+  return `${title}\n${parts.join("\n\n")}`;
+}
+
+export function getUserCorpusSummarySentence(c: unknown): string | null {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+  const s = (c as Record<string, unknown>).summary;
+  return typeof s === "string" && s.trim() ? s.trim() : null;
+}
+
+/** Details line: peer bullets only (when summary is already surfaced in section summary). */
+export function formatUserCorpusPeerNotesOnly(c: unknown, title = "Corpus peer notes"): string | null {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+  const notes = Array.isArray((c as Record<string, unknown>).peer_pattern_notes)
+    ? arrOfStrings((c as Record<string, unknown>).peer_pattern_notes)
+    : [];
+  if (notes.length === 0) return null;
+  return `${title}\n${notes.map((n) => "• " + n).join("\n")}`;
+}
+
+/** Models / DB occasionally return a JSON object as a string — unwrap for downstream keys. */
+function parseJsonObjectIfString<T extends Record<string, unknown>>(val: unknown): T | undefined {
+  if (val && typeof val === "object" && !Array.isArray(val)) return val as T;
+  if (typeof val === "string") {
+    try {
+      const p = JSON.parse(val) as unknown;
+      if (p && typeof p === "object" && !Array.isArray(p)) return p as T;
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
 /** Remove common model echo where the assistant pastes the system prompt / schema after the real answer. */
 export function stripModelPromptEcho(text: string): string {
   if (!text || typeof text !== "string") return text;
@@ -142,6 +186,20 @@ export function stripModelPromptEcho(text: string): string {
   for (const re of cutPatterns) {
     out = out.replace(re, "").trimEnd();
   }
+
+  // Models sometimes emit bracketed citation markers like:
+  //   "[parsed_startup_data, cite: 13, 14]"
+  //   "[cite: team_roster_from_phase1_deck_json, 3]"
+  // Strip any bracketed span that contains "cite:" (numeric or label-based).
+  out = out.replace(/\[[^\]]*\bcite\s*:\s*[^\]]*\]/gi, "");
+  // Bare trailing cite fragments (uncommon)
+  out = out.replace(/\s*\[cite\s*:\s*[^\]]*\]/gi, "");
+  // Google Search grounding often appends inline source-index lists like [1, 5, 6, 18] (not user-facing refs).
+  out = out.replace(/\s*\[\s*\d{1,2}(?:\s*,\s*\d{1,2})+\s*\]/g, "");
+  out = out.replace(/\s+\[\s*\d{1,2}\s*\](?=\s*[.!?]|,|\s*$)/g, "");
+  // IMPORTANT: Do NOT collapse newlines into spaces; that destroys formatting in the UI
+  // (e.g. competitor lists becoming "clumped" into a single line).
+  out = out.replace(/[ \t]{2,}/g, " ").trim();
   return out;
 }
 
@@ -190,13 +248,24 @@ function formatEvidence(
       if (typeof first === "object" && first !== null && !Array.isArray(first)) {
         const rows = value.map((item, i) => {
           const o = item as Record<string, unknown>;
-          const name = getStr(o, "name") ?? `Item ${i + 1}`;
+          const overlap =
+            getStr(o, "corpus_peer_overlap") ?? getStr(o, "also_invested_in_corpus_peers");
+          const name = getStr(o, "name") ?? getStr(o, "investor") ?? `Item ${i + 1}`;
           const cat = getStr(o, "category");
           const threat = getStr(o, "threat_assessment");
+          if (overlap) {
+            const rest = [cat, threat].filter(Boolean).join(" — ");
+            return rest
+              ? `${name} — ${rest} — also in corpus peers (${overlap})`
+              : `${name} — also in corpus peers (${overlap})`;
+          }
           const bits = [name, cat, threat].filter(Boolean);
           return bits.join(" — ");
         });
-        lines.push(`${label}:\n  ${rows.join("\n  ")}`);
+        // Investor lists should be horizontal (and should not contain "Label: " patterns)
+        // so the UI doesn't bold arbitrary substrings (it parses `": "` as a label delimiter).
+        if (label === "Investors") lines.push(`${label}: ${rows.join("; ")}`);
+        else lines.push(`${label}:\n  ${rows.join("\n  ")}`);
       } else {
         const strs = arrOfStrings(value);
         if (strs.length > 0) lines.push(`${label}: ${strs.join("; ")}`);
@@ -390,7 +459,7 @@ function buildTeam(input: CommentaryInputs, out: string[]) {
   const f3 = input.founder_signal_json as Record<string, unknown> | undefined;
   // V2: { per_founder: [...], collective: { team_evidence, scores, signal_interpretation } }
   const perFounder = Array.isArray(f3?.per_founder) ? f3.per_founder : [];
-  const collective = f3?.collective as Record<string, unknown> | undefined;
+  const collective = parseJsonObjectIfString(f3?.collective);
   if (perFounder.length > 0) {
     const founderBlocks = perFounder.map((p, i) => {
       const r = p as Record<string, unknown>;
@@ -403,11 +472,19 @@ function buildTeam(input: CommentaryInputs, out: string[]) {
         exit_history: "Exit history",
         intelligence_score_proxy: "Intelligence score",
       });
-      return `${name}\n${lines.join("\n")}`;
+      if (lines.length > 0) return `${name}\n${lines.join("\n")}`;
+      try {
+        const raw = JSON.stringify(r, null, 2);
+        return `${name}\n${raw.length > 12000 ? `${raw.slice(0, 12000)}\n…` : raw}`;
+      } catch {
+        return `${name}`;
+      }
     });
     out.push("Per-founder signal\n" + founderBlocks.join("\n\n"));
   }
-  const teamEv = collective?.team_evidence as Record<string, unknown> | undefined;
+  const teamEv =
+    (collective?.team_evidence as Record<string, unknown> | undefined) ??
+    (f3?.team_evidence as Record<string, unknown> | undefined);
   if (teamEv) {
     const lines = formatEvidence(teamEv, {
       elite_academic_pedigree: "Elite academic pedigree",
@@ -510,6 +587,8 @@ function buildTraction(input: CommentaryInputs, out: string[]) {
   const inf = t3?.inferred_context as Record<string, unknown> | undefined;
   if (inf) {
     const infLines = formatEvidence(inf, {
+      inferred_stage: "Inferred stage",
+      benchmark_context: "Benchmark context",
       estimated_stage_if_missing: "Estimated stage (if missing)",
       stage_assumption_used_for_scoring: "Stage assumption for scoring",
       benchmark_comparison_note: "Benchmark comparison",
@@ -784,7 +863,7 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
     }).join("; "));
   }
   const f3 = input.founder_signal_json as Record<string, unknown> | undefined;
-  const collective = f3?.collective as Record<string, unknown> | undefined;
+  const collective = parseJsonObjectIfString(f3?.collective);
   const sigInt = collective?.signal_interpretation as Record<string, unknown> | undefined;
   const founderSummaryFromAggregation =
     getStr(input.pipeline_summaries ?? null, "founder") ?? getStr(f3 ?? null, "summary_text");
@@ -798,16 +877,82 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   if (perFounder.length > 0) {
     founderDetails.push(perFounder.map((p: unknown, i: number) => {
       const r = p as Record<string, unknown>;
-      const name = getStr(r, "founder_name") ?? `Founder ${i + 1}`;
+      const name = getStr(r, "founder_name") ?? getStr(r, "name") ?? `Founder ${i + 1}`;
       const lines = formatEvidence(r, { elite_institutions: "Elite institutions", intellectual_achievements: "Achievements", technical_proof_points: "Technical proof", professional_velocity: "Velocity", exit_history: "Exits", intelligence_score_proxy: "Score" });
-      return `${name}\n${lines.join("\n")}`;
+      if (lines.length > 0) return `${name}\n${lines.join("\n")}`;
+      const role = getStr(r, "role");
+      const background = getStr(r, "background") ?? getStr(r, "background_summary");
+      if (role || background) {
+        const bits = [name];
+        if (role) bits.push(`Role: ${role}`);
+        if (background) bits.push(`Background: ${background}`);
+        return bits.join("\n");
+      }
+      // formatEvidence can skip nested shapes — still show raw founder JSON for in-depth view
+      try {
+        const raw = JSON.stringify(r, null, 2);
+        return `${name}\n${raw.length > 12000 ? `${raw.slice(0, 12000)}\n…` : raw}`;
+      } catch {
+        return `${name}\n(no structured fields parsed)`;
+      }
     }).join("\n\n"));
   }
-  const teamEv = collective?.team_evidence as Record<string, unknown> | undefined;
-  if (teamEv) founderDetails.push("Team evidence\n" + formatEvidence(teamEv, { elite_academic_pedigree: "Academic pedigree", high_bar_previous_employers: "Previous employers", technical_authority_proof: "Technical authority", team_cohesion_signals: "Cohesion", magnetism_proof_points: "Magnetism" }).join("\n"));
+  const teamEv =
+    (collective?.team_evidence as Record<string, unknown> | undefined) ??
+    (f3?.team_evidence as Record<string, unknown> | undefined);
+  if (teamEv) {
+    const teLines = formatEvidence(teamEv, {
+      elite_academic_pedigree: "Academic pedigree",
+      high_bar_previous_employers: "Previous employers",
+      technical_authority_proof: "Technical authority",
+      team_cohesion_signals: "Cohesion",
+      magnetism_proof_points: "Magnetism",
+    });
+    if (teLines.length > 0) founderDetails.push("Team evidence\n" + teLines.join("\n"));
+    else {
+      try {
+        const raw = JSON.stringify(teamEv, null, 2);
+        founderDetails.push("Team evidence (raw)\n" + (raw.length > 12000 ? `${raw.slice(0, 12000)}\n…` : raw));
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  const completeness = collective ? getStr(collective, "signal_completeness") : null;
+  if (completeness) founderDetails.push(`Signal completeness: ${completeness}`);
   const fScores = (collective?.scores ?? f3) as Record<string, unknown> | undefined;
   const scoreStrF = scoresLine(fScores, ["asymmetric_talent_score", "insight_edge_score", "recruiting_magnetism_proxy"]);
   if (scoreStrF) founderDetails.push("Scores: " + scoreStrF);
+
+  // If structured extraction is still empty, reuse the same narrative builder as aggregateCommentary()
+  const founderDetailsJoinedPreview = founderDetails.join("\n\n").trim();
+  if (!founderDetailsJoinedPreview && f3) {
+    const teamOut: string[] = [];
+    buildTeam(input, teamOut);
+    const merged = teamOut
+      .filter((block) => {
+        const b = block.trim();
+        if (b.startsWith("Founder summary\n")) return false;
+        return b.length > 0;
+      })
+      .join(SECTION_SEP)
+      .trim();
+    if (merged) founderDetails.push(merged);
+  }
+  if (!founderDetails.join("\n\n").trim() && f3) {
+    try {
+      const payload = {
+        per_founder: f3.per_founder,
+        collective: collective ?? f3.collective,
+      };
+      const raw = JSON.stringify(payload, null, 2);
+      founderDetails.push(
+        "Founder signals (full JSON)\n" + (raw.length > 24000 ? `${raw.slice(0, 24000)}\n… (truncated)` : raw)
+      );
+    } catch {
+      /* ignore */
+    }
+  }
 
   const tractionVal = parsing?.traction as Record<string, unknown> | undefined;
   const fundVal = parsing?.fundraising as Record<string, unknown> | undefined;
@@ -832,7 +977,15 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   const evT = t3?.traction_evidence as Record<string, unknown> | undefined;
   if (evT) {
     const dm = evT.detected_metrics as Record<string, unknown> | undefined;
-    if (dm) tractionDetails.push("Metrics\n" + formatEvidence(dm).join("\n"));
+    if (dm) {
+      const dmLines = formatEvidence(dm, {
+        revenue_data: "Revenue / ARR",
+        growth_signals: "Growth signals",
+        customer_depth: "Customer depth",
+        user_traction: "User traction",
+      });
+      if (dmLines.length > 0) tractionDetails.push("Metrics\n" + dmLines.join("\n"));
+    }
     tractionDetails.push(formatEvidence(evT, { notable_partners_and_validation: "Partners", investor_list: "Investors", milestones_detected: "Milestones" }).join("\n"));
   }
   const infT = t3?.inferred_context as Record<string, unknown> | undefined;
@@ -991,7 +1144,7 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
       founderDetails
     ),
     traction: buildSection(
-      tractionSummaryFromAggregation ? [tractionSummaryFromAggregation] : [...fromDeckTraction, tSummaryText ?? ""].filter(Boolean),
+      [...fromDeckTraction, tractionSummaryFromAggregation ?? tSummaryText ?? ""].filter(Boolean),
       tractionDetails
     ),
     assumptions: buildSection(

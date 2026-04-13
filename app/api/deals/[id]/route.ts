@@ -4,8 +4,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   const supabase = await createClient();
   const {
     data: { user },
@@ -20,14 +21,14 @@ export async function DELETE(
   const { data: deal, error } = await admin
     .from("deals")
     .select("id, user_id")
-    .eq("id", params.id)
+    .eq("id", id)
     .maybeSingle();
 
   if (error || !deal || deal.user_id !== user.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const { error: deleteError } = await admin.from("deals").delete().eq("id", params.id);
+  const { error: deleteError } = await admin.from("deals").delete().eq("id", id);
 
   if (deleteError) {
     return NextResponse.json({ error: "Failed to delete deal" }, { status: 500 });

@@ -2,19 +2,23 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type PipelineStepName =
   | "phase1_parsing"
+  | "resolve_founding_team"
   | "phase2_thesis"
   | "founder_signals"
   | "traction_signals"
   | "phase3c_problem"
   | "phase3d_solution"
   | "phase4_assumptions"
+  | "phase4_assumptions_merge"
   | "summary_founder"
   | "summary_traction"
   | "summary_problem"
   | "summary_solution"
   | "summary_assumptions"
   | "questions_first_order"
-  | "questions_structural";
+  | "questions_structural"
+  | "questions_low_confidence"
+  | "questions_contradictions";
 
 export async function runAndStorePrompt<T>(opts: {
   admin: SupabaseClient;

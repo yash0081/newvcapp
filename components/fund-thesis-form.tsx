@@ -35,22 +35,22 @@ export function FundThesisForm() {
 
   if (initialLoading) {
     return (
-      <div className="rounded-xl border border-gray-200 bg-white/60 p-4 shadow-sm">
-        <p className="text-sm text-gray-500">Loading fund thesis…</p>
+      <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+        <p className="text-sm text-zinc-600">Loading fund thesis…</p>
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white/70 p-4 shadow-sm space-y-4">
+    <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm space-y-4 text-zinc-900">
       <div className="space-y-1">
         <label
           htmlFor="fund-thesis"
-          className="block text-sm font-semibold text-gray-800"
+          className="block text-sm font-semibold text-zinc-900"
         >
           Fund thesis statement
         </label>
-        <p className="text-xs text-gray-500">
+        <p className="text-xs text-zinc-600">
           This guides how the pipeline scores thesis fit, market focus, and check size alignment
           for every uploaded deck.
         </p>
@@ -61,7 +61,7 @@ export function FundThesisForm() {
         onChange={(e) => setThesis(e.target.value)}
         placeholder="e.g. We invest in pre-seed and seed B2B SaaS in North America, $500K–$2M checks, with a focus on vertical software and AI-native workflows."
         rows={5}
-        className="w-full rounded-lg border border-gray-200 px-3.5 py-2.5 text-sm leading-relaxed placeholder:text-gray-400 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500 bg-white"
+        className="w-full rounded-lg border border-zinc-200 px-3.5 py-2.5 text-sm leading-relaxed text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900/15 bg-white"
       />
       <div className="flex items-center gap-3">
         <button

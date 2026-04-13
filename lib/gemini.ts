@@ -1,25 +1,32 @@
 import { vertexRunWithPdf, vertexRunWithText, vertexRunWithTextMulti } from "@/lib/vertex";
 
-// Vertex model IDs come from env — see docs/PIPELINE_MODELS.md (names in Prompts V2-2.md are descriptive only).
-const FLASH_LITE = process.env.GEMINI_MODEL_FLASH_LITE!;
-const FLASH_MODEL = process.env.GEMINI_MODEL_FLASH!;
-
-if (!FLASH_LITE) {
-  throw new Error("GEMINI_MODEL_FLASH_LITE must be set to a Vertex Gemini model id");
+// Resolve model IDs lazily at call time (important for scripts loading dotenv in entrypoint).
+function geminiEnv() {
+  const flashLite = process.env.GEMINI_MODEL_FLASH_LITE;
+  const flash = process.env.GEMINI_MODEL_FLASH;
+  const summary = process.env.GEMINI_MODEL_FLASH_SUMMARY;
+  if (!flashLite) {
+    throw new Error("GEMINI_MODEL_FLASH_LITE must be set to a Vertex Gemini model id");
+  }
+  if (!flash) {
+    throw new Error("GEMINI_MODEL_FLASH must be set to a Vertex Gemini model id");
+  }
+  if (!summary) {
+    throw new Error(
+      "GEMINI_MODEL_FLASH_SUMMARY is not set (e.g. same lite tier as FLASH_LITE for summaries)."
+    );
+  }
+  return { flashLite, flash, summary };
 }
-if (!FLASH_MODEL) {
-  throw new Error("GEMINI_MODEL_FLASH must be set to a Vertex Gemini model id");
+export function getGeminiSummaryModel(): string {
+  return geminiEnv().summary;
 }
-
-if (!process.env.GEMINI_MODEL_FLASH_SUMMARY) {
-  throw new Error("GEMINI_MODEL_FLASH_SUMMARY is not set (e.g. same lite tier as FLASH_LITE for summaries).");
-}
-export const GEMINI_MODEL_FLASH_SUMMARY = process.env.GEMINI_MODEL_FLASH_SUMMARY;
 
 export type ModelTier = "flash_lite" | "flash";
 
 function getModelNameByTier(tier: ModelTier): string {
-  return tier === "flash_lite" ? FLASH_LITE : FLASH_MODEL;
+  const env = geminiEnv();
+  return tier === "flash_lite" ? env.flashLite : env.flash;
 }
 
 const MAX_RETRIES = 3;
@@ -97,34 +104,152 @@ function normalizeModelJson(raw: string): string {
 }
 
 /**
+ * When the model returns valid JSON followed by extra text (or two JSON blobs), take only the
+ * first balanced `{...}` or `[...]` so JSON.parse succeeds. Respects strings and escapes.
+ */
+function extractFirstBalancedJson(normalized: string): string | null {
+  const firstObj = normalized.indexOf("{");
+  const firstArr = normalized.indexOf("[");
+  let start = -1;
+  if (firstObj === -1) start = firstArr;
+  else if (firstArr === -1) start = firstObj;
+  else start = Math.min(firstObj, firstArr);
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < normalized.length; i++) {
+    const ch = normalized[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) {
+        return normalized.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
+function repairCommonJsonIssues(s: string): string {
+  return s
+    .replace(/\bNaN\b/g, "null")
+    .replace(/\bInfinity\b/g, "null")
+    .replace(/\b-Infinity\b/g, "null")
+    .replace(/,\s*([}\]])/g, "$1");
+}
+
+function tryParseJson(s: string): unknown | null {
+  try {
+    return JSON.parse(s) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** Every ``` / ```json fenced block in the response (models often wrap JSON or add prose around it). */
+function extractMarkdownCodeFenceBodies(text: string): string[] {
+  const out: string[] = [];
+  const re = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const body = m[1]?.trim();
+    if (body) out.push(body);
+  }
+  return out;
+}
+
+/**
+ * Best-effort parse without throwing (used before optional LLM repair).
+ */
+export function parseJsonFromResponseOrNull(text: string): unknown | null {
+  const trimmed = text.trim();
+  const tryParse = (raw: string): unknown | null => {
+    const normalized = normalizeModelJson(raw);
+    let p = tryParseJson(normalized);
+    if (p !== null) return p;
+    const balanced = extractFirstBalancedJson(normalized);
+    if (balanced) {
+      p = tryParseJson(balanced);
+      if (p !== null) return p;
+      p = tryParseJson(repairCommonJsonIssues(balanced));
+      if (p !== null) return p;
+    }
+    p = tryParseJson(repairCommonJsonIssues(normalized));
+    return p;
+  };
+
+  // Whole string is one fence
+  const singleFence = /^```(?:json)?\s*([\s\S]*?)```$/;
+  const single = trimmed.match(singleFence);
+  if (single) {
+    const p = tryParse(single[1].trim());
+    if (p !== null) return p;
+  }
+
+  // Any fence in the blob (e.g. "Here is JSON:\n```json\n{...}\n```")
+  for (const body of extractMarkdownCodeFenceBodies(trimmed)) {
+    const p = tryParse(body);
+    if (p !== null) return p;
+  }
+
+  return tryParse(trimmed);
+}
+
+/**
  * Parse model output into a plain object/array (same as `const data = JSON.parse(jsonString)`).
  * Use `data.field` or `data["field"]` after this returns. We normalize first because models
  * sometimes emit illegal control characters or unescaped newlines inside JSON strings.
  */
 export function parseJsonFromResponse(text: string): unknown {
-  const trimmed = text.trim();
-  const codeBlock = /^```(?:json)?\s*([\s\S]*?)```$/;
-  const match = trimmed.match(codeBlock);
-  const jsonStr = match ? match[1].trim() : trimmed;
-  const normalized = normalizeModelJson(jsonStr);
-  try {
-    return JSON.parse(normalized) as unknown;
-  } catch {
-    // Fallback: try parsing from first object/array boundary in case model prepends noise.
-    const firstObj = normalized.indexOf("{");
-    const firstArr = normalized.indexOf("[");
-    const start =
-      firstObj === -1
-        ? firstArr
-        : firstArr === -1
-        ? firstObj
-        : Math.min(firstObj, firstArr);
-    if (start >= 0) {
-      const sliced = normalized.slice(start).trim();
-      return JSON.parse(sliced) as unknown;
-    }
-    throw new Error("Unable to parse model JSON response");
+  const p = parseJsonFromResponseOrNull(text);
+  if (p !== null) return p;
+  throw new Error("Unable to parse model JSON response");
+}
+
+/**
+ * When Flash + search returns prose-wrapped or broken JSON, ask Flash-Lite to emit strict JSON once.
+ */
+export async function parseJsonFromResponseWithRepair(text: string): Promise<unknown> {
+  const first = parseJsonFromResponseOrNull(text);
+  if (first !== null) return first;
+
+  const snippet = text.trim().slice(0, 28_000);
+  console.warn(
+    "parseJsonFromResponseWithRepair: primary parse failed; attempting LLM repair. Head:",
+    snippet.slice(0, 400)
+  );
+
+  const model = geminiEnv().flashLite;
+  const repairPrompt = `The text below is model output that should contain one JSON object or array for a downstream parser. It may include markdown fences, commentary, or minor JSON syntax errors.
+
+Extract exactly one JSON value (object or array). Output ONLY valid JSON — no markdown, no backticks, no explanation.
+
+---BEGIN---
+${snippet}
+---END---`;
+
+  const out = await vertexRunWithText(model, repairPrompt, false);
+  if (!out?.trim()) {
+    throw new Error("Unable to parse model JSON response (empty repair output)");
   }
+  const second = parseJsonFromResponseOrNull(out);
+  if (second !== null) return second;
+  throw new Error("Unable to parse model JSON response (repair pass failed)");
 }
 
 /**
@@ -133,13 +258,14 @@ export function parseJsonFromResponse(text: string): unknown {
 export async function runWithPdf(
   prompt: string,
   pdfBuffer: Buffer,
-  modelTier: ModelTier = "flash_lite"
+  modelTier: ModelTier = "flash_lite",
+  includeGoogleSearch?: boolean
 ): Promise<unknown> {
   return withRetry(async () => {
     const modelName = getModelNameByTier(modelTier);
-    const text = await vertexRunWithPdf(modelName, pdfBuffer, prompt);
+    const text = await vertexRunWithPdf(modelName, pdfBuffer, prompt, includeGoogleSearch);
     if (!text) throw new Error("Empty Gemini response");
-    return parseJsonFromResponse(text);
+    return parseJsonFromResponseWithRepair(text);
   });
 }
 
@@ -156,7 +282,7 @@ export async function runWithPromptOnly(
     const fullPrompt = `${prompt}\n\nReturn strict JSON only, no other text.`;
     const text = await vertexRunWithText(modelName, fullPrompt);
     if (!text) throw new Error("Empty Gemini response");
-    return parseJsonFromResponse(text);
+    return parseJsonFromResponseWithRepair(text);
   });
 }
 
@@ -174,21 +300,43 @@ export async function runWithText(
     const modelName = getModelNameByTier(modelTier);
     const text = await vertexRunWithText(modelName, fullPrompt);
     if (!text) throw new Error("Empty Gemini response");
-    return parseJsonFromResponse(text);
+    return parseJsonFromResponseWithRepair(text);
   });
 }
 
-/** Run with multiple text inputs (e.g. thesis + JSON). */
+/**
+ * Run with multiple text inputs (e.g. thesis + JSON).
+ * @param includeGoogleSearch When `true`, Vertex attaches Google Search grounding (ignores env default). When omitted, uses `VERTEX_ENABLE_GOOGLE_SEARCH` for text steps.
+ */
 export async function runWithTextMulti(
   prompt: string,
   inputs: { label: string; value: unknown }[],
-  modelTier: ModelTier = "flash_lite"
+  modelTier: ModelTier = "flash_lite",
+  includeGoogleSearch?: boolean
 ): Promise<unknown> {
   return withRetry(async () => {
     const modelName = getModelNameByTier(modelTier);
-    const text = await vertexRunWithTextMulti(modelName, prompt, inputs);
+    const text = await vertexRunWithTextMulti(modelName, prompt, inputs, includeGoogleSearch);
     if (!text) throw new Error("Empty Gemini response");
-    return parseJsonFromResponse(text);
+    return parseJsonFromResponseWithRepair(text);
+  });
+}
+
+/**
+ * Same as `runWithTextMulti`, but returns raw model text (no JSON parsing).
+ * Use this for steps where we want a repair/fallback parse pipeline.
+ */
+export async function runWithTextMultiRaw(
+  prompt: string,
+  inputs: { label: string; value: unknown }[],
+  modelTier: ModelTier = "flash_lite",
+  includeGoogleSearch?: boolean
+): Promise<string> {
+  return withRetry(async () => {
+    const modelName = getModelNameByTier(modelTier);
+    const text = await vertexRunWithTextMulti(modelName, prompt, inputs, includeGoogleSearch);
+    if (!text) throw new Error("Empty Gemini response");
+    return text;
   });
 }
 
@@ -202,6 +350,6 @@ export async function runWithTextMultiOnModel(
     // Aggregation summaries synthesize already-retrieved JSON — no web search.
     const text = await vertexRunWithTextMulti(modelName, prompt, inputs, false);
     if (!text) throw new Error("Empty model response");
-    return parseJsonFromResponse(text);
+    return parseJsonFromResponseWithRepair(text);
   });
 }

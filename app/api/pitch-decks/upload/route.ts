@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createAnalysisShell, runPipelineAndPersist } from "@/lib/run-analysis";
+import { runPipelineAndPersist } from "@/lib/run-analysis";
+import { emitOrderedDeepResearchSections } from "@/lib/deep-research-ordered-sections";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -20,6 +21,12 @@ export async function POST(request: NextRequest) {
 
   const formData = await request.formData();
   const file = formData.get("file");
+  const threadIdRaw = formData.get("threadId");
+  const threadId =
+    typeof threadIdRaw === "string" && threadIdRaw.trim().length > 0 ? threadIdRaw.trim() : null;
+  const fileNameRaw = formData.get("fileName");
+  const fileLabel =
+    typeof fileNameRaw === "string" && fileNameRaw.trim().length > 0 ? fileNameRaw.trim() : "deck.pdf";
 
   if (!(file instanceof Blob)) {
     return NextResponse.json({ error: "No PDF file provided" }, { status: 400 });
@@ -53,32 +60,81 @@ export async function POST(request: NextRequest) {
     fundThesisStatement = (thesisRow as { thesis_text: string }).thesis_text;
   }
 
-  try {
-    const { dealId, analysisId, updateStatus } = await createAnalysisShell({
-      admin,
-      userId: user.id,
-      pdfUrl: null,
-    });
+  const encoder = new TextEncoder();
 
-    await runPipelineAndPersist({
-      admin,
-      userId: user.id,
-      dealId,
-      analysisId,
-      pdfBuffer,
-      pdfUrl: null,
-      fundThesisStatement,
-      updateStatus,
-    });
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
+      try {
+        if (threadId) {
+          const { data: th } = await admin
+            .from("chat_threads")
+            .select("id")
+            .eq("id", threadId)
+            .eq("user_id", user.id)
+            .maybeSingle();
+          if (!th) {
+            send({ type: "error", message: "Invalid thread" });
+            return;
+          }
+          await admin.from("chat_messages").insert({
+            thread_id: threadId,
+            role: "user",
+            content: `Deep research — PDF: ${fileLabel}`,
+          });
+        }
 
-    return NextResponse.json({ ok: true, dealId, analysisId });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("Upload pitch deck failed:", err);
-    return NextResponse.json(
-      { error: "Failed to start analysis", detail: message },
-      { status: 500 }
-    );
-  }
+        const startedAt = Date.now();
+        const { dealId, analysisId, result } = await runPipelineAndPersist({
+          admin,
+          userId: user.id,
+          pdfBuffer,
+          pdfUrl: null,
+          fundThesisStatement,
+          onStep: async (step) => {
+            send({ type: "step", step });
+          },
+        });
+        send({ type: "timing", elapsedMs: Date.now() - startedAt, phase: "pipeline" });
+
+        const sectionMd = await emitOrderedDeepResearchSections({
+          result,
+          send,
+        });
+
+        const footer = `\n\n---\nDeep research complete.\n/home/deal/${dealId}`;
+        const assistantContent = `${sectionMd}${footer}`;
+
+        if (threadId) {
+          await admin.from("chat_messages").insert({
+            thread_id: threadId,
+            role: "assistant",
+            content: assistantContent,
+          });
+          await admin
+            .from("chat_threads")
+            .update({ updated_at: new Date().toISOString() })
+            .eq("id", threadId);
+        }
+
+        send({ type: "done", dealId, analysisId, threadId: threadId ?? undefined });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("Upload pitch deck failed:", err);
+        send({ type: "error", message: message || "Analysis failed" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
 }
-

@@ -69,7 +69,7 @@ export default async function PitchAnalysisPage({
     <main className="min-h-screen bg-gray-50/50 flex flex-col">
       <div className="border-b border-gray-200 bg-white p-4 flex justify-between items-center">
         <Link
-          href="/home"
+          href="/home/deals"
           className="text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors"
         >
           ← Back to home

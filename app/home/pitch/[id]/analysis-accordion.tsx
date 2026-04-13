@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import type { StructuredAnalysis } from "@/lib/commentary";
+import { useMemo, useState } from "react";
+import { stripModelPromptEcho, type StructuredAnalysis } from "@/lib/commentary";
 import { ChevronDown, ChevronRight, Lightbulb, Users, TrendingUp, Target, Puzzle, Scale, HelpCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -221,13 +221,31 @@ function DetailsContent({
   );
 }
 
+/** Strip search-grounding index junk (e.g. `[1, 5, 6]`) and prompt echo; UI-only. */
+function stripStructuredForDisplay(data: StructuredAnalysis): StructuredAnalysis {
+  const sec = (s: { summary: string; details: string }) => ({
+    summary: stripModelPromptEcho(s.summary),
+    details: stripModelPromptEcho(s.details),
+  });
+  return {
+    problem: sec(data.problem),
+    solution: sec(data.solution),
+    founderTeam: sec(data.founderTeam),
+    traction: sec(data.traction),
+    assumptions: sec(data.assumptions),
+    thesisFit: sec(data.thesisFit),
+    questions: sec(data.questions),
+  };
+}
+
 export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
   const [openSet, setOpenSet] = useState<Set<keyof StructuredAnalysis>>(new Set());
+  const displayData = useMemo(() => stripStructuredForDisplay(data), [data]);
 
   return (
     <div className="space-y-1">
       {SECTION_CONFIG.map(({ key, label, icon: Icon }) => {
-        const section = data[key];
+        const section = displayData[key];
         if (!section || (!section.summary && !section.details)) return null;
         const isOpen = openSet.has(key);
         const hasDetails = section.details && section.details.trim().length > 0;

@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getGmailClient, getFullMessage, findPdfAttachments, getAttachment } from "@/lib/gmail";
 import { runDealSourcingPipeline } from "@/lib/deal-sourcing-pipeline";
 import { persistDealAnalysis } from "@/lib/persist-deal";
+import { afterPersistIndexDealEmbedding } from "@/lib/similar-deals";
 
 const DEFAULT_MAX_PDF_BYTES = 10 * 1024 * 1024; // 10 MB
 const MIN_PDF_BYTES = 50 * 1024; // 50 KB
@@ -95,6 +96,7 @@ export async function processPitchDecksForConnection(
 
   for (const email of emails) {
     try {
+      const startedAt = Date.now();
       const msg = await getFullMessage(gmail, email.gmail_message_id);
       const payload = msg.payload;
       if (!payload) {
@@ -122,15 +124,32 @@ export async function processPitchDecksForConnection(
         continue;
       }
 
-      const result = await runDealSourcingPipeline(buffer, fundThesisStatement);
+      const result = await runDealSourcingPipeline(
+        buffer,
+        fundThesisStatement,
+        undefined,
+        undefined,
+        { admin, userId: conn.user_id, excludeDealId: null }
+      );
 
-      await persistDealAnalysis({
+      const persisted = await persistDealAnalysis({
         admin,
         userId: conn.user_id,
         pdfUrl: null,
         result,
       });
+      if (persisted?.dealId) {
+        try {
+          await afterPersistIndexDealEmbedding(admin, persisted.dealId);
+        } catch (e) {
+          console.warn("afterPersistIndexDealEmbedding:", e);
+        }
+      }
       processed++;
+      console.info("processPitchDecksForConnection elapsed(ms):", {
+        gmail_message_id: email.gmail_message_id,
+        elapsedMs: Date.now() - startedAt,
+      });
       debug.push({ gmail_message_id: email.gmail_message_id, reason: "ok" });
     } catch (err) {
       const status =
