@@ -272,23 +272,16 @@ export async function retrieveContextNodesForQuery(
 
   const fetchCount = limit * 2;
 
-  const vectorRpc =
-    tabularDealIds && tabularDealIds.length > 0
-      ? admin.rpc("match_deal_context_nodes_in_deals", {
-          p_user_id: args.userId,
-          p_query_embedding: vectorParam(queryEmb),
-          p_deal_ids: tabularDealIds,
-          p_match_count: fetchCount,
-        })
-      : admin.rpc("match_deal_context_nodes", {
-          p_user_id: args.userId,
-          p_query_embedding: vectorParam(queryEmb),
-          p_match_count: fetchCount,
-        });
+  const vectorRpc = admin.rpc("match_deal_tree_nodes_vector", {
+    p_user_id: args.userId,
+    p_query_embedding: vectorParam(queryEmb),
+    p_deal_ids: tabularDealIds ?? null,
+    p_match_count: fetchCount,
+  });
 
   const ftsRpc =
     qTrim.length >= 2
-      ? admin.rpc("match_deal_context_nodes_fts", {
+      ? admin.rpc("match_deal_tree_nodes_fts", {
           p_user_id: args.userId,
           p_query: qTrim.slice(0, 500),
           p_match_count: fetchCount,
@@ -343,8 +336,10 @@ export async function retrieveContextNodesForQuery(
   const queryTerms = new Set(extractKeywords(args.queryText, 24));
 
   const { data: fullNodes } = await admin
-    .from("deal_context_nodes")
-    .select("id, deal_id, parent_id, node_type, raw_text, embedding, polarity, node_weight, keywords")
+    .from("deal_tree_nodes")
+    .select(
+      "id, deal_id, parent_id, node_type, narrative_text, atomic_embedding, signal_embedding, polarity, node_weight, keywords"
+    )
     .in("id", nodeIds);
 
   const byId = new Map(
@@ -355,8 +350,9 @@ export async function retrieveContextNodesForQuery(
         deal_id: string;
         parent_id: string | null;
         node_type: string;
-        raw_text: string | null;
-        embedding: unknown;
+        narrative_text: string | null;
+        atomic_embedding: unknown;
+        signal_embedding: unknown;
         polarity: string;
         node_weight: number;
         keywords: string[] | null;
@@ -365,8 +361,8 @@ export async function retrieveContextNodesForQuery(
   );
 
   const { data: children } = await admin
-    .from("deal_context_nodes")
-    .select("id, parent_id, embedding, node_weight, raw_text")
+    .from("deal_tree_nodes")
+    .select("id, parent_id, atomic_embedding, signal_embedding, node_weight, narrative_text")
     .in(
       "parent_id",
       nodeIds.filter(Boolean)
@@ -384,10 +380,10 @@ export async function retrieveContextNodesForQuery(
   for (const id of nodeIds) {
     const n = byId.get(id);
     if (!n) continue;
-    const nodeEmb = parseEmbedding(n.embedding);
+    const nodeEmb = parseEmbedding(n.signal_embedding ?? n.atomic_embedding);
     const subs = (childrenByParent.get(n.id) ?? []).map((c) => {
       let w = typeof c.node_weight === "number" ? c.node_weight : 1;
-      const raw = (c as { raw_text?: string | null }).raw_text;
+      const raw = (c as { narrative_text?: string | null }).narrative_text;
       if (raw && queryTerms.size) {
         const subKw = extractKeywords(raw, 16);
         let ov = 0;
@@ -397,7 +393,7 @@ export async function retrieveContextNodesForQuery(
         w *= 1 + Math.min(0.35, ov * 0.09);
       }
       return {
-        embedding: parseEmbedding(c.embedding),
+        embedding: parseEmbedding((c as { signal_embedding?: unknown }).signal_embedding ?? (c as { atomic_embedding?: unknown }).atomic_embedding),
         weight: w,
       };
     });
@@ -421,7 +417,7 @@ export async function retrieveContextNodesForQuery(
     scored.push({
       deal_id: n.deal_id,
       node_type: n.node_type,
-      raw_text: n.raw_text,
+      raw_text: n.narrative_text,
       score,
       polarity: n.polarity ?? "neutral",
     });

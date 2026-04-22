@@ -35,6 +35,10 @@ export type SimilarPeerForPrompt = {
   pass_reason_detail: string | null;
   risk_flags: string[];
   rrf_score: number;
+  /** 0..1 cosine-based similarity over positive opportunity child nodes (Deal Tree v1). */
+  opportunity_similarity?: number;
+  /** 0..1 cosine-based similarity over negative/risks node (Deal Tree v1). */
+  risk_similarity?: number;
   /**
    * 0–1 confidence derived from relative `rrf_score` strength within the injected peer set.
    * Prompts can use this to treat the peer as a near-direct comparable vs weakly related.
@@ -44,6 +48,14 @@ export type SimilarPeerForPrompt = {
 
 type RpcHybridRow = {
   id: string;
+  company_name: string | null;
+  vector_rank: number | null;
+  fts_rank: number | null;
+  rrf_score: number | null;
+};
+
+type RpcDealTreeHybridRow = {
+  deal_id: string;
   company_name: string | null;
   vector_rank: number | null;
   fts_rank: number | null;
@@ -90,6 +102,78 @@ function cosineSimilarity(a: number[] | null, b: number[] | null): number {
   }
   if (an <= 0 || bn <= 0) return 0;
   return dot / (Math.sqrt(an) * Math.sqrt(bn));
+}
+
+const DEAL_TREE_OPPORTUNITY_WEIGHTS: Record<string, number> = {
+  problem: 0.2,
+  solution: 0.25,
+  market: 0.2,
+  traction: 0.15,
+  thesis_fit: 0.1,
+  team: 0.1,
+};
+
+async function computeDealTree2DSimilarity(
+  admin: SupabaseClient,
+  args: { queryDealId: string; candidateDealIds: string[] }
+): Promise<Map<string, { opportunity: number; risk: number }>> {
+  const out = new Map<string, { opportunity: number; risk: number }>();
+  const ids = Array.from(new Set([args.queryDealId, ...args.candidateDealIds]));
+  if (ids.length === 0) return out;
+
+  const { data: nodes } = await admin
+    .from("deal_tree_nodes")
+    .select("deal_id, kind, node_type, polarity, signal_embedding")
+    .in("deal_id", ids);
+
+  const byDeal = new Map<
+    string,
+    {
+      opp: Map<string, number[]>;
+      risk: number[] | null;
+    }
+  >();
+
+  const ensure = (dealId: string) => {
+    if (!byDeal.has(dealId)) byDeal.set(dealId, { opp: new Map(), risk: null });
+    return byDeal.get(dealId)!;
+  };
+
+  for (const n of nodes ?? []) {
+    const dealId = n.deal_id as string;
+    const kind = n.kind as string;
+    if (kind !== "child") continue;
+    const nodeType = n.node_type as string;
+    const pol = n.polarity as string;
+    const sig = parseVector(n.signal_embedding);
+    if (!sig) continue;
+    const bag = ensure(dealId);
+    if (DEAL_TREE_OPPORTUNITY_WEIGHTS[nodeType]) bag.opp.set(nodeType, sig);
+    if ((nodeType === "negatives" || nodeType === "risk_negative" || pol === "negative") && !bag.risk) {
+      bag.risk = sig;
+    }
+  }
+
+  const q = byDeal.get(args.queryDealId);
+  if (!q) return out;
+
+  for (const cid of args.candidateDealIds) {
+    const c = byDeal.get(cid);
+    if (!c) continue;
+    let wSum = 0;
+    let oppSum = 0;
+    for (const [t, w] of Object.entries(DEAL_TREE_OPPORTUNITY_WEIGHTS)) {
+      const qa = q.opp.get(t) ?? null;
+      const cb = c.opp.get(t) ?? null;
+      if (!qa || !cb) continue;
+      wSum += w;
+      oppSum += w * cosineSimilarity(qa, cb);
+    }
+    const opportunity = wSum > 0 ? oppSum / wSum : 0;
+    const risk = q.risk && c.risk ? Math.max(0, cosineSimilarity(q.risk, c.risk)) : 0;
+    out.set(cid, { opportunity: Math.max(0, opportunity), risk });
+  }
+  return out;
 }
 
 function normalize01(scores: Map<string, number>): Map<string, number> {
@@ -489,6 +573,62 @@ export async function fetchSimilarDealsHybrid(
     finalLimit?: number;
   }
 ): Promise<SimilarPeerForPrompt[]> {
+  // Prefer Deal Tree v1 hybrid search when available.
+  try {
+    const { data: treeData, error: treeErr } = await admin.rpc("match_similar_deals_deal_tree_hybrid", {
+      p_user_id: args.userId,
+      p_query_embedding: vectorParam(args.queryEmbedding),
+      p_query_text: args.queryText,
+      p_exclude_deal_id: args.excludeDealId ?? null,
+      p_vector_limit: 60,
+      p_fts_limit: 60,
+      p_final_limit: args.finalLimit ?? SIMILAR_PEERS_TOP_K,
+    });
+
+    if (!treeErr && treeData && Array.isArray(treeData) && treeData.length > 0) {
+      const rows = (treeData ?? []) as RpcDealTreeHybridRow[];
+      const ids = rows.map((r) => r.deal_id);
+
+      const coords =
+        args.excludeDealId && ids.length > 0
+          ? await computeDealTree2DSimilarity(admin, {
+              queryDealId: args.excludeDealId,
+              candidateDealIds: ids,
+            })
+          : new Map();
+
+      const { data: metaRows } = await admin
+        .from("deals")
+        .select("id, company_name, sector, stage, decision, pass_reason, pass_reason_detail")
+        .in("id", ids);
+      const metaById = new Map(
+        (metaRows ?? []).map((d) => [
+          d.id as string,
+          {
+            id: d.id as string,
+            company_name: (d.company_name as string) ?? "Unknown",
+            sector: (d.sector as string | null) ?? null,
+            stage: (d.stage as string | null) ?? null,
+            decision: (d.decision as string | null) ?? null,
+            pass_reason: (d.pass_reason as string | null) ?? null,
+            pass_reason_detail: (d.pass_reason_detail as string | null) ?? null,
+            moat_type: null,
+          } as CandidateMeta,
+        ])
+      );
+
+      const scoreById = new Map(rows.map((r) => [r.deal_id, Number(r.rrf_score ?? 0)]));
+      const flags = await loadDealFlagsBatch(admin, ids);
+      const hydrated = await hydrateSimilarPeersBatch(admin, ids, metaById, scoreById, flags);
+      return hydrated.map((h) => {
+        const c = coords.get(h.deal_id);
+        return c ? { ...h, opportunity_similarity: c.opportunity, risk_similarity: c.risk } : h;
+      });
+    }
+  } catch {
+    // ignore and fall back to legacy
+  }
+
   const { data, error } = await admin.rpc("match_similar_deals_hybrid", {
     p_user_id: args.userId,
     p_query_embedding: vectorParam(args.queryEmbedding),

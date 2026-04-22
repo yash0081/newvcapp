@@ -39,6 +39,65 @@ type NodeInsert = {
   subnode_weights_json: Record<string, number> | null;
 };
 
+type DealTreeInsert = {
+  deal_id: string;
+  analysis_id: string;
+  parent_id: string | null;
+  kind: "root" | "child" | "sub_child";
+  depth: number;
+  node_type: string;
+  node_path: string | null;
+  node_key: string | null;
+  node_value_text: string | null;
+  narrative_text: string | null;
+  structured_text: string | null;
+  keywords: string[];
+  atomic_embedding: string | null;
+  narrative_embedding: string | null;
+  signal_embedding: string | null;
+  centroid_embedding: string | null;
+  node_weight: number;
+  edge_weight: number;
+  polarity: "positive" | "negative" | "neutral";
+  source_map: Record<string, unknown>;
+};
+
+function parseVectorString(v: string | null): number[] | null {
+  if (!v) return null;
+  const t = v.trim();
+  if (!t.startsWith("[") || !t.endsWith("]")) return null;
+  const body = t.slice(1, -1).trim();
+  if (!body) return null;
+  const out = body
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => !Number.isNaN(n));
+  return out.length === 768 ? out : null;
+}
+
+function normalizeVec(v: number[]): number[] {
+  let norm = 0;
+  for (const x of v) norm += x * x;
+  norm = Math.sqrt(norm);
+  if (norm <= 0) return v;
+  return v.map((x) => x / norm);
+}
+
+function weightedCentroid(items: Array<{ v: number[]; w: number }>): number[] | null {
+  if (items.length === 0) return null;
+  const acc = new Array(items[0].v.length).fill(0);
+  let wSum = 0;
+  for (const it of items) {
+    const w = Math.max(0, it.w);
+    if (!w) continue;
+    wSum += w;
+    for (let i = 0; i < acc.length; i++) acc[i] += w * it.v[i];
+  }
+  if (wSum <= 0) return null;
+  for (let i = 0; i < acc.length; i++) acc[i] /= wSum;
+  return normalizeVec(acc);
+}
+
 /**
  * Build hierarchical deal_context_nodes + register keywords in global vocabulary.
  * Called after normalized pipeline tables are written for this analysis.
@@ -50,6 +109,7 @@ export async function materializeDealContextFromPipeline(
   result: DealSourcingResult
 ): Promise<void> {
   await admin.from("deal_context_nodes").delete().eq("deal_id", dealId).eq("analysis_id", analysisId);
+  await admin.from("deal_tree_nodes").delete().eq("deal_id", dealId).eq("analysis_id", analysisId);
 
   const parsing = toRecord(result.parsing_json);
   const companyOverview = toRecord(parsing.company_overview);
@@ -247,7 +307,9 @@ export async function materializeDealContextFromPipeline(
     for (const p of subParts) {
       let embStr: string | null = null;
       try {
-        embStr = vectorParam(await embedText(p.text.slice(0, 8000)));
+        // Path-prepended embedding so the node is useful in isolation.
+        const prefixed = `root > problem > ${p.node_type}: ${p.text}`.slice(0, 8000);
+        embStr = vectorParam(await embedText(prefixed));
       } catch {
         /* skip embed */
       }
@@ -307,4 +369,90 @@ export async function materializeDealContextFromPipeline(
 
   const allKeywords = [...withEmbeddings.flatMap((n) => n.keywords), ...extraKeywords];
   await registerKeywordPhrases(admin, allKeywords);
+
+  // ---- Deal Tree v1 (canonical) ----
+  // We currently treat legacy `embedding` as both narrative + signal when no atomic children exist yet.
+  // Future: compute child.signal_embedding as centroid of atomic sub-children; child.anchor_embedding from keyword_clusters.
+  const rootLegacy = withEmbeddings.find((n) => n.node_type === "root");
+  const childLegacy = withEmbeddings.filter((n) => n.node_type !== "root");
+
+  const childCentroids = childLegacy
+    .map((c) => {
+      const v = parseVectorString(c.embedding);
+      if (!v) return null;
+      return { v, w: c.node_weight };
+    })
+    .filter((x): x is { v: number[]; w: number } => x != null);
+  const rootCentroid = weightedCentroid(childCentroids);
+  const rootCentroidStr = rootCentroid ? vectorParam(rootCentroid) : rootLegacy?.embedding ?? null;
+
+  const treeNodes: DealTreeInsert[] = [];
+  const rootTreeId = rows.find((r) => r.node_type === "root")?.id ?? null;
+  // Reuse legacy IDs for now (keeps UI continuity), but write into deal_tree_nodes with fresh UUIDs generated server-side.
+  // Parent links are set after insert via returned IDs.
+  treeNodes.push({
+    deal_id: dealId,
+    analysis_id: analysisId,
+    parent_id: null,
+    kind: "root",
+    depth: 0,
+    node_type: "root",
+    node_path: "root",
+    node_key: null,
+    node_value_text: null,
+    narrative_text: rootLegacy?.raw_text ?? null,
+    structured_text: rootLegacy?.structured_text ?? null,
+    keywords: rootLegacy?.keywords ?? [],
+    atomic_embedding: null,
+    narrative_embedding: rootLegacy?.embedding ?? null,
+    signal_embedding: null,
+    centroid_embedding: rootCentroidStr,
+    node_weight: 1,
+    edge_weight: 1,
+    polarity: "neutral",
+    source_map: {},
+  });
+
+  for (const c of childLegacy) {
+    treeNodes.push({
+      deal_id: dealId,
+      analysis_id: analysisId,
+      parent_id: null, // fixed after insert
+      kind: "child",
+      depth: 1,
+      node_type: c.node_type,
+      node_path: `root > ${c.node_type}`,
+      node_key: null,
+      node_value_text: null,
+      narrative_text: c.raw_text ?? null,
+      structured_text: c.structured_text ?? null,
+      keywords: c.keywords,
+      atomic_embedding: null,
+      narrative_embedding: c.embedding,
+      signal_embedding: c.embedding,
+      centroid_embedding: null,
+      node_weight: c.node_weight,
+      edge_weight: 1,
+      polarity: c.polarity,
+      source_map: {},
+    });
+  }
+
+  // Insert and then patch parent pointers.
+  const { data: treeInserted, error: treeErr } = await admin
+    .from("deal_tree_nodes")
+    .insert(treeNodes)
+    .select("id, node_type, kind");
+  if (treeErr) {
+    console.warn("materializeDealContext: deal_tree_nodes insert failed", treeErr);
+    return;
+  }
+  const treeRows = (treeInserted ?? []) as Array<{ id: string; node_type: string; kind: string }>;
+  const rootTree = treeRows.find((r) => r.kind === "root")?.id;
+  if (rootTree) {
+    for (const r of treeRows) {
+      if (r.kind !== "child") continue;
+      await admin.from("deal_tree_nodes").update({ parent_id: rootTree }).eq("id", r.id);
+    }
+  }
 }
