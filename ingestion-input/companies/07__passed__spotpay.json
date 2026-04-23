@@ -1,0 +1,62 @@
+{
+  "company_name": "SpotPay",
+  "founded_year": 2025,
+  "headquarters": "San Francisco, CA",
+  "founders": [
+    {
+      "name": "Zsika Phillip-Baptiste",
+      "role": "Co-founder & CEO",
+      "background": "Stanford MBA candidate; former Product Manager at Google and Software Engineer at YouTube; previously founded Astros AI."
+    },
+    {
+      "name": "Thomas Cesare-Herriau",
+      "role": "Co-founder & CTO",
+      "background": "Software engineer with deep expertise in full-stack development and high-scale financial infrastructure."
+    }
+  ],
+  "founding_team": {
+    "key_expertise": "The team leverages a mix of Big Tech product experience (Google/YouTube) and early-stage startup agility, focused on bridging traditional finance with blockchain rails.",
+    "specialization": "Specialists in stablecoin liquidity, mobile UX, and cross-border regulatory compliance."
+  },
+  "traction": {
+    "funding": {
+      "total_funding": "$500,000",
+      "latest_round": "Y Combinator Winter 2026 Batch ($450k - $500k standard deal)",
+      "lead_investors": "Y Combinator",
+      "participating_investors": [
+        "Alliance (Web3 Accelerator)",
+        "F4 Fund"
+      ]
+    },
+    "business_metrics": [
+      "Reported 43% week-over-week growth in Total Payment Volume (TPV) during early 2026.",
+      "Launched the 'Calypso Card,' a physical global spending card tied to stablecoin balances.",
+      "Growing presence in emerging market corridors, specifically the Latin American and Caribbean regions."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "Cross-border finance is fundamentally broken for individuals and small businesses in emerging markets.",
+    "barriers": [
+      "The 'SWIFT' Tax: Traditional transfers take 3–5 days and lose 5–7% in hidden FX fees and intermediary bank charges.",
+      "Financial Exclusion: High minimum balances and strict documentation requirements keep millions 'unbanked' or 'underbanked' globally.",
+      "Currency Volatility: Users in hyper-inflationary environments lack easy, cheap access to stable-value assets like the US Dollar."
+    ]
+  },
+  "solution": {
+    "primary_product": "Borderless Neobank & Digital Wallet",
+    "key_features": [
+      "Stablecoin Rails: Uses blockchain and USDC/USDT to settle international transfers in under 3 minutes.",
+      "QR-Based Local Payments: Enables users to pay local merchants directly from their digital wallet via integrated QR codes.",
+      "AI-Powered Insights: An embedded agent that analyzes spending patterns to suggest automated savings and yield-bearing opportunities.",
+      "Yield-on-Store: Allows users to earn interest on their digital dollar balances through audited DeFi protocols."
+    ],
+    "value_proposition": "Providing a 'global bank account in your pocket' that bypasses the friction of local legacy banking for the next billion users."
+  },
+  "hypothetical_investment_rejection_reasoning": {
+    "red_ocean_competition": "The space is incredibly crowded with heavily-capitalized incumbents like Wise, Revolut, and Airwallex. While SpotPay has early traction, they lack a structural 'moat' to prevent these giants from simply toggling on stablecoin features for their existing millions of users.",
+    "neobank_commoditization": "As financial infrastructure platforms (like Stripe or Adyen) move closer to the metal, the value of a standalone 'neobank' brand is declining. We believe value is shifting to the underlying infrastructure layers rather than the consumer-facing wallet.",
+    "regulatory_tail_risk": "Operating a stablecoin-native bank in emerging markets is a legal minefield. A single regulatory crackdown on 'unlicensed' money transmission or stablecoin custody in a key market like Mexico or Brazil could wipe out their primary growth engine.",
+    "margin_erosion": "The 'race to zero' on cross-border fees makes it difficult to build a high-margin business. Unless SpotPay can successfully cross-sell high-margin credit products—which introduces significant balance-sheet risk—the unit economics remain challenging at scale.",
+    "customer_acquisition_costs": "Acquiring users in the LatAm/Caribbean region is notoriously expensive and operationally intensive. We are concerned that their 43% WoW growth is a 'honeymoon' phase that will normalize into a high-CAC, low-LTV (Life Time Value) trap."
+  }
+}

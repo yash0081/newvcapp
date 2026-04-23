@@ -1,0 +1,14 @@
+-- PASTE in Supabase SQL editor AFTER migrations 025 + 026 are applied.
+-- This file is NOT a self-contained run (RLS, auth, order). For bulk load prefer:
+--   npm run seed-invested-companies-full
+--   with INVESTED_SEED_USER_ID set and .env for Supabase + Vertex.
+--
+-- If you need manual deals, replace the UUID below and insert one row, then
+-- add fact/tree rows in app or re-run the tsx seeder.
+--
+-- :replace YOUR_USER_ID with auth.users id:
+-- INSERT INTO deal_intel.deal (user_id, metadata)
+-- VALUES (
+--   'YOUR_USER_ID'::uuid,
+--   jsonb_build_object('source', 'manual', 'company_name', 'Example Co')
+-- );

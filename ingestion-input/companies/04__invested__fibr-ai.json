@@ -1,0 +1,56 @@
+{
+  "company_name": "Fibr AI",
+  "founded_year": 2023,
+  "headquarters": "San Francisco, CA",
+  "founders": [
+    {
+      "name": "Ankur \"AJ\" Goyal",
+      "role": "Co-founder & CEO",
+      "background": "Former enterprise software executive with deep experience in growth marketing and AI."
+    },
+    {
+      "name": "Pritam Roy",
+      "role": "Co-founder & CPO",
+      "background": "Product leader specializing in high-scale enterprise platforms and user experience."
+    }
+  ],
+  "founding_team": {
+    "key_expertise": "Comprised of veterans from enterprise software giants and marketing technology sectors.",
+    "focus": "Specialists in agentic AI, conversion rate optimization (CRO), and enterprise-grade compliance."
+  },
+  "traction": {
+    "funding": {
+      "total_funding": "$9.3 Million",
+      "latest_round": "$7.5 Million Seed (February 2026)",
+      "lead_investor": "Accel",
+      "participating_investors": [
+        "WillowTree Ventures",
+        "MVP Ventures",
+        "Fortune 100 Angel Operators"
+      ]
+    },
+    "business_metrics": [
+      "Secured 3-to-5 year contracts with Fortune 50 banks and global healthcare providers.",
+      "Reports an average of 28% higher ROI and 30% lower Customer Acquisition Cost (CAC) for early partners.",
+      "Successfully processed thousands of concurrent micro-experiments across high-traffic enterprise sites."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "The 'Personalization Gap': While digital ads are hyper-personalized, the websites they lead to remain static and generic.",
+    "barriers": [
+      "Integration Hell: Traditional CRO tools (like Optimizely or Adobe Target) require heavy engineering and agency support to scale.",
+      "Static Destinations: CMS platforms were built to publish content, not to interpret real-time visitor intent or context.",
+      "Operational Bottleneck: Manual A/B testing is too slow to keep up with the volume of modern, AI-driven marketing campaigns."
+    ]
+  },
+  "solution": {
+    "primary_product": "Agentic Web Experience Layer",
+    "key_features": [
+      "Intelligent URLs: Every page acts as an autonomous agent that senses intent and reshapes itself in real-time.",
+      "Autonomous Experimentation: The platform generates hypotheses and runs parallel tests without manual coding.",
+      "Context-Aware Adaptation: Tailors content specifically for visitors coming from LLMs (like ChatGPT), social ads, or search queries.",
+      "Human-in-the-Loop Governance: Built-in approval workflows ensure AI-generated variants remain on-brand and compliant for regulated industries."
+    ],
+    "value_proposition": "Transforming the website from a passive destination into an active, intelligent part of the growth stack that treats every visitor as an audience of one."
+  }
+}

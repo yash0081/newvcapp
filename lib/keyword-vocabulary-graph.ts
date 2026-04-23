@@ -1,9 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { embedText } from "@/lib/vertex-embeddings";
-
-function vectorParam(values: number[]): string {
-  return `[${values.join(",")}]`;
-}
+import { cosineSimilarity, parseVector, vectorParam } from "@/lib/data-layer/shared/vector";
 
 const TAU_MERGE = 0.88;
 
@@ -39,36 +36,6 @@ export async function registerKeywordPhrases(
     medoid_embedding: string | number[];
   }>;
 
-  function parseVec(v: unknown): number[] | null {
-    if (Array.isArray(v)) {
-      const arr = v.filter((x): x is number => typeof x === "number" && !Number.isNaN(x));
-      return arr.length ? arr : null;
-    }
-    if (typeof v !== "string") return null;
-    const t = v.trim();
-    if (!t.startsWith("[") || !t.endsWith("]")) return null;
-    const body = t.slice(1, -1).trim();
-    if (!body) return null;
-    const out = body
-      .split(",")
-      .map((s) => Number(s.trim()))
-      .filter((n) => !Number.isNaN(n));
-    return out.length ? out : null;
-  }
-
-  function cosine(a: number[], b: number[]): number {
-    let dot = 0,
-      an = 0,
-      bn = 0;
-    for (let i = 0; i < a.length; i++) {
-      dot += a[i] * b[i];
-      an += a[i] * a[i];
-      bn += b[i] * b[i];
-    }
-    if (an <= 0 || bn <= 0) return 0;
-    return dot / (Math.sqrt(an) * Math.sqrt(bn));
-  }
-
   for (const phrase of uniq) {
     let emb: number[];
     try {
@@ -78,9 +45,9 @@ export async function registerKeywordPhrases(
     }
     let merged = false;
     for (const row of existing) {
-      const ev = parseVec(row.medoid_embedding);
+      const ev = parseVector(row.medoid_embedding);
       if (!ev || ev.length !== emb.length) continue;
-      if (cosine(emb, ev) >= TAU_MERGE) {
+      if (cosineSimilarity(emb, ev) >= TAU_MERGE) {
         merged = true;
         break;
       }

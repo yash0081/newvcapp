@@ -876,10 +876,14 @@ export async function runDealSourcingPipeline(
   );
   if (onStep) await onStep("founder");
 
+  type ClaimsBucket = { claims?: unknown[] };
+  const fromProblem = (claims_problem_raw as ClaimsBucket | null | undefined)?.claims;
+  const fromSolution = (claims_solution_raw as ClaimsBucket | null | undefined)?.claims;
+  const fromTraction = (claims_traction_raw as ClaimsBucket | null | undefined)?.claims;
   const mergedClaims = [
-    ...(Array.isArray((claims_problem_raw as any)?.claims) ? ((claims_problem_raw as any).claims as unknown[]) : []),
-    ...(Array.isArray((claims_solution_raw as any)?.claims) ? ((claims_solution_raw as any).claims as unknown[]) : []),
-    ...(Array.isArray((claims_traction_raw as any)?.claims) ? ((claims_traction_raw as any).claims as unknown[]) : []),
+    ...(Array.isArray(fromProblem) ? fromProblem : []),
+    ...(Array.isArray(fromSolution) ? fromSolution : []),
+    ...(Array.isArray(fromTraction) ? fromTraction : []),
   ]
     .map(normalizeClaim)
     .filter((c): c is NonNullable<ReturnType<typeof normalizeClaim>> => Boolean(c));

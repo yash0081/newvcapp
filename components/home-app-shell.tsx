@@ -25,7 +25,9 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
   const chatRoute = pathname === "/home/chat";
   const gridRoute = pathname === "/home/deals/grid";
   const wideContent =
-    pathname.startsWith("/home/deal/") || pathname === "/home/deals/grid";
+    pathname.startsWith("/home/deal/") ||
+    pathname.startsWith("/home/deal-intel/") ||
+    pathname === "/home/deals/grid";
 
   return (
     <div className="flex h-svh min-h-0 flex-col bg-zinc-100 text-zinc-900">

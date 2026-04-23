@@ -1,7 +1,18 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+function decisionStr(meta: Record<string, unknown>): string {
+  return String(meta.decision ?? meta.decision_state ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function nameStr(meta: Record<string, unknown>): string {
+  return String(meta.company_name ?? meta.display_name ?? "").toLowerCase();
+}
+
 /**
- * Tabular prefilter: map natural-language hints to deal_id[] using deals.stage / sector / decision / name.
+ * Tabular prefilter: map natural-language hints to `deal_intel.deal` id[] using JSON metadata
+ * (company name, decision, stage, sector) when present.
  */
 export async function resolveDealIdsFromTabularFilter(
   admin: SupabaseClient,
@@ -9,11 +20,11 @@ export async function resolveDealIdsFromTabularFilter(
   message: string
 ): Promise<string[]> {
   const t = message.toLowerCase();
-  const { data: all, error } = await admin
-    .from("deals")
-    .select("id, stage, sector, decision, company_name")
-    .eq("user_id", userId)
-    .limit(2000);
+  const { data: all, error } = await admin.rpc("deal_intel_list_deals_for_user", {
+    p_user_id: userId,
+    p_exclude_deal_id: null,
+    p_limit: 2000,
+  });
   if (error || !all?.length) return [];
 
   const stagePatterns: { re: RegExp; hints: string[] }[] = [
@@ -40,10 +51,11 @@ export async function resolveDealIdsFromTabularFilter(
   const ids = new Set<string>();
 
   for (const row of all) {
-    const stage = String(row.stage ?? "").toLowerCase();
-    const sector = String(row.sector ?? "").toLowerCase();
-    const decision = String(row.decision ?? "").toLowerCase();
-    const name = String(row.company_name ?? "").toLowerCase();
+    const meta = (row.metadata as Record<string, unknown> | null) ?? {};
+    const stage = String(meta.stage ?? "").toLowerCase();
+    const sector = String(meta.sector ?? "").toLowerCase();
+    const decision = decisionStr(meta);
+    const name = nameStr(meta);
 
     let hit = false;
 
@@ -65,8 +77,8 @@ export async function resolveDealIdsFromTabularFilter(
       }
     }
 
-    if (decisionPass && (decision.includes("pass") || decision.includes("declin"))) hit = true;
-    if (decisionInvest && (decision.includes("invest") || decision.includes("accept"))) hit = true;
+    if (decisionPass && (decision.includes("no") || decision === "pass" || decision.includes("declin"))) hit = true;
+    if (decisionInvest && (decision.includes("yes") || decision === "open" || decision.includes("accept"))) hit = true;
 
     if (hit) ids.add(row.id as string);
   }

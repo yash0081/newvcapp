@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { runWithTextMulti } from "@/lib/gemini";
 import { PROMPT_RETRIEVAL_KEYWORDS_PS, V2_MAX_ARRAY_ITEMS } from "@/lib/deal-sourcing-prompts";
 import { embedText } from "@/lib/vertex-embeddings";
+import { l2Normalize, vectorParam } from "@/lib/data-layer/shared/vector";
 
 export type RetrievalSectionProfile = {
   search_concepts: string[];
@@ -25,18 +26,6 @@ export type DealRetrievalEmbeddings = {
 const PROSE_WORDS = 64;
 const W_PROSE = 0.55;
 const W_KW = 0.45;
-
-function vectorParam(values: number[]): string {
-  return `[${values.join(",")}]`;
-}
-
-function l2Normalize(v: number[]): number[] {
-  let s = 0;
-  for (const x of v) s += x * x;
-  const n = Math.sqrt(s);
-  if (n <= 1e-12) return v;
-  return v.map((x) => x / n);
-}
 
 function addWeighted(a: number[], wa: number, b: number[], wb: number): number[] {
   const out = new Array(a.length);

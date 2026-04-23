@@ -1,0 +1,71 @@
+{
+  "company_name": "Avallon AI",
+  "founded_year": 2025,
+  "headquarters": "New York, NY",
+  "founders": [
+    {
+      "name": "Cornelius Schramm",
+      "role": "Co-founder & CEO",
+      "background": "Founding U.S. engineer at FINN (built operations for $15M ARR); experienced in scaling fleet operations."
+    },
+    {
+      "name": "Bryan Guin",
+      "role": "Co-founder & COO",
+      "background": "Former product leader at EY (consulting for Fortune 500s); ML researcher at Cornell."
+    },
+    {
+      "name": "Jet Semrick",
+      "role": "Co-founder & CTO",
+      "background": "Specialist in quantitative trading algorithms; national champion policy debater."
+    }
+  ],
+  "founding_team": {
+    "size": 7,
+    "key_expertise": "The team includes specialists in operations research, machine learning, and enterprise software, with additional co-founding members Moritz Bartusch and Leander Peter.",
+    "specialization": "Deep focus on agentic workflows, conversational AI, and insurance-specific data models."
+  },
+  "traction": {
+    "funding": {
+      "total_funding": "$5.1 Million",
+      "latest_round": "$4.6 Million Seed (November 2025)",
+      "lead_investor": "Frontline Ventures",
+      "participating_investors": [
+        "Y Combinator (Spring 2025 Batch)",
+        "1984 Ventures",
+        "Liquid 2 Ventures",
+        "Booom Ventures"
+      ]
+    },
+    "business_metrics": [
+      "Achieved 10x revenue growth during the 3-month Y Combinator period.",
+      "Secured major contracts with Third-Party Administrators (TPAs) including Athens Administrators.",
+      "Live with multiple partners managing over 400 adjusters and thousands of claims.",
+      "Reported cutting claims processing time by up to 90% for pilot customers."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "The insurance claims industry is facing a massive 'labor cliff' where adjusters are retiring faster than they can be replaced, leading to service delays and burnout.",
+    "barriers": [
+      "Fragmented Communication: Adjusters spend 60% of their time on 'phone tag' and routine status updates.",
+      "Unstructured Data: Sifting through thousands of PDFs, medical bills, and photos manually is slow and error-prone.",
+      "Legacy Systems: Most carriers use 20-year-old Claims Management Systems (CMS) that lack modern automation capabilities."
+    ]
+  },
+  "solution": {
+    "primary_product": "AI-Native Claims Operations Platform",
+    "key_features": [
+      "Multimodal AI Agents: Autonomous agents that handle phone calls (intake/status), email triage, and document parsing (extracting data from medical reports).",
+      "End-to-End Orchestration: Moves a claim from initial report to settlement without requiring manual data entry at every step.",
+      "Write-Back Integration: Plugs directly into legacy CMS platforms to keep records updated in real-time.",
+      "Liability Copilot: Analyzes policy terms and flags potential exposures for adjusters to review, ensuring consistency in decisions."
+    ],
+    "value_proposition": "Transforming claims from a manual cost center into a high-speed, automated operation that allows human adjusters to focus on high-stakes decision-making."
+  },
+  "hypothetical_investment_rejection_reasoning": {
+    "market_saturation": "The 'AI Agent' field is currently the most crowded sector in venture capital. We see hundreds of companies building 'AI for Insurance,' and we are concerned that Avallon may struggle to maintain its 10x growth once incumbents like Salesforce and Guidewire release their own native agentic features.",
+    "integration_longevity": "The insurance industry is notorious for 'Integration Hell.' While Avallon has succeeded with smaller TPAs, the technical debt required to integrate with the bespoke legacy systems of top-tier carriers (like State Farm or Geico) may slow their scaling velocity and hurt long-term margins.",
+    "liability_tail_risk": "Insurance claims involve high financial and legal stakes. A single 'hallucination' where an AI agent misinterprets a policy term or incorrectly accepts liability could result in massive lawsuits. We aren't yet convinced that the 'Human-in-the-Loop' safeguards are robust enough to mitigate this systemic risk.",
+    "moat_defensibility": "As LLM capabilities become commoditized, the 'moat' for Avallon shifts entirely to their specific workflow data and integrations. We worry that if OpenAI or Anthropic releases more specialized 'insurance-tuned' models, the proprietary value of Avallon's current agentic layer might diminish.",
+    "sales_cycle_fatigue": "While TPAs are a great entry point, the real volume is in the major carriers. These companies have 18–24 month sales cycles. We are hesitant to invest in a business that could face a significant 'revenue plateau' while waiting for enterprise-scale approvals."
+  }
+}

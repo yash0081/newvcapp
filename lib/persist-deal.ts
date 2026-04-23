@@ -31,14 +31,6 @@ function scoreAsInt(obj: Record<string, unknown> | null | undefined, key: string
   return Math.round(Math.min(10, Math.max(0, n)));
 }
 
-function pickCorpusContext(obj: Record<string, unknown> | null | undefined, key: string): unknown {
-  if (!obj) return null;
-  const v = obj[key];
-  if (v == null) return null;
-  if (typeof v === "object") return v;
-  return null;
-}
-
 /** One row per analysis in deal_pipeline_json_* tables (mirrors DealSourcingResult keys). */
 async function persistPipelineJsonTables(
   admin: SupabaseClient,

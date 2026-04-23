@@ -2,26 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DealSourcingResult } from "@/lib/deal-sourcing-pipeline";
 import { embedText } from "@/lib/vertex-embeddings";
 import { registerKeywordPhrases } from "@/lib/keyword-vocabulary-graph";
+import { extractKeywords } from "@/lib/data-layer/shared/text";
+import { parseVector, vectorParam } from "@/lib/data-layer/shared/vector";
 
 function toRecord(value: unknown): Record<string, unknown> {
   return (value ?? {}) as Record<string, unknown>;
-}
-
-const STOP = new Set([
-  "the", "and", "for", "are", "but", "not", "you", "all", "can", "her", "was", "one", "our", "out", "day", "get", "has", "him", "his", "how", "its", "may", "new", "now", "old", "see", "two", "who", "way", "use", "that", "this", "with", "from", "they", "have", "been", "were", "said", "each", "which", "their", "time", "will", "about", "into", "than", "then", "them", "these", "some", "what", "when", "your", "more", "also", "such", "only", "other", "over", "most", "much", "very", "after", "being", "both", "those", "under", "while", "where", "would", "could", "should",
-]);
-
-export function extractKeywords(text: string, max = 40): string[] {
-  const words = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP.has(w));
-  return Array.from(new Set(words)).slice(0, max);
-}
-
-function vectorParam(values: number[]): string {
-  return `[${values.join(",")}]`;
 }
 
 type NodeInsert = {
@@ -64,15 +49,8 @@ type DealTreeInsert = {
 
 function parseVectorString(v: string | null): number[] | null {
   if (!v) return null;
-  const t = v.trim();
-  if (!t.startsWith("[") || !t.endsWith("]")) return null;
-  const body = t.slice(1, -1).trim();
-  if (!body) return null;
-  const out = body
-    .split(",")
-    .map((s) => Number(s.trim()))
-    .filter((n) => !Number.isNaN(n));
-  return out.length === 768 ? out : null;
+  const out = parseVector(v);
+  return out && out.length === 768 ? out : null;
 }
 
 function normalizeVec(v: number[]): number[] {
@@ -267,8 +245,8 @@ export async function materializeDealContextFromPipeline(
   const { data: inserted, error: insErr } = await admin
     .from("deal_context_nodes")
     .insert(
-      withEmbeddings.map(({ parent_id: _p, ...row }) => ({
-        ...row,
+      withEmbeddings.map((n) => ({
+        ...n,
         parent_id: null,
       }))
     )
@@ -387,7 +365,6 @@ export async function materializeDealContextFromPipeline(
   const rootCentroidStr = rootCentroid ? vectorParam(rootCentroid) : rootLegacy?.embedding ?? null;
 
   const treeNodes: DealTreeInsert[] = [];
-  const rootTreeId = rows.find((r) => r.node_type === "root")?.id ?? null;
   // Reuse legacy IDs for now (keeps UI continuity), but write into deal_tree_nodes with fresh UUIDs generated server-side.
   // Parent links are set after insert via returned IDs.
   treeNodes.push({

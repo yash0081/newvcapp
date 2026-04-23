@@ -46,11 +46,11 @@ function formatPerFounderFromSignal(rawOutput: Record<string, unknown> | null): 
 
 /** Prefer full pipeline JSON from `deal_analyses.raw_output` so in-depth matches agent schemas (founder/traction/solution). */
 function buildStructuredFromDeal(args: {
-  problem: any | null;
-  solution: any | null;
-  traction: any | null;
-  assumptions: any[];
-  questions: any[];
+  problem: Record<string, unknown> | null;
+  solution: Record<string, unknown> | null;
+  traction: Record<string, unknown> | null;
+  assumptions: Record<string, unknown>[];
+  questions: Record<string, unknown>[];
   rawOutput: Record<string, unknown> | null;
 }): StructuredAnalysis {
   const { problem, solution, traction, assumptions, questions, rawOutput } = args;
@@ -70,8 +70,8 @@ function buildStructuredFromDeal(args: {
     };
     const structured = aggregateCommentaryStructured(input);
     const questionsFromDb = questions
-      .map((q) => (q.question_text as string | null) ?? "")
-      .filter((q) => q && q.trim().length > 0)
+      .map((row) => (row.question_text as string | null) ?? "")
+      .filter((line) => line && line.trim().length > 0)
       .join("\n\n");
     if (!structured.questions.details?.trim() && questionsFromDb) {
       return {
@@ -95,8 +95,10 @@ function buildStructuredFromDeal(args: {
     return structured;
   }
 
-  const joinDefined = (parts: (string | null | undefined)[]) =>
-    parts.filter((p) => p && String(p).trim().length > 0).join("\n\n");
+  const joinDefined = (parts: Array<string | null | undefined | false>) =>
+    parts
+      .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+      .join("\n\n");
 
   const mdSnippets =
     rawOutput && typeof rawOutput === "object" && rawOutput.parsing_json == null
@@ -120,13 +122,27 @@ function buildStructuredFromDeal(args: {
     mdSnippets.problem ??
     null;
   const problemDetails = joinDefined([
-    problem?.problem_statement && `Problem (from deck): ${problem.problem_statement}`,
-    problem?.root_cause_depth && `Root cause depth: ${problem.root_cause_depth}`,
-    problem?.economic_gravity && `Economic gravity: ${problem.economic_gravity}`,
-    problem?.structural_urgency && `Structural urgency: ${problem.structural_urgency}`,
-    problem?.persona_clarity && `Persona clarity: ${problem.persona_clarity}`,
-    problem?.economic_buyer_persona && `Economic buyer: ${problem.economic_buyer_persona}`,
-    problem?.budget_priority_validation && `Budget priority: ${problem.budget_priority_validation}`,
+    problem?.problem_statement != null && String(problem.problem_statement).trim()
+      ? `Problem (from deck): ${String(problem.problem_statement)}`
+      : null,
+    problem?.root_cause_depth != null && String(problem.root_cause_depth).trim()
+      ? `Root cause depth: ${String(problem.root_cause_depth)}`
+      : null,
+    problem?.economic_gravity != null && String(problem.economic_gravity).trim()
+      ? `Economic gravity: ${String(problem.economic_gravity)}`
+      : null,
+    problem?.structural_urgency != null && String(problem.structural_urgency).trim()
+      ? `Structural urgency: ${String(problem.structural_urgency)}`
+      : null,
+    problem?.persona_clarity != null && String(problem.persona_clarity).trim()
+      ? `Persona clarity: ${String(problem.persona_clarity)}`
+      : null,
+    problem?.economic_buyer_persona != null && String(problem.economic_buyer_persona).trim()
+      ? `Economic buyer: ${String(problem.economic_buyer_persona)}`
+      : null,
+    problem?.budget_priority_validation != null && String(problem.budget_priority_validation).trim()
+      ? `Budget priority: ${String(problem.budget_priority_validation)}`
+      : null,
   ]);
 
   const solutionSummary =
@@ -136,12 +152,22 @@ function buildStructuredFromDeal(args: {
     mdSnippets.solution ??
     null;
   const solutionDetails = joinDefined([
-    solution?.solution_summary && `Solution: ${solution.solution_summary}`,
-    solution?.product_type && `Product type: ${solution.product_type}`,
-    solution?.moat_type && `Moat type: ${solution.moat_type}`,
-    solution?.replication_difficulty && `Replication difficulty: ${solution.replication_difficulty}`,
-    solution?.compounding_potential && `Compounding: ${solution.compounding_potential}`,
-    solution?.technical_moat_evidence && `Technical moat: ${solution.technical_moat_evidence}`,
+    solution?.solution_summary != null && String(solution.solution_summary).trim()
+      ? `Solution: ${String(solution.solution_summary)}`
+      : null,
+    solution?.product_type != null && String(solution.product_type).trim()
+      ? `Product type: ${String(solution.product_type)}`
+      : null,
+    solution?.moat_type != null && String(solution.moat_type).trim() ? `Moat type: ${String(solution.moat_type)}` : null,
+    solution?.replication_difficulty != null && String(solution.replication_difficulty).trim()
+      ? `Replication difficulty: ${String(solution.replication_difficulty)}`
+      : null,
+    solution?.compounding_potential != null && String(solution.compounding_potential).trim()
+      ? `Compounding: ${String(solution.compounding_potential)}`
+      : null,
+    solution?.technical_moat_evidence != null && String(solution.technical_moat_evidence).trim()
+      ? `Technical moat: ${String(solution.technical_moat_evidence)}`
+      : null,
   ]);
 
   const tractionSummary =
@@ -150,25 +176,37 @@ function buildStructuredFromDeal(args: {
     (traction?.benchmark_context as string | null) ??
     mdSnippets.traction ??
     null;
+  const investorLine =
+    Array.isArray(traction?.investor_list) && traction.investor_list.length > 0
+      ? `Investors: ${traction.investor_list
+          .map((v: unknown) =>
+            typeof v === "string"
+              ? v
+              : v && typeof v === "object" && "name" in (v as Record<string, unknown>)
+                ? String((v as Record<string, unknown>).name ?? "")
+                : ""
+          )
+          .filter(Boolean)
+          .join(", ")}`
+      : null;
+
   const tractionDetails = joinDefined([
-    traction?.inferred_stage && `Inferred stage: ${traction.inferred_stage}`,
-    traction?.reported_arr && `Reported ARR: ${traction.reported_arr}`,
-    traction?.reported_revenue_growth_rate &&
-      `Revenue growth rate: ${traction.reported_revenue_growth_rate}`,
-    Array.isArray(traction?.investor_list) &&
-      traction.investor_list.length > 0 &&
-      `Investors: ${traction.investor_list
-        .map((v: unknown) =>
-          typeof v === "string"
-            ? v
-            : v && typeof v === "object" && "name" in (v as Record<string, unknown>)
-              ? String((v as Record<string, unknown>).name ?? "")
-              : ""
-        )
-        .filter(Boolean)
-        .join(", ")}`,
-    traction?.benchmark_context && `Benchmark context: ${traction.benchmark_context}`,
-    traction?.signal_completeness && `Signal completeness: ${traction.signal_completeness}`,
+    traction?.inferred_stage != null && String(traction.inferred_stage).trim()
+      ? `Inferred stage: ${String(traction.inferred_stage)}`
+      : null,
+    traction?.reported_arr != null && String(traction.reported_arr).trim()
+      ? `Reported ARR: ${String(traction.reported_arr)}`
+      : null,
+    traction?.reported_revenue_growth_rate != null && String(traction.reported_revenue_growth_rate).trim()
+      ? `Revenue growth rate: ${String(traction.reported_revenue_growth_rate)}`
+      : null,
+    investorLine,
+    traction?.benchmark_context != null && String(traction.benchmark_context).trim()
+      ? `Benchmark context: ${String(traction.benchmark_context)}`
+      : null,
+    traction?.signal_completeness != null && String(traction.signal_completeness).trim()
+      ? `Signal completeness: ${String(traction.signal_completeness)}`
+      : null,
   ]);
 
   const assumptionsText = assumptions
@@ -185,8 +223,8 @@ function buildStructuredFromDeal(args: {
     .join("\n\n");
 
   const questionsText = questions
-    .map((q) => (q.question_text as string | null) ?? "")
-    .filter((q) => q && q.trim().length > 0)
+    .map((row) => (row.question_text as string | null) ?? "")
+    .filter((line) => line && line.trim().length > 0)
     .join("\n\n");
 
   return {
@@ -262,7 +300,10 @@ export default async function DealPage({ params }: DealPageParams) {
     notFound();
   }
 
-  const scores = (deal.deal_scores as any[]) ?? [];
+  const scores = (Array.isArray(deal.deal_scores) ? deal.deal_scores : []) as Array<{
+    dimension?: string;
+    raw_score?: unknown;
+  }>;
   const normalizeScore = (v: unknown) => {
     if (typeof v !== "number" || Number.isNaN(v)) return null;
     return Math.max(0, Math.min(10, v));
@@ -278,7 +319,8 @@ export default async function DealPage({ params }: DealPageParams) {
     (getScore("solution") ?? 0);
   const compositeScore = composite ? composite / 5 : 0;
 
-  const analysesRaw = Array.isArray((deal as any).deal_analyses) ? (deal as any).deal_analyses : [];
+  const analysesField = (deal as { deal_analyses?: unknown }).deal_analyses;
+  const analysesRaw = Array.isArray(analysesField) ? analysesField : [];
   const analysesSorted = [...analysesRaw].sort((a: { run_at?: string | null }, b: { run_at?: string | null }) => {
     const ta = a.run_at ? new Date(a.run_at).getTime() : 0;
     const tb = b.run_at ? new Date(b.run_at).getTime() : 0;
@@ -296,9 +338,15 @@ export default async function DealPage({ params }: DealPageParams) {
     return arr.find((r) => r.analysis_id === latestAnalysisId) ?? arr[0] ?? null;
   }
 
-  const problemRow = pickRowsForLatestAnalysis(deal.deal_problem as any);
-  const solutionRow = pickRowsForLatestAnalysis(deal.deal_solution as any);
-  const tractionRow = pickRowsForLatestAnalysis(deal.deal_traction as any);
+  const problemRow = pickRowsForLatestAnalysis(
+    deal.deal_problem as { analysis_id?: string } | { analysis_id?: string }[] | null | undefined
+  );
+  const solutionRow = pickRowsForLatestAnalysis(
+    deal.deal_solution as { analysis_id?: string } | { analysis_id?: string }[] | null | undefined
+  );
+  const tractionRow = pickRowsForLatestAnalysis(
+    deal.deal_traction as { analysis_id?: string } | { analysis_id?: string }[] | null | undefined
+  );
   const assumptionsRowsRaw = Array.isArray(deal.deal_assumptions) ? deal.deal_assumptions : [];
   let assumptionsRows = latestAnalysisId
     ? (assumptionsRowsRaw as { analysis_id?: string }[]).filter((a) => a.analysis_id === latestAnalysisId)
@@ -316,11 +364,11 @@ export default async function DealPage({ params }: DealPageParams) {
   const rawOutput = latestAnalysis?.raw_output ?? null;
 
   const structured = buildStructuredFromDeal({
-    problem: problemRow,
-    solution: solutionRow,
-    traction: tractionRow,
-    assumptions: assumptionsRows,
-    questions: questionsRows,
+    problem: (problemRow as Record<string, unknown> | null) ?? null,
+    solution: (solutionRow as Record<string, unknown> | null) ?? null,
+    traction: (tractionRow as Record<string, unknown> | null) ?? null,
+    assumptions: (assumptionsRows as Record<string, unknown>[]) ?? [],
+    questions: (questionsRows as Record<string, unknown>[]) ?? [],
     rawOutput: rawOutput as Record<string, unknown> | null,
   });
 

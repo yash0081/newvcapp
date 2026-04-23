@@ -1,0 +1,80 @@
+{
+  "company_name": "Alpen Labs",
+  "founded_year": 2022,
+  "headquarters": "New York, NY",
+  "founders": [
+    {
+      "name": "Simanta Gautam",
+      "role": "Co-founder & CEO",
+      "background": "MIT Alumnus; previously at SpaceX and Microsoft."
+    },
+    {
+      "name": "Abishkar Chhetri",
+      "role": "Co-founder",
+      "background": "MIT Alumnus with a background in complex engineering systems."
+    },
+    {
+      "name": "Liam Eagan",
+      "role": "Founding Cryptographer",
+      "background": "Former researcher at Blockstream; specialist in zero-knowledge proofs."
+    }
+  ],
+  "founding_team": {
+    "approximate_size": 30,
+    "key_personnel": [
+      {
+        "name": "John Light",
+        "role": "Product",
+        "contribution": "Bitcoin scaling researcher and strategist."
+      },
+      {
+        "name": "Trey Del Bonis",
+        "role": "Protocol Engineer",
+        "contribution": "Core development of the Bitcoin rollup architecture."
+      },
+      {
+        "name": "Manish Bista & Aaron Feickert",
+        "role": "Research & Development",
+        "contribution": "Key contributors to the 1-of-N verifier for Bitcoin."
+      }
+    ]
+  },
+  "traction": {
+    "total_funding": "$19.1 Million",
+    "latest_round": "Series B (January 2025)",
+    "key_investors": [
+      "Ribbit Capital",
+      "Castle Island Ventures",
+      "DBA",
+      "cyber Fund",
+      "Mirana Ventures"
+    ],
+    "milestones": [
+      "Released two public testnets ('Shanghai' and 'Prague') in 2025.",
+      "Partnered with Starknet (October 2025) to build a shared verification layer on Bitcoin.",
+      "Introduced 'Glock,' a new standard for efficient verification on Bitcoin Script.",
+      "Cited by the White House in a 2024 report on blockchain innovation."
+    ]
+  },
+  "problem_statement": {
+    "core_concept": "The Bitcoin Meta-Problem",
+    "description": "Bitcoin is the most secure asset, but lacks the native infrastructure for complex financial applications.",
+    "key_barriers": [
+      "Lack of programmability (Bitcoin Script is too limited for DeFi).",
+      "Scalability constraints (high fees and low transaction throughput).",
+      "Privacy gaps for sensitive institutional or personal transactions.",
+      "Reliance on centralized or honest-majority bridges to move BTC."
+    ]
+  },
+  "solution": {
+    "primary_product": "Strata",
+    "architecture": "A ZK Rollup (Validity Rollup) built on top of Bitcoin.",
+    "key_features": [
+      "EVM Compatibility: Developers can deploy Ethereum-style smart contracts directly on Bitcoin infrastructure.",
+      "Strata Bridge: A trust-minimized, 1-of-N bridge design based on BitVM2 research.",
+      "Glock Protocol: A cryptographic standard that enables Ethereum-like verification efficiency on Bitcoin.",
+      "Bitcoin Dollar (BTD): A Bitcoin-backed, decentralized stablecoin ecosystem."
+    ],
+    "value_proposition": "Allows Bitcoin to function as a programmable financial layer without compromising its core security or decentralization."
+  }
+}

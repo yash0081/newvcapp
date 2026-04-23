@@ -1,0 +1,59 @@
+{
+  "company_name": "Zavo",
+  "founded_year": 2025,
+  "headquarters": "San Francisco, CA & London, UK",
+  "founders": [
+    {
+      "name": "Can Zehebi",
+      "role": "Co-founder & CEO",
+      "background": "Serial entrepreneur with a focus on fintech and payment infrastructure."
+    },
+    {
+      "name": "Ilkan Gezer",
+      "role": "Co-founder & CTO",
+      "background": "Engineer specialized in building unified payment stacks and agentic AI systems."
+    }
+  ],
+  "founding_team": {
+    "size": 8,
+    "key_expertise": "The team consists of experts in full-stack restaurant technology, payment processing, and conversational AI (voice agents)."
+  },
+  "traction": {
+    "funding": {
+      "total_funding": "$500,000+",
+      "latest_round": "Y Combinator (Winter 2026 / Fall 2025)",
+      "lead_investor": "Y Combinator"
+    },
+    "business_metrics": [
+      "Over 400 businesses (restaurants and retail shops) onboarded within the first 6 months of operation.",
+      "Achieved 11+ hours saved per week on reconciliation for early adopters.",
+      "Reports a 32% increase in captured reservations for clients using their AI voice agents.",
+      "Standardized transaction fee of 0.79%, positioning themselves as the low-cost leader compared to Square and SumUp."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "Small and medium-sized restaurants are currently forced to manage a 'chaos stack' of disconnected tools.",
+    "barriers": [
+      "Fragmented Systems: Separate providers for POS, reservations, payments, and marketing that do not communicate.",
+      "Administrative Burden: Owners spend hours on manual reconciliation, menu updates, and staff scheduling.",
+      "Missed Revenue: Inefficient reservation systems lead to missed calls and empty tables during peak hours."
+    ]
+  },
+  "solution": {
+    "primary_product": "AI-Native Operating System for Hospitality",
+    "key_features": [
+      "Unified POS & Payments: A single platform for in-person card terminals, online ordering, and Tap to Pay.",
+      "Zavo Voice Agents: AI agents that answer the phone, handle reservations, and answer customer queries autonomously.",
+      "Agentic Menu Management: AI that allows staff to make instant menu edits or inventory queries via voice/text.",
+      "Automated Marketing: AI-driven loyalty campaigns that trigger based on customer spending patterns without manual input."
+    ],
+    "value_proposition": "Giving every independent restaurant its own 'digital workforce' to handle the admin and operations, allowing owners to focus entirely on the guest experience."
+  },
+  "hypothetical_investment_rejection_reasoning": {
+    "incumbent_dominance": "The restaurant POS market is a 'Red Ocean' dominated by multi-billion dollar giants like Toast, Clover, and Square. These incumbents have massive distribution networks and 'boots on the ground' sales teams that a small startup like Zavo will struggle to match without enormous capital expenditure.",
+    "low-margin_vulnerability": "Zavo’s primary hook is lower transaction fees (0.79%). While attractive for acquisition, this creates a 'race to the bottom' on margins, leaving very little room for the high R&D costs associated with maintaining advanced AI agents.",
+    "the_ai-wrapper_risk": "Many of Zavo's core innovations (AI voice agents and automated marketing) are features that incumbents can—and likely will—integrate directly into their existing platforms. Once Toast or Square launches a native 'AI Reservationist,' Zavo loses its primary differentiation.",
+    "high-churn_vertical": "The small restaurant sector has a notoriously high failure rate. Investing in a company whose growth is tied to the survival of SMB hospitality businesses introduces significant systemic risk, especially in a volatile 2026 economic environment.",
+    "compliance_and_operational_friction": "Customer reviews already highlight 'frozen funds' and compliance delays. For a payment-centric business, any friction in money movement is a death knell for trust, suggesting that their internal infrastructure may not yet be ready for rapid scale."
+  }
+}

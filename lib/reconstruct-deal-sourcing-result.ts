@@ -532,7 +532,7 @@ export async function reconstructDealSourcingResultFromDb(
     { data: traction },
     { data: p3c },
     { data: s3d },
-    { data: market },
+    ,
     { data: core },
     { data: scores },
   ] = await Promise.all([

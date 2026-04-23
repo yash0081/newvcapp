@@ -10,6 +10,18 @@ const compat = new FlatCompat({
 });
 
 const eslintConfig = [
+  {
+    // Avoid linting build output, deps, and generated assets (e.g. `npm run build` + `.next/`).
+    ignores: [
+      "**/.next/**",
+      "**/node_modules/**",
+      "**/out/**",
+      "**/build/**",
+      "**/dist/**",
+      "**/coverage/**",
+      "ingestion-input/**",
+    ],
+  },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
 ];
 

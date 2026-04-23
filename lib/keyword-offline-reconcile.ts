@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { cosineSimilarity, parseVector } from "@/lib/data-layer/shared/vector";
 
 /**
  * Offline reconcile: transitive merge of near-duplicate medoids (single-link via union–find),
@@ -6,36 +7,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  */
 const MERGE_THRESHOLD = 0.97;
 const MAX_MEDOIDS_FOR_PAIRWISE = 900;
-
-function parseVec(v: unknown): number[] | null {
-  if (Array.isArray(v)) {
-    const arr = v.filter((x): x is number => typeof x === "number" && !Number.isNaN(x));
-    return arr.length ? arr : null;
-  }
-  if (typeof v !== "string") return null;
-  const t = v.trim();
-  if (!t.startsWith("[") || !t.endsWith("]")) return null;
-  const body = t.slice(1, -1).trim();
-  if (!body) return null;
-  const out = body
-    .split(",")
-    .map((s) => Number(s.trim()))
-    .filter((n) => !Number.isNaN(n));
-  return out.length ? out : null;
-}
-
-function cosine(a: number[], b: number[]): number {
-  let dot = 0,
-    an = 0,
-    bn = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    an += a[i] * a[i];
-    bn += b[i] * b[i];
-  }
-  if (an <= 0 || bn <= 0) return 0;
-  return dot / (Math.sqrt(an) * Math.sqrt(bn));
-}
 
 class UnionFind {
   private parent = new Map<string, string>();
@@ -70,7 +41,7 @@ export async function reconcileKeywordClustersMedoids(admin: SupabaseClient): Pr
   const parsed = rows
     .map((r) => ({
       id: r.id as string,
-      v: parseVec(r.medoid_embedding),
+      v: parseVector(r.medoid_embedding),
     }))
     .filter((r): r is { id: string; v: number[] } => r.v != null && r.v.length > 0);
 
@@ -78,7 +49,7 @@ export async function reconcileKeywordClustersMedoids(admin: SupabaseClient): Pr
   const n = parsed.length;
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      if (cosine(parsed[i].v, parsed[j].v) >= MERGE_THRESHOLD) {
+      if (cosineSimilarity(parsed[i].v, parsed[j].v) >= MERGE_THRESHOLD) {
         uf.union(parsed[i].id, parsed[j].id);
       }
     }

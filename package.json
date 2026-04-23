@@ -12,7 +12,13 @@
     "backfill-normalized-sections": "tsx scripts/backfill-normalized-sections.ts",
     "backfill-investor-patterns": "tsx scripts/backfill-investor-patterns.ts",
     "backfill-deal-context-nodes": "tsx scripts/backfill-deal-context-nodes.ts",
-    "generate-corpus-enrichment-sql": "tsx scripts/generate-corpus-enrichment-sql.ts"
+    "generate-corpus-enrichment-sql": "tsx scripts/generate-corpus-enrichment-sql.ts",
+    "seed-invested-companies": "tsx scripts/seed-invested-companies-deal-intel.ts",
+    "seed-invested-companies-full": "tsx scripts/seed-invested-companies-deal-intel.ts --materialize",
+    "deal-intel:embed-facts": "tsx scripts/deal-intel-backfill-fact-embeddings.ts",
+    "deal-intel:keywords": "tsx scripts/deal-intel-backfill-keywords.ts",
+    "deal-intel:keywords:offline": "tsx scripts/deal-intel-reconcile-keywords-offline.ts",
+    "deal-intel:validate-parity": "tsx scripts/deal-intel-validate-parity.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.15.0",

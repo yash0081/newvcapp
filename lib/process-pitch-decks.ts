@@ -90,7 +90,7 @@ export async function processPitchDecksForConnection(
   let processed = 0;
   let skippedNoPdf = 0;
   let skippedSize = 0;
-  let skippedAlreadyScored = 0;
+  const skippedAlreadyScored = 0;
   const errors: string[] = [];
   const debug: { gmail_message_id: string; reason: string; detail?: string }[] = [];
 

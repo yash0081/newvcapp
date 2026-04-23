@@ -1,0 +1,63 @@
+{
+  "company_name": "Selfin",
+  "founded_year": 2025,
+  "headquarters": "San Francisco, CA & London, UK",
+  "founders": [
+    {
+      "name": "Paula Gutierrez",
+      "role": "Co-founder & CEO",
+      "background": "Aerospace Engineering (Imperial/MIT/Berkeley); former Quantitative Analyst at Bank of America and researcher at NASA and Rolls-Royce."
+    },
+    {
+      "name": "Joel Tomas Pimentel",
+      "role": "Co-founder & CTO",
+      "background": "Aerospace Engineering (Imperial/Stanford); former consultant at BCG; specialized in complex engineering and 'rocket science' systems."
+    }
+  ],
+  "founding_team": {
+    "size": "Estimated 2-7 employees",
+    "key_expertise": "The team combines elite aerospace engineering (MIT/Stanford) with high-level quantitative finance and strategic consulting backgrounds, specifically focused on AI-driven financial modeling."
+  },
+  "traction": {
+    "funding": {
+      "total_funding": "$7.0 Million",
+      "latest_round": "Seed Round (Post-YC F25)",
+      "lead_investors": [
+        "Y Combinator",
+        "Ripple Impact Investments",
+        "Transpose Platform Management"
+      ]
+    },
+    "milestones": [
+      "Member of the Y Combinator Fall 2025 batch.",
+      "Grew a massive waitlist for their 'First AI Bank' concept during the YC period.",
+      "Integrated with major financial data aggregators to support a unified view of 401ks, crypto, and traditional banking.",
+      "Successfully launched an AI-powered assistant that automates cross-account financial optimizations for early beta users."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "Personal finance is 'fragmented and painful,' with assets scattered across dozens of apps that don't communicate, leading to missed wealth-building opportunities.",
+    "barriers": [
+      "Decision Overload: Users struggle to manually decide between paying off debt, funding a 401k, or moving money to high-yield savings.",
+      "Siloed Data: Banks only see a fraction of a user's financial life, resulting in generic, disconnected advice.",
+      "Administrative Burden: Managing wealth effectively currently requires spreadsheets and hours of manual research that most people avoid."
+    ]
+  },
+  "solution": {
+    "primary_product": "AI-Native Neobank & Financial Assistant",
+    "key_features": [
+      "Full-Context Banking: Connects all financial products—credit, investments, crypto, 401ks, and savings—into one intelligent interface.",
+      "Autonomous Financial Agents: AI agents that 'act' for you, such as automatically moving idle cash into the highest-yielding verified account.",
+      "Personalized Optimizations: Real-time alerts and automated actions to reduce fees and capture better interest rates based on your entire net worth.",
+      "Generative Intelligence: A conversational 'financial brain' that answers complex questions like 'Can I afford this house based on my current tax-loss harvesting strategy?'"
+    ],
+    "value_proposition": "Transforming the bank from a passive storage bucket into an active, intelligent partner that manages your money with the precision of a high-end quantitative trading desk."
+  },
+  "hypothetical_investment_rejection_reasoning": {
+    "trust_and_delegation_risk": "The 'Agency Gap': Selfin’s success requires users to delegate actual movement of funds to an AI. While technically feasible, the psychological barrier to letting an algorithm handle a life savings is massive. We are concerned the 'trust cycle' for this product will be too long for venture-scale growth in the near term.",
+    "the_aggregator_dependency": "The platform is entirely dependent on the stability of third-party APIs (like Plaid). If major banks decide to block these 'agentic' aggregators to protect their own ecosystems, Selfin’s core value proposition disappears. We prefer to invest in companies that own the underlying ledger.",
+    "incumbent_sherlocking": "Massive neobanks like Revolut and Chime have the same data and much larger engineering budgets. We believe they will 'Sherlock' Selfin’s features—integrating similar AI agents directly into their apps—before Selfin can acquire a defensive number of users.",
+    "regulatory_headwinds": "An 'AI-native bank' that makes autonomous financial decisions for consumers is a prime target for the CFPB. The potential for 'algorithmic bias' in lending or automated advice could lead to crippling legal and compliance costs that a seed-stage team is ill-equipped to handle.",
+    "low-retention_utility": "There is a risk that this is a 'set-it-and-forget-it' tool. Once the AI optimizes the user's accounts, there may be little reason for the user to return to the app daily, making it difficult to build a high-engagement platform or a successful secondary marketplace for financial products."
+  }
+}

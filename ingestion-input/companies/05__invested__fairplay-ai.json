@@ -1,0 +1,76 @@
+{
+  "company_name": "FairPlay AI",
+  "founded_year": 2020,
+  "headquarters": "Los Angeles, CA",
+  "founders": [
+    {
+      "name": "Kareem Saleh",
+      "role": "Founder & CEO",
+      "background": "Former executive at Zest.ai and SoftCard; served in the Obama Administration managing international investment teams."
+    },
+    {
+      "name": "John Merrill",
+      "role": "Co-founder & Principal Scientist",
+      "background": "Mathematician and AI expert; previously a lead scientist at Zest.ai and spent 15 years at Microsoft and Google building ML tools."
+    }
+  ],
+  "founding_team": {
+    "key_personnel": [
+      {
+        "name": "Patrick Cadic",
+        "role": "COO",
+        "background": "Experienced operations leader in fintech and high-growth startups."
+      },
+      {
+        "name": "Abby Hogan",
+        "role": "SVP of Legal Affairs",
+        "background": "Specialist in regulatory compliance and fair lending law."
+      },
+      {
+        "name": "Mark Eberstein",
+        "role": "EVP of Data Science",
+        "background": "Expert in algorithmic fairness and statistical modeling."
+      }
+    ],
+    "team_composition": "The team includes veterans from Microsoft, Google, PayPal, and Goldman Sachs, specializing in AI safety, regulatory law, and consumer finance."
+  },
+  "traction": {
+    "funding": {
+      "total_funding": "$24.5 Million",
+      "latest_round": "$10 Million (February 2025)",
+      "lead_investors": "Infinity Ventures",
+      "participating_investors": [
+        "JPMorganChase",
+        "Nyca Partners",
+        "Cross River Digital Ventures",
+        "TTV Capital",
+        "Third Prime Capital"
+      ]
+    },
+    "milestones": [
+      "Reported a 3x increase in revenue and client base throughout 2024.",
+      "Established multi-year partnerships with major financial institutions including Chime, Upgrade, Pathward, and Varo Bank.",
+      "Integrated with risk platforms like Oscilar to provide embedded fairness tools to their customer networks.",
+      "Currently serves over 25 banks and fintechs, managing fairness for billions in loan volume."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "The 'Black Box' Bias Problem: As banks move to AI-driven underwriting, they risk inheriting historical biases that lead to unfair rejection of protected classes.",
+    "barriers": [
+      "Regulatory Pressure: Agencies like the CFPB and regulators under SR 11-7 require AI models to be transparent, explainable, and fair.",
+      "Manual Inefficiency: Traditional fair-lending audits take months and are based on 'batch' data rather than real-time monitoring.",
+      "The 'Second Look' Gap: Lenders often lack an automated way to re-evaluate 'near-miss' applicants who are creditworthy but flagged by biased algorithms."
+    ]
+  },
+  "solution": {
+    "primary_product": "Fairness-as-a-Service™ Platform",
+    "key_features": [
+      "Automated Bias Testing: APIs that back-test and monitor models in real-time to identify disparate impacts on protected groups.",
+      "Second-Look Underwriting: An automated system that re-underwrites declined applications to find creditworthy borrowers the primary model missed.",
+      "SR 11-7 Compliance: Auto-generates regulatory-ready documentation, cutting validation cycles from months to days.",
+      "Agentic AI Validation: Independent evaluation tools for AI agents to ensure they remain safe and compliant in financial environments.",
+      "Fairness Optimization: Proprietary 'loss functions' that teach models to maximize approvals while minimizing disparity during the training phase."
+    ],
+    "value_proposition": "Enabling financial institutions to increase approval rates (typically 10-20%) and revenue without increasing risk, all while maintaining perfect regulatory compliance."
+  }
+}

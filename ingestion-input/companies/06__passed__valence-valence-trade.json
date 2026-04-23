@@ -1,0 +1,63 @@
+{
+  "company_name": "Valence (valence.trade)",
+  "founded_year": 2025,
+  "headquarters": "New York, NY",
+  "founders": [
+    {
+      "name": "Neo Wang",
+      "role": "Co-founder",
+      "background": "Quantitative trader and sports enthusiast; focused on market microstructure and execution."
+    },
+    {
+      "name": "Daniel Kasabov-Nouvion",
+      "role": "Co-founder",
+      "background": "Software engineer with a background in high-performance systems and competitive gaming (LoL)."
+    },
+    {
+      "name": "Arthur Zhou",
+      "role": "Co-founder",
+      "background": "Product and infrastructure engineer; previously built social-gaming platforms (setwithfriends)."
+    }
+  ],
+  "founding_team": {
+    "size": 3,
+    "key_expertise": "The team specializes in low-latency infrastructure, API design, and quantitative trading strategies, specifically tailored for the nascent prediction market asset class."
+  },
+  "traction": {
+    "performance_metrics": [
+      "Processed over 1 Billion contracts through the platform since launch.",
+      "Grew monthly volume from 7 Million contracts in September 2025 to 250 Million by December 2025 (30x growth in 4 months).",
+      "Powers the trading for a top 3 trader on the Kalshi public leaderboard.",
+      "Users report an average of 200%+ month-over-month growth in trading volume after migrating to the Valence terminal."
+    ],
+    "funding": {
+      "latest_round": "Y Combinator Winter 2026 Batch",
+      "status": "Active / Seed Stage"
+    }
+  },
+  "problem_statement": {
+    "core_issue": "The prediction market landscape is highly fragmented, lacking the professional-grade infrastructure found in traditional equities or crypto markets.",
+    "barriers": [
+      "Fragmented Liquidity: Traders must manage separate accounts and interfaces for Kalshi, Polymarket, and others.",
+      "Underdeveloped Tooling: Existing exchanges focus on retail users, leaving systematic and algorithmic traders without robust APIs or backtesting tools.",
+      "Data Inconsistency: There is no unified data layer to match identical markets across different venues, leading to missed arbitrage opportunities."
+    ]
+  },
+  "solution": {
+    "primary_product": "The Prediction Market Superapp",
+    "key_features": [
+      "Unified Orderbook: A single interface to view and trade across Kalshi, Polymarket, and Crypto.com.",
+      "Standardized API: One connector that works for every exchange, allowing algo-traders to deploy strategies once and run them everywhere.",
+      "Smart Routing: Automatically finds the cheapest contracts and deepest liquidity across multiple venues.",
+      "Historical Data: Proprietary datasets and backtesting engines to help traders find edge in event-based markets."
+    ],
+    "value_proposition": "Valence acts as the 'execution layer' for the next generation of event-based finance, turning fragmented betting venues into a professional asset class."
+  },
+  "hypothetical_investment_rejection_reasoning": {
+    "market_concentration_risk": "The 'Duopoly' Problem: Unlike the crypto exchange market (which has dozens of liquid venues), prediction markets in 2026 are heavily dominated by just two players: Polymarket (global) and Kalshi (U.S.). In a 'winner-takes-all' or 'winner-takes-most' scenario, the value of an aggregator is significantly diminished because traders don't need to 'aggregate' if 95% of the volume is on one platform.",
+    "platform_dependency": "Valence is entirely dependent on the goodwill of the underlying exchanges. If Kalshi or Polymarket decide to restrict API access or launch their own professional terminals, Valence’s core product could be rendered obsolete overnight (the 'Sherlocking' risk).",
+    "TAM_limitations": "While the total volume of prediction markets is growing, the subset of 'systematic/algo traders' who need a professional terminal is still relatively small. We are skeptical that the 'pro-trader' segment alone provides a large enough Total Addressable Market (TAM) to justify a venture-scale return.",
+    "Regulatory_Complexity": "Managing a unified interface that bridges CFTC-regulated U.S. exchanges (Kalshi) and offshore crypto-native platforms (Polymarket) creates a massive legal and compliance headache. The risk of being classified as an unregistered broker-dealer is a significant tail risk that we aren't comfortable with at this stage.",
+    "Execution_vs_Moat": "The product is impressive, but the 'moat' (defensibility) is low. Other well-funded trading platforms (like FalconX or even Interactive Brokers) could integrate these features as a minor update to their existing infrastructure once the market reaches sufficient maturity."
+  }
+}

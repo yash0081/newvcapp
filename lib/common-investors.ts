@@ -13,13 +13,6 @@ export type CommonInvestorRow = {
   deals: CommonInvestorDeal[];
 };
 
-export type FetchCommonInvestorsOpts = {
-  /** Deprecated: common investors should be DB-only; kept for call-site compatibility. */
-  rawOutput?: Record<string, unknown> | null;
-  /** Deprecated: common investors should be DB-only; kept for call-site compatibility. */
-  tractionRow?: Record<string, unknown> | null;
-};
-
 function canonicalInvestorName(v: unknown): string {
   if (typeof v !== "string") return "";
   return v
@@ -51,8 +44,7 @@ function mergeCurrentInvestor(map: Map<string, CurrentInv>, rawName: string, inv
 export async function fetchCommonInvestorsForDeal(
   admin: SupabaseClient,
   dealId: string,
-  userId: string,
-  opts?: FetchCommonInvestorsOpts
+  userId: string
 ): Promise<CommonInvestorRow[]> {
   const currentByCanonical = new Map<string, CurrentInv>();
   const currentInvestorIds = new Set<string>();

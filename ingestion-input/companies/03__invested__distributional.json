@@ -1,0 +1,72 @@
+{
+  "company_name": "Distributional",
+  "founded_year": 2023,
+  "headquarters": "San Francisco, CA",
+  "founders": [
+    {
+      "name": "Scott Clark",
+      "role": "Co-founder & CEO",
+      "background": "Former VP & GM of AI Software at Intel; Co-founder and CEO of SigOpt (acquired by Intel)."
+    },
+    {
+      "name": "Nick Payton",
+      "role": "Co-founder",
+      "background": "Former VP of Marketing at SigOpt; background in product and growth for AI platforms."
+    },
+    {
+      "name": "Michael McCourt",
+      "role": "Co-founder & CTO",
+      "background": "Former Head of Engineering at SigOpt and Senior Staff Research Scientist at Intel."
+    },
+    {
+      "name": "Tobias Andreasen, Renaud Bourassa, Keith Laban",
+      "role": "Co-founders",
+      "background": "Senior engineering and product leaders with experience from Stripe, Slack, and Uber."
+    }
+  ],
+  "founding_team": {
+    "key_expertise": "The founding team consists of 11 veterans from industry giants including Google, Meta, Bloomberg, Intel, and Yelp.",
+    "specialization": "Specialists in high-performance computing (HPC), machine learning optimization, and statistical testing."
+  },
+  "traction": {
+    "funding": {
+      "total_funding": "$30 Million",
+      "latest_round": "$19 Million Series A (October 2024)",
+      "seed_round": "$11 Million (December 2023)",
+      "lead_investors": [
+        "Two Sigma Ventures",
+        "Andreessen Horowitz (a16z)"
+      ],
+      "participating_investors": [
+        "Operator Stack",
+        "Point72 Ventures",
+        "SV Angel",
+        "Willowtree Investments",
+        "Oregon Venture Fund"
+      ]
+    },
+    "milestones": [
+      "Currently working with over a dozen design partners in finance, energy, and manufacturing.",
+      "Launched the industry's first enterprise-grade 'Adaptive Testing' platform in 2024.",
+      "Integrated with major MLOps and CI/CD pipelines to automate AI reliability checks."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "AI models are inherently non-deterministic and 'shifty,' making traditional software testing methods (which expect a single correct answer) obsolete.",
+    "barriers": [
+      "The Confidence Gap: Enterprises are afraid to deploy AI because they cannot predict when or why it will fail.",
+      "Vibe Checks: Most teams currently rely on manual, anecdotal testing rather than rigorous statistical data.",
+      "Non-Stationarity: AI behavior changes over time due to data drift or upstream model updates without the developer's knowledge."
+    ]
+  },
+  "solution": {
+    "primary_product": "The Distributional AI Testing Platform",
+    "key_features": [
+      "Statistical Outlier Detection: Analyzes distributions of outputs rather than single data points to identify anomalies.",
+      "Automated Test Suggestions: Uses AI to recommend the best tests for a specific model's use case.",
+      "Adaptive Calibration: Continuously adjusts test thresholds as the model evolves to prevent 'false alarm' fatigue.",
+      "CI/CD Integration: Automatically blocks 'unreliable' model versions from being pushed to production."
+    ],
+    "value_proposition": "Transforming AI testing from a bottleneck into a scalable, automated process that allows enterprises to ship reliable AI products with the same confidence they have in traditional software."
+  }
+}

@@ -1027,7 +1027,6 @@ export function aggregateCommentaryStructured(input: CommentaryInputs): Structur
   }
 
   // Question generation outputs (from PROMPT_QUESTIONS_FIRST_ORDER / PROMPT_QUESTIONS_STRUCTURAL)
-  const questionsSummary: string[] = [];
   const questionsDetails: string[] = [];
   const firstOrderQ = (input.questions_first_order_json ??
     core?.first_order_questions) as Record<string, unknown> | undefined;

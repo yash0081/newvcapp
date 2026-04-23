@@ -1,0 +1,66 @@
+{
+  "company_name": "Tensec",
+  "founded_year": 2023,
+  "headquarters": "Palo Alto & San Francisco, CA",
+  "founders": [
+    {
+      "name": "Helcio Nobre",
+      "role": "CEO & Co-founder",
+      "background": "Former Chief Product Officer at Rapyd; veteran executive from PayPal."
+    },
+    {
+      "name": "Sandrine Cousquer-Okasmaa",
+      "role": "COO & Co-founder",
+      "background": "Former Head of Compliance at Bond; senior legal/compliance roles at Goldman Sachs, Mastercard, and American Express."
+    },
+    {
+      "name": "Yang Wang",
+      "role": "VP Engineering & Co-founder",
+      "background": "Former Head of Product Engineering at Bond."
+    }
+  ],
+  "founding_team": {
+    "key_expertise": "The team consists of approximately 30 veterans from PayPal, Meta, Goldman Sachs, Visa, Mastercard, and Credit Karma.",
+    "specialization": "Deep focus on global compliance, financial infrastructure, and AI-driven growth marketing."
+  },
+  "traction": {
+    "funding": {
+      "total_equity": "$12 Million (Seed Round, June 2025)",
+      "debt_facility": "$60 Million (October 2025)",
+      "lead_investors": "Costanoa Ventures",
+      "participating_investors": [
+        "Quiet Capital",
+        "WillowTree Investments",
+        "Cambrian VC",
+        "Ignia Partners",
+        "Montage Ventures",
+        "Renegade Partners",
+        "Endeavor Scale Up Ventures"
+      ]
+    },
+    "business_metrics": [
+      "Currently managing $10 Billion in annual trade volume for clients.",
+      "Projecting growth to $30 Billion annual volume following 2026 expansion into APAC and EU markets.",
+      "Operating across 36+ countries with support for 17+ currencies.",
+      "Connected to 100+ real-time payment networks."
+    ]
+  },
+  "problem_statement": {
+    "core_issue": "Small and Medium-sized Businesses (SMBs) are historically excluded from the sophisticated financial tools used by large enterprises.",
+    "barriers": [
+      "Legacy Infrastructure: Heavy reliance on 40-year-old SWIFT technology that is slow and opaque.",
+      "Complexity: Global trade companies struggle to offer financial services to their partners due to 'Integration Hell.'",
+      "Inefficiency: High costs and weeks-long verification processes for international money movement."
+    ]
+  },
+  "solution": {
+    "primary_product": "AI-Native Zero-Integration Platform",
+    "key_features": [
+      "Contextual Finance: Embeds FX, cross-border payments, and transaction banking directly where global traders operate.",
+      "Zero-Integration: Allows companies to launch financial services for their clients without heavy engineering overhead.",
+      "AI-Driven Compliance: Uses AI agents to cut risk assessment and verification times from weeks to minutes.",
+      "Revenue Sharing Model: Enables partners to transform payment facilitation from a cost center into a profitable revenue stream."
+    ],
+    "value_proposition": "Modernizing the $190 trillion cross-border market by flipping the banking model—empowering trade companies to act as their own financial hubs for their partners."
+  }
+}

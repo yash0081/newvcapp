@@ -651,7 +651,8 @@ VALUES (
   ${passDetail ? sqlString(passDetail) : "NULL"}
 );\n\n`;
 
-  const { _decision: _d, ...rest } = obj;
+  const { decision, ...rest } = obj;
+  void decision;
   const cleanForDb = {
     ...rest,
     critical_assumptions: assumptions.map((a) => ({
