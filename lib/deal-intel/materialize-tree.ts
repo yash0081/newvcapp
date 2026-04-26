@@ -16,6 +16,8 @@ const CHILD_WEIGHTS: Record<string, number> = {
   market: 1.0,
   traction: 1.0,
   team: 0.95,
+  makeup: 0.85,
+  origin_story: 0.85,
   negatives: 1.0,
   other: 0.8,
 };
@@ -27,6 +29,8 @@ function canonicalChildType(path: string): string {
   if (p.includes("solution")) return "solution";
   if (p.includes("market") || p.includes("tam") || p.includes("sam") || p.includes("som")) return "market";
   if (p.includes("traction") || p.includes("revenue") || p.includes("investor") || p.includes("customer")) return "traction";
+  if (p.includes("origin") || p.includes("history") || p.includes("story")) return "origin_story";
+  if (p.includes("makeup") || p.includes("company_size") || p.includes("people_count")) return "makeup";
   if (p.includes("founder") || p.includes("team") || p.includes("people")) return "team";
   return firstSegment(path);
 }
@@ -66,9 +70,12 @@ export async function materializeDealIntelTree(opts: {
   const meta = (dealRow?.metadata as Record<string, unknown>) ?? {};
   const summary = typeof meta.retrieval_summary === "string" ? meta.retrieval_summary : String(meta.company_name ?? "Deal");
 
-  const { data: factRows, error: ferr } = await admin.rpc("deal_intel_get_fact_nodes", {
-    p_deal_id: dealId,
-  });
+  const { data: factRows, error: ferr } = await admin
+    .schema("deal_intel")
+    .from("deal_fact_node")
+    .select("id, path, sort_key, value_text, value_jsonb, source_map")
+    .eq("deal_id", dealId)
+    .order("sort_key", { ascending: true });
   if (ferr) throw toError(ferr, "Failed to load fact nodes");
   const rows = (factRows ?? []) as Array<{
     id: string;
@@ -76,6 +83,7 @@ export async function materializeDealIntelTree(opts: {
     sort_key: number;
     value_text: string | null;
     value_jsonb: unknown;
+    source_map: Record<string, unknown> | null;
   }>;
   if (rows.length === 0) {
     return { rootId: "", nodeCount: 0 };
@@ -86,6 +94,33 @@ export async function materializeDealIntelTree(opts: {
     const seg = canonicalChildType(r.path);
     if (!bySeg.has(seg)) bySeg.set(seg, []);
     bySeg.get(seg)!.push(r);
+  }
+
+  function mergeSources(maps: Array<Record<string, unknown> | null | undefined>): Record<string, unknown> {
+    const sources: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+    for (const m of maps) {
+      const arr = (m?.sources as unknown) ?? null;
+      if (!Array.isArray(arr)) continue;
+      for (const s of arr) {
+        if (!s || typeof s !== "object") continue;
+        const o = s as Record<string, unknown>;
+        const key = [
+          String(o.document_id ?? ""),
+          String(o.page_number ?? ""),
+          String(o.sentence_id ?? ""),
+          String(o.claim_id ?? ""),
+        ].join("|");
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        sources.push(o);
+      }
+    }
+    const primary = maps.find((m) => typeof m?.primary_document_id === "string")?.primary_document_id;
+    return {
+      ...(primary ? { primary_document_id: primary } : {}),
+      ...(sources.length ? { sources: sources.slice(0, 80) } : {}),
+    };
   }
 
   const { data: rootId, error: rerr } = await admin.rpc("deal_intel_insert_tree_node", {
@@ -104,7 +139,7 @@ export async function materializeDealIntelTree(opts: {
       node_weight: 1,
       use_for_global_similarity: true,
       keywords: [],
-      source_map: { kind: "auto_materialize" },
+      source_map: { kind: "auto_materialize", ...mergeSources(rows.map((r) => r.source_map)) },
     },
   });
   if (rerr || !rootId) throw toError(rerr ?? new Error("root insert"));
@@ -158,7 +193,7 @@ export async function materializeDealIntelTree(opts: {
         node_weight: CHILD_WEIGHTS[seg] ?? CHILD_WEIGHTS.other,
         use_for_global_similarity: true,
         keywords: extractKeywords(`${seg} ${narrative3}`, 24),
-        source_map: { section: seg },
+        source_map: { section: seg, ...mergeSources(frs.map((r) => r.source_map)) },
       },
     });
     if (cerr || !cid) throw toError(cerr, "Failed to insert child tree node");
@@ -200,7 +235,7 @@ export async function materializeDealIntelTree(opts: {
           node_weight: 1,
           use_for_global_similarity: true,
           keywords: extractKeywords(prepended, 20),
-          source_map: { from_fact_id: r.id },
+          source_map: { from_fact_id: r.id, ...mergeSources([r.source_map]) },
         },
       });
       if (serr || !sid) throw toError(serr, "Failed to insert sub-child tree node");
@@ -238,7 +273,7 @@ export async function materializeDealIntelTree(opts: {
           node_weight: 0.5,
           use_for_global_similarity: false,
           keywords: extractKeywords(personaText, 16),
-          source_map: { persona, section: seg },
+          source_map: { persona, section: seg, ...mergeSources(frs.map((r) => r.source_map)) },
         },
       });
       if (perr || !pid) throw toError(perr, "Failed to insert persona sub-child");

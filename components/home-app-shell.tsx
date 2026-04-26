@@ -6,16 +6,12 @@ import { SignOutButton } from "@/components/sign-out-button";
 import { cn } from "@/lib/utils";
 
 const nav: { href: string; label: string }[] = [
-  { href: "/home/chat", label: "Chat" },
-  { href: "/home/deals", label: "Deals" },
-  { href: "/home/deals/grid", label: "Spreadsheet" },
+  { href: "/home/deals", label: "Companies" },
   { href: "/home/research", label: "Thesis & criteria" },
 ];
 
 function navActive(href: string, pathname: string): boolean {
-  if (href === "/home/chat") return pathname === "/home/chat";
   if (href === "/home/research") return pathname === "/home/research";
-  if (href === "/home/deals/grid") return pathname === "/home/deals/grid";
   if (href === "/home/deals") return pathname === "/home/deals" || pathname.startsWith("/home/deal/");
   return false;
 }
@@ -34,7 +30,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
       <header className="shrink-0 border-b border-zinc-200 bg-white z-10">
         <div className="flex items-center gap-3 px-3 md:px-5 py-2.5 md:py-3">
           <Link
-            href="/home/chat"
+            href="/home/deals"
             className="font-semibold tracking-tight text-zinc-900 text-[15px] shrink-0"
           >
             Workroom

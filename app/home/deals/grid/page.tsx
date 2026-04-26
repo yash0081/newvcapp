@@ -1,6 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
-import { SpreadsheetWorkspace } from "@/components/spreadsheet-workspace";
 
 export default async function DealsGridPage() {
   const supabase = await createClient();
@@ -9,7 +8,5 @@ export default async function DealsGridPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/");
 
-  return (
-    <SpreadsheetWorkspace />
-  );
+  redirect("/home/deals");
 }

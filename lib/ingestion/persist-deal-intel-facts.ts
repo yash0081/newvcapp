@@ -165,30 +165,70 @@ const BATCH = 300;
 export async function persistDealIntelFacts(opts: {
   admin: SupabaseClient;
   userId: string;
+  /** When provided, use an existing deal + revision instead of creating new ones. */
+  existing?: { dealId: string; revisionId: string };
   /** Normalized or raw parsing JSON. */
   facts: Record<string, unknown>;
   /** Optional metadata on the deal row. */
   dealMetadata?: Record<string, unknown>;
+  /**
+   * Optional provenance to attach to every node's `source_map`.
+   * This is designed to carry document/page/sentence grounding once the document layer is wired in.
+   */
+  provenance?: {
+    primary_document_id?: string;
+    sources?: Array<{
+      document_id: string;
+      page_number?: number;
+      sentence_id?: string;
+      claim_id?: string;
+      quote?: string;
+    }>;
+    /**
+     * Optional per-node overrides keyed by `path` (same path used for deal_fact_node.path).
+     * When present, `sources_by_path[path]` is used for that node instead of the global `sources`.
+     */
+    sources_by_path?: Record<
+      string,
+      Array<{
+        document_id: string;
+        page_number?: number;
+        sentence_id?: string;
+        claim_id?: string;
+        quote?: string;
+      }>
+    >;
+  };
 }): Promise<{ dealId: string; revisionId: string }> {
-  const { admin, userId, facts, dealMetadata } = opts;
+  const { admin, userId, existing, facts, dealMetadata, provenance } = opts;
   sortCounter = 0;
 
-  const { data: dr, error: dealErr } = await admin.rpc("deal_intel_create_deal_with_revision", {
-    p_user_id: userId,
-    p_deal_metadata: {
-      source: "phase1_placeholder_ingest",
-      ...((dealMetadata ?? {}) as Record<string, unknown>),
-    },
-    p_revision_label: "ingest:placeholder_layer1",
-    p_revision_metadata: { kind: "placeholder_phase1" },
-  });
-  const first = Array.isArray(dr) ? dr[0] : null;
-  if (dealErr || !first) {
-    console.error("persistDealIntelFacts: create deal+revision rpc", dealErr);
-    throw new Error((dealErr as { message?: string } | null)?.message ?? "Failed to create deal_intel deal/revision");
+  let dealId: string;
+  let revisionId: string;
+
+  if (existing?.dealId && existing?.revisionId) {
+    dealId = existing.dealId;
+    revisionId = existing.revisionId;
+  } else {
+    const { data: dr, error: dealErr } = await admin.rpc("deal_intel_create_deal_with_revision", {
+      p_user_id: userId,
+      p_deal_metadata: {
+        source: "phase1_placeholder_ingest",
+        ...((dealMetadata ?? {}) as Record<string, unknown>),
+      },
+      p_revision_label: "ingest:placeholder_layer1",
+      p_revision_metadata: { kind: "placeholder_phase1" },
+    });
+    const first = Array.isArray(dr) ? dr[0] : null;
+    if (dealErr || !first) {
+      console.error("persistDealIntelFacts: create deal+revision rpc", dealErr);
+      throw new Error(
+        (dealErr as { message?: string } | null)?.message ?? "Failed to create deal_intel deal/revision"
+      );
+    }
+    dealId = first.deal_id as string;
+    revisionId = first.revision_id as string;
   }
-  const dealId = first.deal_id as string;
-  const revisionId = first.revision_id as string;
 
   const factRowsRaw: FactNodeInsert[] = [];
   walkFacts(facts, "", factRowsRaw);
@@ -212,6 +252,7 @@ export async function persistDealIntelFacts(opts: {
     const toInsert: FactNodeDbInsert[] = batch.map((r) => {
       const parts = r.path.split("/").filter(Boolean);
       const parentPath = parts.length > 1 ? parts.slice(0, -1).join("/") : null;
+      const perPathSources = provenance?.sources_by_path?.[r.path];
       return {
         deal_id: dealId,
         parent_id: parentPath ? pathToId.get(parentPath) ?? null : null,
@@ -221,6 +262,12 @@ export async function persistDealIntelFacts(opts: {
         value_text: r.value_text,
         value_jsonb: r.value_jsonb,
         source_map: {
+          ...(provenance?.primary_document_id ? { primary_document_id: provenance.primary_document_id } : {}),
+          ...((perPathSources && perPathSources.length)
+            ? { sources: perPathSources }
+            : provenance?.sources && provenance.sources.length
+              ? { sources: provenance.sources }
+              : {}),
           ...(r.source_map ?? {}),
           path_trail: pathTrail(r.path),
           node_path: r.path,
@@ -233,7 +280,9 @@ export async function persistDealIntelFacts(opts: {
     });
 
     if (nodeErr) {
-      await admin.rpc("deal_intel_delete_deal", { p_deal_id: dealId });
+      if (!existing) {
+        await admin.rpc("deal_intel_delete_deal", { p_deal_id: dealId });
+      }
       console.error("persistDealIntelFacts: deal_fact_node insert", nodeErr);
       throw new Error(nodeErr.message);
     }
@@ -262,7 +311,9 @@ export async function persistDealIntelFacts(opts: {
       p_rows: edgeRows,
     });
     if (edgeErr) {
-      await admin.rpc("deal_intel_delete_deal", { p_deal_id: dealId });
+      if (!existing) {
+        await admin.rpc("deal_intel_delete_deal", { p_deal_id: dealId });
+      }
       console.error("persistDealIntelFacts: deal_fact_edge insert", edgeErr);
       throw new Error(edgeErr.message);
     }
