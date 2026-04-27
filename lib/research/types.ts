@@ -30,29 +30,3 @@ export type ResearchPlanSuggestion = {
   steps: ResearchPlanStepInput[];
 };
 
-export type ResearchWorkflowRow = {
-  id: string;
-  deal_id: string;
-  user_id: string;
-  title: string;
-  status: ResearchWorkflowStatus;
-  version: number;
-  metadata: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type ResearchStepRow = {
-  id: string;
-  workflow_id: string;
-  position: number;
-  status: ResearchStepStatus;
-  website: string;
-  task: string;
-  notes: string | null;
-  depends_on_step_ids: string[];
-  metadata: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-};
-

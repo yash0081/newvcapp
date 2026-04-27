@@ -7,15 +7,11 @@
 -- Ensure pgvector exists (Supabase installs it under `extensions` schema).
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'deal_tree_node_kind') THEN
-    CREATE TYPE public.deal_tree_node_kind AS ENUM ('root', 'child', 'sub_child');
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'deal_tree_polarity') THEN
-    CREATE TYPE public.deal_tree_polarity AS ENUM ('positive', 'negative', 'neutral');
-  END IF;
-END $$;
+DROP TYPE IF EXISTS public.deal_tree_node_kind;
+CREATE TYPE public.deal_tree_node_kind AS ENUM ('root', 'child', 'sub_child');
+
+DROP TYPE IF EXISTS public.deal_tree_polarity;
+CREATE TYPE public.deal_tree_polarity AS ENUM ('positive', 'negative', 'neutral');
 
 -- NOTE: keep node_type as free-form text for forward-compatibility, but standardize expected values in app code:
 -- root, problem, solution, market, traction, thesis_fit, team, negatives, delta, persona_skeptic, persona_visionary, persona_incumbent, ...

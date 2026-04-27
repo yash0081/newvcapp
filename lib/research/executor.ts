@@ -1,4 +1,4 @@
-import { runWithTextMultiRaw } from "@/lib/gemini";
+import { parseJsonFromResponseOrNull, runWithTextMultiRaw } from "@/lib/gemini";
 import type { ResearchSource } from "@/lib/research/types";
 
 type ExecutionResult = {
@@ -7,33 +7,22 @@ type ExecutionResult = {
   suggestedStepUpdates: Array<{ reason: string; website: string; task: string }>;
 };
 
-function stripCodeFence(raw: string): string {
-  const s = raw.trim();
-  if (!s.startsWith("```")) return s;
-  return s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-}
-
 function parseExecution(raw: string): ExecutionResult | null {
-  try {
-    const p = JSON.parse(stripCodeFence(raw)) as {
-      notes?: unknown;
-      sources?: unknown;
-      suggestedStepUpdates?: unknown;
+  const normalizeSource = (s: unknown): ResearchSource | null => {
+    if (!s || typeof s !== "object") return null;
+    const x = s as Record<string, unknown>;
+    const url = typeof x.url === "string" ? x.url.trim() : "";
+    if (!url) return null;
+    return {
+      url,
+      title: typeof x.title === "string" ? x.title : undefined,
+      snippet: typeof x.snippet === "string" ? x.snippet : undefined,
     };
-    const sources = Array.isArray(p.sources)
-      ? p.sources
-          .map((s) => {
-            const x = s as Record<string, unknown>;
-            return {
-              url: typeof x.url === "string" ? x.url : "",
-              title: typeof x.title === "string" ? x.title : undefined,
-              snippet: typeof x.snippet === "string" ? x.snippet : undefined,
-            };
-          })
-          .filter((s) => s.url)
-      : [];
-    const updates = Array.isArray(p.suggestedStepUpdates)
-      ? p.suggestedStepUpdates
+  };
+
+  const normalizeUpdates = (v: unknown): Array<{ reason: string; website: string; task: string }> =>
+    Array.isArray(v)
+      ? v
           .map((u) => {
             const x = u as Record<string, unknown>;
             return {
@@ -44,12 +33,66 @@ function parseExecution(raw: string): ExecutionResult | null {
           })
           .filter((u) => u.reason && u.website && u.task)
       : [];
-    const notes = typeof p.notes === "string" ? p.notes : "";
+
+  try {
+    const p = (parseJsonFromResponseOrNull(raw) ?? null) as
+      | {
+          notes?: unknown;
+          summary?: unknown;
+          findings?: unknown;
+          sources?: unknown;
+          evidence?: unknown;
+          suggestedStepUpdates?: unknown;
+        }
+      | null;
+    if (!p || typeof p !== "object") return null;
+
+    const sourcesRaw = Array.isArray(p.sources) ? p.sources : Array.isArray(p.evidence) ? p.evidence : [];
+    const sources = sourcesRaw.map(normalizeSource).filter((s): s is ResearchSource => Boolean(s));
+    const updates = normalizeUpdates(p.suggestedStepUpdates);
+    const notes =
+      typeof p.notes === "string"
+        ? p.notes
+        : typeof p.summary === "string"
+          ? p.summary
+          : Array.isArray(p.findings)
+            ? p.findings
+                .map((f) => (typeof f === "string" ? f : ""))
+                .filter(Boolean)
+                .join("\n")
+            : "";
     if (!notes) return null;
     return { notes, sources, suggestedStepUpdates: updates };
   } catch {
     return null;
   }
+}
+
+function fallbackFromRaw(raw: string): ExecutionResult {
+  const text = raw.trim();
+  const urlRegex = /(https?:\/\/[^\s)]+[^\s),.!?;:])/gi;
+  const seen = new Set<string>();
+  const sources: ResearchSource[] = [];
+  for (const m of text.matchAll(urlRegex)) {
+    const url = String(m[1] || "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    sources.push({ url });
+    if (sources.length >= 8) break;
+  }
+
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 16)
+    .join("\n");
+
+  return {
+    notes: lines || "Execution completed, but model output was unstructured.",
+    sources,
+    suggestedStepUpdates: [],
+  };
 }
 
 export async function executeResearchStep(args: {
@@ -70,8 +113,9 @@ Rules:
 - Include 2-6 sources when available.
 - If evidence is weak, say so explicitly in notes.`;
 
+  let raw = "";
   try {
-    const raw = await runWithTextMultiRaw(
+    raw = await runWithTextMultiRaw(
       prompt,
       [
         { label: "Company name", value: args.companyName || "Unknown" },
@@ -92,10 +136,6 @@ Rules:
     };
   }
 
-  return {
-    notes: "No structured result could be extracted from execution output.",
-    sources: [],
-    suggestedStepUpdates: [],
-  };
+  return raw ? fallbackFromRaw(raw) : { notes: "Execution returned no content.", sources: [], suggestedStepUpdates: [] };
 }
 
