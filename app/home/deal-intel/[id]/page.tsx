@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { redirect, notFound } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CompanyDocuments } from "@/components/crm/company-documents";
@@ -22,15 +23,30 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
     redirect("/");
   }
 
-  const { data: deal, error: dealErr } = await supabase
+  const { data: dealViaRls, error: dealErr } = await supabase
     .schema("deal_intel")
     .from("deal")
     .select("id, created_at, metadata")
     .eq("id", id)
+    .eq("user_id", user.id)
     .maybeSingle();
-  if (dealErr || !deal) {
-    notFound();
+
+  let deal = dealViaRls;
+  if (!deal) {
+    const admin = createAdminClient();
+    const fallback = await admin
+      .schema("deal_intel")
+      .from("deal")
+      .select("id, created_at, metadata")
+      .eq("id", id)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (fallback.error) {
+      console.error("deal detail fallback load:", fallback.error);
+    }
+    deal = fallback.data ?? null;
   }
+  if (dealErr || !deal) notFound();
 
   const meta = (deal.metadata && typeof deal.metadata === "object" ? (deal.metadata as Record<string, unknown>) : {}) as Record<
     string,
@@ -57,9 +73,14 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
             Stage: <span className="font-medium text-zinc-700">{stage ?? "screened"}</span>
           </p>
         </div>
-        <Link className="crm-button w-full sm:w-auto text-center" href={`/home/deal-intel/${id}/meet`}>
-          Start live meeting
-        </Link>
+        <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+          <Link className="crm-button-secondary w-full sm:w-auto text-center" href={`/home/deal-intel/${id}/research`}>
+            Research planner
+          </Link>
+          <Link className="crm-button w-full sm:w-auto text-center" href={`/home/deal-intel/${id}/meet`}>
+            Start live meeting
+          </Link>
+        </div>
       </div>
 
       <Card className="border-zinc-200/90 bg-white">

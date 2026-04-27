@@ -5,7 +5,6 @@ import { useMemo, useState } from "react";
 export function StartMeetingButton(props: { dealId: string }) {
   const [loading, setLoading] = useState(false);
   const [guestUrl, setGuestUrl] = useState<string | null>(null);
-  const [workerCmd, setWorkerCmd] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fullGuestUrl = useMemo(() => {
@@ -21,7 +20,6 @@ export function StartMeetingButton(props: { dealId: string }) {
     setLoading(true);
     setError(null);
     setGuestUrl(null);
-    setWorkerCmd(null);
     try {
       const res = await fetch("/api/meetings/create", {
         method: "POST",
@@ -34,11 +32,6 @@ export function StartMeetingButton(props: { dealId: string }) {
       if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
       if (!json?.guestJoinUrl) throw new Error("Missing guestJoinUrl");
       setGuestUrl(json.guestJoinUrl);
-      if (json.meetingId && json.roomName) {
-        setWorkerCmd(
-          `npm run livekit-worker -- --meetingId=${json.meetingId} --roomName=${json.roomName}`,
-        );
-      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -49,11 +42,6 @@ export function StartMeetingButton(props: { dealId: string }) {
   const copy = async () => {
     if (!fullGuestUrl) return;
     await navigator.clipboard.writeText(fullGuestUrl);
-  };
-
-  const copyCmd = async () => {
-    if (!workerCmd) return;
-    await navigator.clipboard.writeText(workerCmd);
   };
 
   return (
@@ -75,18 +63,6 @@ export function StartMeetingButton(props: { dealId: string }) {
               Copy
             </button>
           </div>
-
-          {workerCmd ? (
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
-                <p className="text-xs text-zinc-500">Local transcription worker command</p>
-                <p className="text-sm font-mono text-zinc-900 break-all">{workerCmd}</p>
-              </div>
-              <button className="crm-button-secondary" onClick={copyCmd} type="button">
-                Copy
-              </button>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </div>

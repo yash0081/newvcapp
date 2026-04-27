@@ -54,6 +54,29 @@ export class TranscriptRingBuffer {
   }
 
   /**
+   * Deepgram emits `END_OF_SPEECH` without transcript alternatives. If the latest segment
+   * for this LiveKit participant (`identity` prefix on `segmentId`) is still non-final,
+   * mark it final so the same persistence + assistant-event paths can run.
+   */
+  finalizeLatestNonFinalForIdentity(identity: string, getRevision: (segmentId: string) => number): TranscriptDelta | null {
+    const prefix = `${identity}:`;
+    const candidates = this.list().filter((s) => s.segmentId.startsWith(prefix));
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => {
+      if (b.tEndMs !== a.tEndMs) return b.tEndMs - a.tEndMs;
+      return b.segmentId.localeCompare(a.segmentId);
+    });
+    const seg = candidates.find((s) => !s.isFinal);
+    if (!seg) return null;
+    const prevRev = getRevision(seg.segmentId);
+    return this.upsert({
+      ...seg,
+      isFinal: true,
+      revision: prevRev,
+    });
+  }
+
+  /**
    * Apply a segment update. If the segmentId already exists:
    * - if content is identical, ignore
    * - otherwise, replace and keep `revision` monotonic

@@ -19,7 +19,12 @@ import { STT as DeepgramSTT } from "@livekit/agents-plugin-deepgram";
 import { stt as lkStt, initializeLogger } from "@livekit/agents";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { TranscriptRingBuffer } from "@/lib/live-assistant/transcript";
-import { getDealContext, matchClaimsHybrid, createMeetingAssistantEvent } from "@/lib/live-assistant/tools";
+import {
+  getDealContext,
+  matchClaimsHybrid,
+  createMeetingAssistantEvent,
+  type ClaimHit,
+} from "@/lib/live-assistant/tools";
 import { shouldAttemptContradiction, verifyContradictions } from "@/lib/live-assistant/contradiction";
 
 function env(name: string): string {
@@ -121,33 +126,42 @@ async function main() {
   });
 
   const handleSpeechEvent = async (p: RemoteParticipant, ev: lkStt.SpeechEvent) => {
-    if (!ev.alternatives?.length) return;
-    const a = ev.alternatives[0]!;
-    const text = String(a.text || "").trim();
-    if (!text) return;
+    let delta: ReturnType<TranscriptRingBuffer["upsert"]>;
 
-    const segmentId = toSegmentKey(p, ev);
-    const prevRev = revisions.get(segmentId) ?? 0;
-    const isFinal =
-      ev.type === lkStt.SpeechEventType.FINAL_TRANSCRIPT || ev.type === lkStt.SpeechEventType.END_OF_SPEECH;
+    if (ev.alternatives?.length) {
+      const a = ev.alternatives[0]!;
+      const text = String(a.text || "").trim();
+      if (!text) return;
 
-    const delta = ring.upsert({
-      segmentId,
-      tStartMs: Math.floor(a.startTime * 1000),
-      tEndMs: Math.floor(a.endTime * 1000),
-      speaker: a.speakerId ? String(a.speakerId) : p.identity,
-      text,
-      isFinal,
-      revision: prevRev,
-    });
+      const segmentId = toSegmentKey(p, ev);
+      const prevRev = revisions.get(segmentId) ?? 0;
+      const isFinal =
+        ev.type === lkStt.SpeechEventType.FINAL_TRANSCRIPT || ev.type === lkStt.SpeechEventType.END_OF_SPEECH;
+
+      delta = ring.upsert({
+        segmentId,
+        tStartMs: Math.floor(a.startTime * 1000),
+        tEndMs: Math.floor(a.endTime * 1000),
+        speaker: a.speakerId ? String(a.speakerId) : p.identity,
+        text,
+        isFinal,
+        revision: prevRev,
+      });
+    } else if (ev.type === lkStt.SpeechEventType.END_OF_SPEECH) {
+      // Deepgram sends EOS with no alternatives; finalize the latest open segment for this speaker.
+      delta = ring.finalizeLatestNonFinalForIdentity(p.identity, (segmentId) => revisions.get(segmentId) ?? 0);
+    } else {
+      return;
+    }
+
     if (!delta) return;
 
-    revisions.set(segmentId, delta.segment.revision);
+    revisions.set(delta.segment.segmentId, delta.segment.revision);
 
     // Append-only persistence: write a new row per revision.
     await admin.schema("deal_intel").from("meeting_transcript_segment").insert({
       meeting_id: meetingId,
-      segment_key: segmentId,
+      segment_key: delta.segment.segmentId,
       revision: delta.segment.revision,
       speaker: delta.segment.speaker ?? null,
       t_start_ms: delta.segment.tStartMs,
@@ -165,12 +179,17 @@ async function main() {
         recentGuestInfo.set(infoKey, now);
 
         try {
-          const candidates = await matchClaimsHybrid(admin, {
-            userId: hostUserId,
-            dealId,
-            queryText: delta.segment.text,
-            limit: 6,
-          });
+          let candidates: ClaimHit[] = [];
+          try {
+            candidates = await matchClaimsHybrid(admin, {
+              userId: hostUserId,
+              dealId,
+              queryText: delta.segment.text,
+              limit: 6,
+            });
+          } catch (e) {
+            console.error("guest matchClaimsHybrid error", e);
+          }
 
           if (candidates.length) {
             const lines: string[] = [];
@@ -192,6 +211,18 @@ async function main() {
                 kind: "guest_context",
                 guest_quote: delta.segment.text,
                 candidates,
+              },
+            });
+          } else if (shouldAttemptContradiction(delta.segment.text)) {
+            await createMeetingAssistantEvent(admin, {
+              meeting_id: meetingId,
+              kind: "key_point",
+              severity: "low",
+              title: "Guest key point",
+              body: delta.segment.text.slice(0, 500),
+              source_map: {
+                kind: "guest_key_point",
+                guest_quote: delta.segment.text,
               },
             });
           }
@@ -218,12 +249,19 @@ async function main() {
                 ? null
                 : String((f as { canonical_value_text?: unknown }).canonical_value_text),
           }));
-          const candidates = await matchClaimsHybrid(admin, {
-            userId: hostUserId,
-            dealId,
-            queryText: delta.segment.text,
-            limit: 18,
-          });
+
+          let candidates: ClaimHit[] = [];
+          try {
+            candidates = await matchClaimsHybrid(admin, {
+              userId: hostUserId,
+              dealId,
+              queryText: delta.segment.text,
+              limit: 18,
+            });
+          } catch (e) {
+            console.error("contradiction matchClaimsHybrid error", e);
+          }
+
           const flags = await verifyContradictions({
             new_quote: delta.segment.text,
             canonical_facts: canonicalFacts,
@@ -244,6 +282,30 @@ async function main() {
                 quote: f.quote,
                 conflicts_with: f.conflicts_with,
                 confidence: f.confidence,
+              },
+            });
+          }
+
+          // Host (non-guest): if the model found no contradiction but we still have retrieved claims, surface them.
+          if (flags.length === 0 && candidates.length > 0 && !isGuestIdentity(p.identity)) {
+            const lines: string[] = [];
+            lines.push(`Statement: "${delta.segment.text.slice(0, 280)}"`);
+            lines.push("");
+            lines.push("Related prior claims:");
+            for (const c of candidates.slice(0, 5)) {
+              const where = c.page_number != null ? `p.${c.page_number}` : "doc";
+              lines.push(`- (${where}) ${c.quote.slice(0, 220)}`);
+            }
+            await createMeetingAssistantEvent(admin, {
+              meeting_id: meetingId,
+              kind: "crm_fact",
+              severity: "low",
+              title: "Related prior claims",
+              body: lines.join("\n"),
+              source_map: {
+                kind: "statement_context",
+                quote: delta.segment.text,
+                candidates,
               },
             });
           }
@@ -275,7 +337,8 @@ async function main() {
     console.log("audio track subscribed", { participant: participant.identity });
     const audio = new AudioStream(track, { sampleRate: 16000, numChannels: 1, frameSizeMs: 20 });
     const stream = dgStt.stream();
-    stream.updateInputStream(audio as unknown as any);
+    type StreamInput = Parameters<typeof stream.updateInputStream>[0];
+    stream.updateInputStream(audio as unknown as StreamInput);
 
     (async () => {
       for await (const ev of stream) {

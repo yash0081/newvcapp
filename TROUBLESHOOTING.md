@@ -83,3 +83,61 @@ If you deleted connections but watch subscriptions are still active:
 2. **Better error handling**: All queries now check for errors and handle missing data gracefully
 3. **Graceful degradation**: If emails can't be fetched, the page still loads and shows "Connect Gmail"
 4. **Webhook resilience**: Webhook endpoint handles missing connections gracefully (returns 200 to prevent retries)
+
+## Live Assistant Local Auto-Start
+
+The live assistant can auto-start locally from the host meeting UI instead of requiring a manual worker terminal command.
+
+### Enable local auto-start
+
+Set this env var in your local environment:
+
+```bash
+LIVE_ASSISTANT_AUTOSTART_LOCAL=1
+```
+
+Auto-start is intentionally limited to local development (`NODE_ENV=development`). If disabled, the host UI shows an explicit reason.
+
+### What to expect
+
+1. Create a meeting and open the host meeting URL (without `?guest=...`)
+2. In the host sidebar, click **Enable live assistant**
+3. Status should change to `running` and show a worker PID
+4. Host will see:
+   - **Live transcript** (finalized transcript segments)
+   - **Assistant events** (context, contradictions, action prompts)
+5. Guest still joins using the guest link and does not need an account
+
+### Common issues
+
+- **Toggle fails with disabled message**: `LIVE_ASSISTANT_AUTOSTART_LOCAL` is not set to `1` (or process is not running in local development mode).
+- **No transcript/events**: confirm host enabled assistant and both host + guest are connected with mic permission.
+- **Contradiction checks missing**: worker may be running without Vertex auth; transcript can still work while advanced checks are limited.
+
+## Research Planner MVP
+
+### Where it lives
+
+- Open a company page at `/home/deal-intel/<dealId>`.
+- Click **Research planner** to open `/home/deal-intel/<dealId>/research`.
+
+### Expected workflow
+
+1. Click **Generate plan** to create website/task steps for the selected company.
+2. Drag steps to reorder, edit website/task fields, add/delete steps.
+3. Click **Save edits** to persist changes (versioned update).
+4. Click **Run ready steps** (or run an individual step) to execute public-web research.
+5. Review **Evidence** and **Suggested plan updates**, then accept/reject suggestions.
+
+### Common issues
+
+- **Generate plan fails**:
+  - Verify Gemini env vars are present (`GEMINI_MODEL_FLASH*`) and restart `npm run dev`.
+  - Ensure the selected deal exists and is owned by the signed-in user.
+- **Execution returns weak/no sources**:
+  - MVP uses public-web grounding only; some tasks require inaccessible/private sources.
+  - Reword the step task to be specific and evidence-oriented.
+- **Version conflict on save**:
+  - Another tab/session modified the workflow. Refresh and apply your changes again.
+- **No workflow appears after generation**:
+  - Confirm migration `035_deal_intel_research_workflow.sql` has been applied in your Supabase environment.

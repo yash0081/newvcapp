@@ -7,6 +7,12 @@ const BIG_MODEL =
   process.env.GEMINI_MODEL_FLASH_LITE?.trim() ||
   "gemini-2.5-flash";
 
+/** Minimum model confidence to surface a contradiction card (aligns with prompt rules). */
+const _rawMinConf = Number(process.env.DEAL_INTEL_CONTRADICTION_MIN_CONFIDENCE ?? 0.55);
+const MIN_CONTRADICTION_CONFIDENCE = Number.isFinite(_rawMinConf)
+  ? Math.min(0.95, Math.max(0.35, _rawMinConf))
+  : 0.55;
+
 export type ContradictionSeverity = "low" | "med" | "high";
 
 export type ContradictionFlag = {
@@ -68,7 +74,7 @@ export async function verifyContradictions(opts: {
     quote: c.quote,
   }));
 
-  const prompt = `You are a meeting assistant that flags contradictions conservatively.\n\nTask:\n- Compare the NEW transcript quote against the canonical facts and prior claims.\n- Return contradiction flags ONLY when you believe there is a real mismatch.\n- Prefer precision over recall.\n\nOutput ONLY valid JSON (no markdown) with this shape:\n{\n  \"flags\": [\n    {\n      \"quote\": string,\n      \"conflicts_with\": {\n        \"fact_path\"?: string|null,\n        \"canonical_value\"?: string|null,\n        \"claim_id\"?: string|null,\n        \"claim_quote\"?: string|null\n      },\n      \"severity\": \"low\"|\"med\"|\"high\",\n      \"confidence\": number,\n      \"suggested_followup_question\"?: string|null\n    }\n  ]\n}\n\nRules:\n- If the NEW quote is vague, do not flag.\n- If multiple candidates are related but not clearly conflicting, do not flag.\n- Only flag if confidence >= 0.65.\n\nNEW quote:\n${newQuote}\n\nCanonical facts:\n${JSON.stringify(facts, null, 2)}\n\nCandidate prior claims:\n${JSON.stringify(claims, null, 2)}`;
+  const prompt = `You are a meeting assistant that flags contradictions conservatively.\n\nTask:\n- Compare the NEW transcript quote against the canonical facts and prior claims.\n- Return contradiction flags ONLY when you believe there is a real mismatch.\n- Prefer precision over recall.\n\nOutput ONLY valid JSON (no markdown) with this shape:\n{\n  \"flags\": [\n    {\n      \"quote\": string,\n      \"conflicts_with\": {\n        \"fact_path\"?: string|null,\n        \"canonical_value\"?: string|null,\n        \"claim_id\"?: string|null,\n        \"claim_quote\"?: string|null\n      },\n      \"severity\": \"low\"|\"med\"|\"high\",\n      \"confidence\": number,\n      \"suggested_followup_question\"?: string|null\n    }\n  ]\n}\n\nRules:\n- If the NEW quote is vague, do not flag.\n- If multiple candidates are related but not clearly conflicting, do not flag.\n- Only flag if confidence >= ${MIN_CONTRADICTION_CONFIDENCE}.\n\nNEW quote:\n${newQuote}\n\nCanonical facts:\n${JSON.stringify(facts, null, 2)}\n\nCandidate prior claims:\n${JSON.stringify(claims, null, 2)}`;
 
   const text = await vertexRunWithText(BIG_MODEL, prompt, false);
   const parsed = (parseJsonFromResponseOrNull(text) ?? (await parseJsonFromResponseWithRepair(text))) as {
@@ -80,7 +86,7 @@ export async function verifyContradictions(opts: {
   for (const f of rawFlags) {
     const obj = f as Partial<ContradictionFlag> & { conflicts_with?: unknown };
     const conf = clamp01(typeof obj.confidence === "number" ? obj.confidence : 0);
-    if (conf < 0.65) continue;
+    if (conf < MIN_CONTRADICTION_CONFIDENCE) continue;
     const sev = typeof obj.severity === "string" && isSeverity(obj.severity) ? obj.severity : "low";
     const cw = (obj.conflicts_with && typeof obj.conflicts_with === "object" ? obj.conflicts_with : {}) as Record<
       string,

@@ -43,6 +43,9 @@ export default async function CompanyMeetPage(props: { params: Promise<{ id: str
           <p className="text-xs text-zinc-500">
             Guests won’t need an account. They’ll be prompted for mic consent in the browser.
           </p>
+          <p className="text-xs text-zinc-500">
+            After joining as host, enable the live assistant in-room to start transcript and assistant events.
+          </p>
         </CardContent>
       </Card>
     </div>

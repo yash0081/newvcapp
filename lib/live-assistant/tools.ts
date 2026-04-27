@@ -148,6 +148,10 @@ export async function createMeetingAssistantEvent(admin: SupabaseClient, input: 
     severity,
     source_map: input.source_map ?? {},
   };
-  return admin.schema("deal_intel").from("meeting_assistant_event").insert(row).select("id").maybeSingle();
+  const res = await admin.schema("deal_intel").from("meeting_assistant_event").insert(row).select("id").maybeSingle();
+  if (res.error) {
+    console.error("createMeetingAssistantEvent insert failed", res.error.message || res.error, input.kind);
+  }
+  return res;
 }
 
