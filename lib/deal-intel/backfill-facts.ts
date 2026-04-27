@@ -1,8 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { extractKeywords } from "@/lib/data-layer/shared/text";
 import { vectorParam } from "@/lib/data-layer/shared/vector";
-import { embedText } from "@/lib/vertex-embeddings";
+import { embedTexts } from "@/lib/vertex-embeddings";
 import { toError } from "@/lib/supabase/error-format";
+import { chunkArray, mapWithConcurrency } from "@/lib/async/concurrency";
 
 const EMBEDDING_MODEL = process.env.VERTEX_EMBEDDING_MODEL || "text-embedding-004";
 
@@ -29,18 +30,24 @@ export async function backfillDealIntelFactEmbeddings(
     value_jsonb: unknown;
   }>;
 
-  for (const row of rows) {
-    const embeddingInput = nodeToEmbeddingInput(row);
-    const keywords = extractKeywords(embeddingInput, 20);
-    const vec = await embedText(embeddingInput);
+  const embeddingInputs = rows.map((r) => nodeToEmbeddingInput(r));
+  const keywordsByIdx = embeddingInputs.map((s) => extractKeywords(s, 20));
+
+  const vecs: number[][] = [];
+  for (const batch of chunkArray(embeddingInputs, 24)) {
+    const bvec = await embedTexts(batch, 24);
+    vecs.push(...bvec);
+  }
+
+  await mapWithConcurrency(rows, 8, async (row, idx) => {
     const { error: upErr } = await admin.rpc("deal_intel_update_fact_node_enrichment", {
       p_node_id: row.id,
-      p_embedding_input: embeddingInput,
+      p_embedding_input: embeddingInputs[idx]!,
       p_embedding_model: EMBEDDING_MODEL,
-      p_content_embedding: vectorParam(vec),
-      p_keywords: keywords,
+      p_content_embedding: vectorParam(vecs[idx]!),
+      p_keywords: keywordsByIdx[idx]!,
     });
     if (upErr) throw toError(upErr, "Failed to update fact node enrichment");
-  }
+  });
 }
 

@@ -70,7 +70,10 @@ export async function POST(request: NextRequest, ctx: { params: Promise<{ dealId
   const originalName =
     typeof (file as File).name === "string" && (file as File).name.trim() ? (file as File).name : "document.pdf";
   const filename = safeFilename(originalName);
-  const storagePath = `users/${user.id}/deals/${dealId}/${documentId}/${filename}`;
+  const yyyyMm = new Date().toISOString().slice(0, 7); // YYYY-MM
+  // Deterministic, company-scoped storage layout (per PDFs/plan):
+  // companies/<deal_id>/<yyyy-mm>/<document_id>/<filename>
+  const storagePath = `companies/${dealId}/${yyyyMm}/${documentId}/${filename}`;
 
   const { error: upErr } = await admin.storage.from(BUCKET).upload(storagePath, pdfBuffer, {
     contentType: "application/pdf",

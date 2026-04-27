@@ -1,6 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 
+function isAbortLike(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e || "");
+  return msg.includes("AbortError") || msg.includes("aborted") || msg.includes("The operation was aborted");
+}
+
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
@@ -13,13 +18,21 @@ export async function GET(request: Request) {
   const xfProto = request.headers.get("x-forwarded-proto");
   const baseOrigin = xfHost ? `${xfProto || "https"}://${xfHost}` : origin;
 
-  if (code) {
-    const supabase = await createClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
+  try {
+    if (code) {
+      const supabase = await createClient();
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      if (!error) {
+        return NextResponse.redirect(`${baseOrigin}${next}`);
+      }
+    }
+    return NextResponse.redirect(`${baseOrigin}/?error=auth`);
+  } catch (e) {
+    // In dev, Next can abort this request while the browser follows redirects / restarts renders.
+    // Treat AbortError as a non-fatal cancellation and continue to the next page.
+    if (isAbortLike(e)) {
       return NextResponse.redirect(`${baseOrigin}${next}`);
     }
+    throw e;
   }
-
-  return NextResponse.redirect(`${baseOrigin}/?error=auth`);
 }

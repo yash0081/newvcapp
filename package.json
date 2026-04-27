@@ -6,6 +6,7 @@
     "start": "next start",
     "lint": "eslint .",
     "livekit-worker": "tsx scripts/livekit-transcription-worker.ts",
+    "deal-intel:bg-worker": "tsx scripts/deal-intel-bg-worker.ts",
     "backfill-embeddings": "tsx scripts/backfill-deal-embeddings.ts",
     "backfill-retrieval-profile": "tsx scripts/backfill-retrieval-profile.ts",
     "backfill-pass-reason-structure": "tsx scripts/backfill-pass-reason-structure.ts",

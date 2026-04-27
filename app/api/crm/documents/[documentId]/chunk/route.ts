@@ -8,6 +8,7 @@ import { vectorParam } from "@/lib/data-layer/shared/vector";
 import { extractKeywords } from "@/lib/data-layer/shared/text";
 
 const EMBEDDING_MODEL = process.env.VERTEX_EMBEDDING_MODEL || "text-embedding-004";
+const FAST_EMBED_CHUNK_LIMIT = Number(process.env.DEAL_INTEL_FAST_CHUNK_EMBED_LIMIT || 12);
 
 export async function POST(_req: Request, ctx: { params: Promise<{ documentId: string }> }) {
   const { documentId } = await ctx.params;
@@ -98,13 +99,17 @@ export async function POST(_req: Request, ctx: { params: Promise<{ documentId: s
     embedding: string | null;
     embedding_model: string | null;
     keywords: string[];
+    produced_by?: string;
   }> = [];
 
+  let embeddedCount = 0;
   for (const p of pageRows) {
     const chunks = chunkPageText({ pageNumber: p.page_number, text: p.text });
     for (const ch of chunks) {
       const kw = extractKeywords(ch.text, 20);
-      const emb = await embedText(ch.text.slice(0, 8000));
+      const shouldEmbedNow = embeddedCount < FAST_EMBED_CHUNK_LIMIT;
+      const emb = shouldEmbedNow ? await embedText(ch.text.slice(0, 8000)) : null;
+      if (shouldEmbedNow && emb) embeddedCount++;
       chunkRows.push({
         document_id: documentId,
         page_start: ch.pageStart,
@@ -112,9 +117,10 @@ export async function POST(_req: Request, ctx: { params: Promise<{ documentId: s
         char_start: ch.charStart,
         char_end: ch.charEnd,
         text: ch.text,
-        embedding: vectorParam(emb),
-        embedding_model: EMBEDDING_MODEL,
+        embedding: emb ? vectorParam(emb) : null,
+        embedding_model: emb ? EMBEDDING_MODEL : null,
         keywords: kw,
+        produced_by: "fast",
       });
     }
   }
@@ -134,11 +140,21 @@ export async function POST(_req: Request, ctx: { params: Promise<{ documentId: s
     .eq("id", documentId)
     .eq("user_id", user.id);
 
+  // Enqueue background refinement: embed remaining chunks + semantic merging (refined chunking).
+  await admin.rpc("deal_intel_enqueue_job", {
+    p_job_type: "doc_refine_chunks",
+    p_subject_kind: "document",
+    p_subject_id: documentId,
+    p_payload: { document_id: documentId },
+    p_priority: 140,
+  });
+
   return NextResponse.json({
     documentId,
     pages: pageRows.length,
     sentences: sentenceInserts.length,
     chunks: chunkRows.length,
+    chunksEmbeddedFast: embeddedCount,
     status: "chunked",
   });
 }

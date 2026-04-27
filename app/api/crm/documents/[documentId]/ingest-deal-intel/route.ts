@@ -5,9 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { extractDealIntelSchemaFactsFromPdf } from "@/lib/deal-intel/extract-schema-facts";
 import { persistDealIntelSchemaRelational } from "@/lib/deal-intel/persist-schema-relational";
 import { persistDealIntelFacts } from "@/lib/ingestion/persist-deal-intel-facts";
-import { backfillDealIntelFactEmbeddings } from "@/lib/deal-intel/backfill-facts";
 import { materializeDealIntelTree } from "@/lib/deal-intel/materialize-tree";
-import { backfillDealIntelKeywordGraph } from "@/lib/deal-intel/keywords";
 import { linkValueToSentence, quoteForProvenance, type SentenceRow } from "@/lib/deal-intel/citation-link";
 
 function collectLeafStrings(value: unknown, path: string, out: Array<{ path: string; value: string }>) {
@@ -148,10 +146,34 @@ export async function POST(_req: Request, ctx: { params: Promise<{ documentId: s
       },
     });
 
-    // 5) Enrich vector + tree + keywords
-    await backfillDealIntelFactEmbeddings(admin, dealId);
-    await materializeDealIntelTree({ admin, dealId, revisionId });
-    await backfillDealIntelKeywordGraph(admin, dealId);
+    // 5) FAST tree: root centroid + child narratives only (no sub-child embeddings/personas/signal/anchor).
+    await materializeDealIntelTree({ admin, dealId, revisionId, mode: "fast" });
+
+    // 6) Enqueue background enrichment (async)
+    // - embed fact nodes
+    // - keyword graph + offline reconcile
+    // - full tree refinement (sub-child + persona + signal/anchor + root super-centroid)
+    await admin.rpc("deal_intel_enqueue_job", {
+      p_job_type: "fact_backfill_embeddings",
+      p_subject_kind: "deal",
+      p_subject_id: dealId,
+      p_payload: { deal_id: dealId },
+      p_priority: 100,
+    });
+    await admin.rpc("deal_intel_enqueue_job", {
+      p_job_type: "keyword_backfill_graph",
+      p_subject_kind: "deal",
+      p_subject_id: dealId,
+      p_payload: { deal_id: dealId },
+      p_priority: 120,
+    });
+    await admin.rpc("deal_intel_enqueue_job", {
+      p_job_type: "deal_refine_tree_full",
+      p_subject_kind: "deal",
+      p_subject_id: dealId,
+      p_payload: { deal_id: dealId, revision_id: revisionId },
+      p_priority: 150,
+    });
 
     await admin
       .schema("deal_intel")
@@ -160,7 +182,14 @@ export async function POST(_req: Request, ctx: { params: Promise<{ documentId: s
       .eq("id", documentId)
       .eq("user_id", user.id);
 
-    return NextResponse.json({ documentId, dealId, revisionId, status: "ready", linkedPaths: Object.keys(sourcesByPath).length });
+    return NextResponse.json({
+      documentId,
+      dealId,
+      revisionId,
+      status: "ready",
+      linkedPaths: Object.keys(sourcesByPath).length,
+      note: "Fast ingest complete; background enrichment enqueued.",
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error("ingest-deal-intel failed:", e);

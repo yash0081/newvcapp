@@ -5,8 +5,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { extractClaimsFromSentences } from "@/lib/deal-intel/claim-heuristics";
 import { persistDealIntelFacts } from "@/lib/ingestion/persist-deal-intel-facts";
 import { materializeDealIntelTree } from "@/lib/deal-intel/materialize-tree";
-import { backfillDealIntelFactEmbeddings } from "@/lib/deal-intel/backfill-facts";
-import { backfillDealIntelKeywordGraph } from "@/lib/deal-intel/keywords";
 
 export async function POST(_req: Request, ctx: { params: Promise<{ documentId: string }> }) {
   const { documentId } = await ctx.params;
@@ -145,9 +143,30 @@ export async function POST(_req: Request, ctx: { params: Promise<{ documentId: s
     },
   });
 
-  await backfillDealIntelFactEmbeddings(admin, dealId);
-  await materializeDealIntelTree({ admin, dealId, revisionId });
-  await backfillDealIntelKeywordGraph(admin, dealId);
+  await materializeDealIntelTree({ admin, dealId, revisionId, mode: "fast" });
+
+  // Enqueue background enrichment (same as schema-facts ingest).
+  await admin.rpc("deal_intel_enqueue_job", {
+    p_job_type: "fact_backfill_embeddings",
+    p_subject_kind: "deal",
+    p_subject_id: dealId,
+    p_payload: { deal_id: dealId },
+    p_priority: 110,
+  });
+  await admin.rpc("deal_intel_enqueue_job", {
+    p_job_type: "keyword_backfill_graph",
+    p_subject_kind: "deal",
+    p_subject_id: dealId,
+    p_payload: { deal_id: dealId },
+    p_priority: 130,
+  });
+  await admin.rpc("deal_intel_enqueue_job", {
+    p_job_type: "deal_refine_tree_full",
+    p_subject_kind: "deal",
+    p_subject_id: dealId,
+    p_payload: { deal_id: dealId, revision_id: revisionId },
+    p_priority: 160,
+  });
 
   await admin
     .schema("deal_intel")

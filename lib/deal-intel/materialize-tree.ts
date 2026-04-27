@@ -1,14 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { embedText } from "@/lib/vertex-embeddings";
+import { embedTexts } from "@/lib/vertex-embeddings";
 import { parseVector, vectorParam, weightedCentroid } from "@/lib/data-layer/shared/vector";
 import { extractKeywords } from "@/lib/data-layer/shared/text";
 import { toError } from "@/lib/supabase/error-format";
+import { chunkArray, mapWithConcurrency } from "@/lib/async/concurrency";
 
-const PERSONAS = [
-  "skeptic",
-  "visionary",
-  "incumbent",
-] as const;
+const PERSONAS = ["skeptic", "visionary", "incumbent"] as const;
 
 const CHILD_WEIGHTS: Record<string, number> = {
   problem: 1.1,
@@ -53,8 +50,10 @@ export async function materializeDealIntelTree(opts: {
   admin: SupabaseClient;
   dealId: string;
   revisionId: string | null;
+  mode?: "fast" | "full";
 }): Promise<{ rootId: string; nodeCount: number }> {
   const { admin, dealId, revisionId } = opts;
+  const mode: "fast" | "full" = opts.mode ?? "fast";
 
   const { data: prevRootsSnapshot } = await admin.rpc("deal_intel_get_latest_root", {
     p_deal_id: dealId,
@@ -163,10 +162,26 @@ export async function materializeDealIntelTree(opts: {
     ] as typeof rows);
   }
 
-  const childIdBySeg = new Map<string, { id: string; signal: number[] | null; weight: number }>();
+  const childIdBySeg = new Map<string, { id: string; narrative: number[] | null; signal: number[] | null; weight: number }>();
   let ncount = 1;
 
-  for (const [seg, frs] of bySeg) {
+  // Pre-compute child narrative embeddings in a batch.
+  const segs = Array.from(bySeg.entries());
+  const childNarratives = segs.map(([seg, frs]) => {
+    const text = frs
+      .map((x) => factText(x))
+      .filter((t) => t.trim().length)
+      .join(" \n\n ");
+    const narrative = (text || seg).slice(0, 12000);
+    return narrative.split(/\n+/).slice(0, 3).join(" ").slice(0, 1500) || seg;
+  });
+  const childNarrVecs: number[][] = [];
+  for (const batch of chunkArray(childNarratives, 24)) {
+    childNarrVecs.push(...(await embedTexts(batch, 24)));
+  }
+
+  for (let segIdx = 0; segIdx < segs.length; segIdx++) {
+    const [seg, frs] = segs[segIdx]!;
     const text = frs
       .map((x) => factText(x))
       .filter((t) => t.trim().length)
@@ -174,7 +189,7 @@ export async function materializeDealIntelTree(opts: {
     const narrative = (text || seg).slice(0, 12000);
     const firstId = frs[0]?.id;
     const narrative3 = narrative.split(/\n+/).slice(0, 3).join(" ").slice(0, 1500);
-    const narrativeEmb = await embedText(narrative3 || seg);
+    const narrativeEmb = childNarrVecs[segIdx]!;
 
     const { data: cid, error: cerr } = await admin.rpc("deal_intel_insert_tree_node", {
       p_node: {
@@ -197,7 +212,12 @@ export async function materializeDealIntelTree(opts: {
       },
     });
     if (cerr || !cid) throw toError(cerr, "Failed to insert child tree node");
-    childIdBySeg.set(seg, { id: cid, signal: null, weight: CHILD_WEIGHTS[seg] ?? CHILD_WEIGHTS.other });
+    childIdBySeg.set(seg, {
+      id: cid,
+      narrative: narrativeEmb,
+      signal: null,
+      weight: CHILD_WEIGHTS[seg] ?? CHILD_WEIGHTS.other,
+    });
     ncount++;
 
     await admin.rpc("deal_intel_insert_tree_edge", {
@@ -211,139 +231,178 @@ export async function materializeDealIntelTree(opts: {
       },
     });
 
-    for (const r of frs) {
-      const parts = r.path.split("/").filter(Boolean);
-      if (parts.length <= 1) continue;
-      const leaf = factText(r);
-      if (!leaf.trim()) continue;
-      const prepended = `${seg} > ${r.path}: ${leaf}`.slice(0, 8000);
-      const atom = await embedText(prepended);
-      const { data: sid, error: serr } = await admin.rpc("deal_intel_insert_tree_node", {
-        p_node: {
-          deal_id: dealId,
-          revision_id: revisionId,
-          parent_id: cid,
+    // FULL mode: sub-child atomic embeddings + persona nodes.
+    if (mode === "full") {
+      const subInputs: Array<{
+        kind: "sub_child";
+        row: typeof frs[number];
+        node_key: string;
+        text: string;
+      }> = [];
+      for (const r of frs) {
+        const parts = r.path.split("/").filter(Boolean);
+        if (parts.length <= 1) continue;
+        const leaf = factText(r);
+        if (!leaf.trim()) continue;
+        const prepended = `${seg} > ${r.path}: ${leaf}`.slice(0, 8000);
+        subInputs.push({
           kind: "sub_child",
-          node_type: r.path,
-          fact_section_root_id: r.id,
-          node_path: r.path,
+          row: r,
           node_key: parts[parts.length - 1] ?? "leaf",
-          node_value_text: prepended,
-          narrative_text: prepended,
-          atomic_embedding: vectorParam(atom),
-          edge_weight_to_parent: 1,
-          node_weight: 1,
-          use_for_global_similarity: true,
-          keywords: extractKeywords(prepended, 20),
-          source_map: { from_fact_id: r.id, ...mergeSources([r.source_map]) },
-        },
-      });
-      if (serr || !sid) throw toError(serr, "Failed to insert sub-child tree node");
-      ncount++;
-      await admin.rpc("deal_intel_insert_tree_edge", {
-        p_edge: {
-          deal_id: dealId,
-          src_node_id: cid,
-          dst_node_id: sid,
-          edge_kind: "tree",
-          weight: 1,
-          metadata: {},
-        },
-      });
-    }
+          text: prepended,
+        });
+      }
+      const personaInputs = PERSONAS.map((persona) => ({
+        persona,
+        text: `${seg} (${persona} persona): ${narrative3}`.slice(0, 8000),
+      }));
 
-    // Persona sub-child nodes (excluded from global similarity)
-    for (const persona of PERSONAS) {
-      const personaText = `${seg} (${persona} persona): ${narrative3}`.slice(0, 8000);
-      const pvec = await embedText(personaText);
-      const { data: pid, error: perr } = await admin.rpc("deal_intel_insert_tree_node", {
-        p_node: {
-          deal_id: dealId,
-          revision_id: revisionId,
-          parent_id: cid,
-          kind: "persona_subchild",
-          node_type: `${seg}:${persona}`,
-          fact_section_root_id: firstId ?? null,
-          node_path: `/${seg}/persona/${persona}`,
-          node_key: persona,
-          node_value_text: personaText,
-          narrative_text: personaText,
-          atomic_embedding: vectorParam(pvec),
-          edge_weight_to_parent: 0.5,
-          node_weight: 0.5,
-          use_for_global_similarity: false,
-          keywords: extractKeywords(personaText, 16),
-          source_map: { persona, section: seg, ...mergeSources(frs.map((r) => r.source_map)) },
-        },
+      const allTexts = [...subInputs.map((s) => s.text), ...personaInputs.map((p) => p.text)];
+      const allVecs: number[][] = [];
+      for (const batch of chunkArray(allTexts, 24)) {
+        allVecs.push(...(await embedTexts(batch, 24)));
+      }
+
+      // Insert sub-children (parallel DB ops)
+      await mapWithConcurrency(subInputs, 8, async (it, idx) => {
+        const atom = allVecs[idx]!;
+        const { data: sid, error: serr } = await admin.rpc("deal_intel_insert_tree_node", {
+          p_node: {
+            deal_id: dealId,
+            revision_id: revisionId,
+            parent_id: cid,
+            kind: "sub_child",
+            node_type: it.row.path,
+            fact_section_root_id: it.row.id,
+            node_path: it.row.path,
+            node_key: it.node_key,
+            node_value_text: it.text,
+            narrative_text: it.text,
+            atomic_embedding: vectorParam(atom),
+            edge_weight_to_parent: 1,
+            node_weight: 1,
+            use_for_global_similarity: true,
+            keywords: extractKeywords(it.text, 20),
+            source_map: { from_fact_id: it.row.id, ...mergeSources([it.row.source_map]) },
+          },
+        });
+        if (serr || !sid) throw toError(serr, "Failed to insert sub-child tree node");
+        await admin.rpc("deal_intel_insert_tree_edge", {
+          p_edge: {
+            deal_id: dealId,
+            src_node_id: cid,
+            dst_node_id: sid,
+            edge_kind: "tree",
+            weight: 1,
+            metadata: {},
+          },
+        });
       });
-      if (perr || !pid) throw toError(perr, "Failed to insert persona sub-child");
-      await admin.rpc("deal_intel_insert_tree_edge", {
-        p_edge: {
-          deal_id: dealId,
-          src_node_id: cid,
-          dst_node_id: pid,
-          edge_kind: "persona",
-          weight: 0.5,
-          metadata: { persona },
-        },
+      ncount += subInputs.length;
+
+      // Insert personas (parallel DB ops)
+      const personaVecOffset = subInputs.length;
+      await mapWithConcurrency(personaInputs, 4, async (it, pidx) => {
+        const pvec = allVecs[personaVecOffset + pidx]!;
+        const { data: pid, error: perr } = await admin.rpc("deal_intel_insert_tree_node", {
+          p_node: {
+            deal_id: dealId,
+            revision_id: revisionId,
+            parent_id: cid,
+            kind: "persona_subchild",
+            node_type: `${seg}:${it.persona}`,
+            fact_section_root_id: firstId ?? null,
+            node_path: `/${seg}/persona/${it.persona}`,
+            node_key: it.persona,
+            node_value_text: it.text,
+            narrative_text: it.text,
+            atomic_embedding: vectorParam(pvec),
+            edge_weight_to_parent: 0.5,
+            node_weight: 0.5,
+            use_for_global_similarity: false,
+            keywords: extractKeywords(it.text, 16),
+            source_map: { persona: it.persona, section: seg, ...mergeSources(frs.map((r) => r.source_map)) },
+          },
+        });
+        if (perr || !pid) throw toError(perr, "Failed to insert persona sub-child");
+        await admin.rpc("deal_intel_insert_tree_edge", {
+          p_edge: {
+            deal_id: dealId,
+            src_node_id: cid,
+            dst_node_id: pid,
+            edge_kind: "persona",
+            weight: 0.5,
+            metadata: { persona: it.persona },
+          },
+        });
       });
-      ncount++;
+      ncount += personaInputs.length;
     }
   }
 
-  // Compute child signal vectors from non-persona subchildren and anchor vectors from keyword terms.
-  for (const [seg, child] of childIdBySeg) {
-    const { data: subs, error: subErr } = await admin.rpc("deal_intel_get_tree_children", {
-      p_deal_id: dealId,
-      p_parent_id: child.id,
-    });
-    if (subErr) throw toError(subErr, "Failed to load child subnodes");
-    const subRows = (subs ?? []) as Array<{
-      id: string;
-      kind: string;
-      atomic_embedding: unknown;
-      node_weight: number;
-      keywords: string[] | null;
-    }>;
-    const signal = weightedCentroid(
-      subRows
-        .filter((s) => s.kind !== "persona_subchild")
-        .map((s) => ({ vector: parseVector(s.atomic_embedding), weight: Number(s.node_weight ?? 1) }))
-    );
-    const kw = Array.from(
-      new Set(subRows.flatMap((s) => (Array.isArray(s.keywords) ? s.keywords : [])))
-    ).slice(0, 40);
-    let anchor: number[] | null = null;
-    if (kw.length > 0) {
-      const { data: terms } = await admin.rpc("deal_intel_get_keyword_terms", {
-        p_normalized_texts: kw,
+  // FAST mode: approximate root centroid from child narrative vectors (not full sub-child graph).
+  // FULL mode: compute child signal + anchor, then root super-centroid from child signal.
+  let rootCentroid: number[] | null = null;
+  if (mode === "full") {
+    // Compute child signal vectors from non-persona subchildren and anchor vectors from keyword terms.
+    for (const [seg, child] of childIdBySeg) {
+      const { data: subs, error: subErr } = await admin.rpc("deal_intel_get_tree_children", {
+        p_deal_id: dealId,
+        p_parent_id: child.id,
       });
-      anchor = weightedCentroid(
-        ((terms ?? []) as Array<{ normalized_text: string; embedding: unknown }>).map((t) => ({
-          vector: parseVector(t.embedding),
-          weight: 1,
-        }))
+      if (subErr) throw toError(subErr, "Failed to load child subnodes");
+      const subRows = (subs ?? []) as Array<{
+        id: string;
+        kind: string;
+        atomic_embedding: unknown;
+        node_weight: number;
+        keywords: string[] | null;
+      }>;
+      const signal = weightedCentroid(
+        subRows
+          .filter((s) => s.kind !== "persona_subchild")
+          .map((s) => ({ vector: parseVector(s.atomic_embedding), weight: Number(s.node_weight ?? 1) }))
       );
+      const kw = Array.from(new Set(subRows.flatMap((s) => (Array.isArray(s.keywords) ? s.keywords : [])))).slice(0, 40);
+      let anchor: number[] | null = null;
+      if (kw.length > 0) {
+        const { data: terms } = await admin.rpc("deal_intel_get_keyword_terms", {
+          p_normalized_texts: kw,
+        });
+        anchor = weightedCentroid(
+          ((terms ?? []) as Array<{ normalized_text: string; embedding: unknown }>).map((t) => ({
+            vector: parseVector(t.embedding),
+            weight: 1,
+          }))
+        );
+      }
+      const updates: Record<string, unknown> = {
+        signal_embedding: signal ? vectorParam(signal) : null,
+        keywords: kw,
+      };
+      if (anchor) updates.anchor_embedding = vectorParam(anchor);
+      await admin.rpc("deal_intel_update_tree_node_patch", {
+        p_id: child.id,
+        p_patch: updates,
+      });
+      childIdBySeg.set(seg, { ...child, signal });
     }
-    const updates: Record<string, unknown> = {
-      signal_embedding: signal ? vectorParam(signal) : null,
-      keywords: kw,
-    };
-    if (anchor) updates.anchor_embedding = vectorParam(anchor);
-    await admin.rpc("deal_intel_update_tree_node_patch", {
-      p_id: child.id,
-      p_patch: updates,
-    });
-    childIdBySeg.set(seg, { ...child, signal });
-  }
 
-  // Root super-centroid from child signal vectors.
-  const rootCentroid = weightedCentroid(
-    Array.from(childIdBySeg.values()).map((c) => ({
-      vector: c.signal,
-      weight: c.weight,
-    }))
-  );
+    // Root super-centroid from child signal vectors.
+    rootCentroid = weightedCentroid(
+      Array.from(childIdBySeg.values()).map((c) => ({
+        vector: c.signal,
+        weight: c.weight,
+      }))
+    );
+  } else {
+    rootCentroid = weightedCentroid(
+      Array.from(childIdBySeg.values()).map((c) => ({
+        vector: c.narrative,
+        weight: c.weight,
+      }))
+    );
+  }
   const rootPatch: Record<string, unknown> = {};
   if (rootCentroid) {
     rootPatch.centroid_embedding = vectorParam(rootCentroid);
@@ -351,6 +410,7 @@ export async function materializeDealIntelTree(opts: {
   }
 
   // Delta/drift support for revisions: compare previous root centroid if available.
+  // (In FAST mode, drift is still cheap to compute; we just don’t emit a delta node.)
   const prev = (
     (prevRootsSnapshot ?? []) as Array<{ id: string; revision_id: string | null; centroid_embedding: unknown }>
   )[0];
@@ -359,7 +419,7 @@ export async function materializeDealIntelTree(opts: {
     const drift = rootCentroid.map((v, i) => v - prevVec[i]);
     rootPatch.drift_embedding = vectorParam(drift);
     const driftNorm = Math.sqrt(drift.reduce((a, x) => a + x * x, 0));
-    if (driftNorm > 0) {
+    if (mode === "full" && driftNorm > 0) {
       const { data: deltaNodeId, error: deltaErr } = await admin.rpc("deal_intel_insert_tree_node", {
         p_node: {
           deal_id: dealId,
