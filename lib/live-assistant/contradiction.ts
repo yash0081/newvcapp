@@ -1,11 +1,9 @@
 import { vertexRunWithText } from "@/lib/vertex";
 import { parseJsonFromResponseOrNull, parseJsonFromResponseWithRepair } from "@/lib/gemini";
 import type { ClaimHit } from "@/lib/live-assistant/tools";
+import { getLiveAssistantModel } from "@/lib/live-assistant/model-env";
 
-const BIG_MODEL =
-  process.env.GEMINI_MODEL_FLASH?.trim() ||
-  process.env.GEMINI_MODEL_FLASH_LITE?.trim() ||
-  "gemini-2.5-flash";
+const BIG_MODEL = getLiveAssistantModel("big");
 
 /** Minimum model confidence to surface a contradiction card (aligns with prompt rules). */
 const _rawMinConf = Number(process.env.DEAL_INTEL_CONTRADICTION_MIN_CONFIDENCE ?? 0.55);

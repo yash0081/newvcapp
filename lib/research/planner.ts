@@ -1,5 +1,6 @@
-import { runWithTextMultiRaw } from "@/lib/gemini";
+import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { rankSitesForTask } from "@/lib/research/site-ranking";
+import { getResearchModel } from "@/lib/research/research-model-env";
 import type { ResearchPlanSuggestion, WebsiteCategory } from "@/lib/research/types";
 
 type UserPref = {
@@ -129,7 +130,8 @@ Rules:
 - If website is company website, use "company-website".`;
 
   try {
-    const raw = await runWithTextMultiRaw(
+    const raw = await vertexRunWithTextMulti(
+      getResearchModel("flash"),
       prompt,
       [
         { label: "Company name", value: args.companyName || "Unknown" },
@@ -137,7 +139,6 @@ Rules:
         { label: "Top ranked websites", value: rankedExamples },
         { label: "User website preferences", value: args.preferences },
       ],
-      "flash",
       false
     );
     const parsed = parseSuggestion(raw);

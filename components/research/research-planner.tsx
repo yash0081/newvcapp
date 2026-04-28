@@ -38,6 +38,10 @@ type SuggestedUpdate = {
   task: string;
 };
 
+function suggestionKey(s: SuggestedUpdate): string {
+  return `${s.website}||${s.task}||${s.reason}`;
+}
+
 function getSuggestedUpdates(runs: Run[]): SuggestedUpdate[] {
   const out: SuggestedUpdate[] = [];
   for (const r of runs) {
@@ -71,8 +75,12 @@ export function ResearchPlanner(props: {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
+  const [dismissedSuggestionKeys, setDismissedSuggestionKeys] = useState<Record<string, "accepted" | "rejected">>({});
 
-  const suggestions = useMemo(() => getSuggestedUpdates(runs), [runs]);
+  const suggestions = useMemo(() => {
+    const all = getSuggestedUpdates(runs);
+    return all.filter((s) => !dismissedSuggestionKeys[suggestionKey(s)]);
+  }, [runs, dismissedSuggestionKeys]);
 
   async function refresh() {
     const res = await fetch(`/api/research/workflows/by-deal/${props.dealId}`);
@@ -237,45 +245,85 @@ export function ResearchPlanner(props: {
     }
   }
 
-  async function acceptSuggestions() {
-    if (!workflow || !suggestions.length) return;
-    const merged = [
-      ...steps,
-      ...suggestions.slice(0, 3).map((s, idx) => ({
-        id: `tmp_accept_${Date.now()}_${idx}`,
-        workflow_id: workflow.id,
-        position: steps.length + idx,
-        status: "todo" as const,
+  async function acceptSuggestions(selected: SuggestedUpdate[]) {
+    if (!workflow || !selected.length) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    const accepted = selected;
+    const patchSteps = [
+      ...steps.map((s, i) => ({
+        id: s.id.startsWith("tmp_") ? undefined : s.id,
+        position: i,
         website: s.website,
         task: s.task,
-        notes: null,
-        depends_on_step_ids: [],
+        status: s.status,
+        notes: s.notes,
+        dependsOnStepIds: s.depends_on_step_ids,
+        metadata: s.metadata ?? {},
+      })),
+      ...accepted.map((s, j) => ({
+        position: steps.length + j,
+        website: s.website,
+        task: s.task,
+        status: "todo" as const,
+        notes: null as string | null,
+        dependsOnStepIds: [] as string[],
         metadata: { category: "general", suggested_reason: s.reason },
       })),
     ];
-    setSteps(merged.map((s, i) => ({ ...s, position: i })));
-    await fetch(`/api/research/workflows/${workflow.id}/feedback`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "accept_update",
-        rationale: "Accepted suggested plan updates from execution.",
-        payload: { accepted: suggestions.slice(0, 3) },
-      }),
-    });
-    setMessage("Suggested updates added to workflow. Save to persist.");
+    try {
+      const res = await fetch(`/api/research/workflows/${workflow.id}/steps`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: workflow.version,
+          steps: patchSteps.map((p, i) => ({ ...p, position: i })),
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { workflow?: Workflow; steps?: Step[]; error?: string; currentVersion?: number }
+        | null;
+      if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+      setWorkflow((json?.workflow ?? null) as Workflow | null);
+      setSteps((json?.steps ?? []) as Step[]);
+      await fetch(`/api/research/workflows/${workflow.id}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "accept_update",
+          rationale: "Accepted suggested plan updates from execution.",
+          payload: { accepted },
+        }),
+      });
+      setDismissedSuggestionKeys((prev) => {
+        const next = { ...prev };
+        for (const s of accepted) next[suggestionKey(s)] = "accepted";
+        return next;
+      });
+      setMessage("Suggested steps added and saved to the workflow.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function rejectSuggestions() {
-    if (!workflow || !suggestions.length) return;
+  async function rejectSuggestions(selected: SuggestedUpdate[]) {
+    if (!workflow || !selected.length) return;
     await fetch(`/api/research/workflows/${workflow.id}/feedback`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action: "reject_update",
         rationale: "Suggestions were not relevant.",
-        payload: { rejectedCount: suggestions.length },
+        payload: { rejected: selected },
       }),
+    });
+    setDismissedSuggestionKeys((prev) => {
+      const next = { ...prev };
+      for (const s of selected) next[suggestionKey(s)] = "rejected";
+      return next;
     });
     setMessage("Recorded feedback: suggestions rejected.");
   }
@@ -373,14 +421,42 @@ export function ResearchPlanner(props: {
                   <div key={`${s.website}_${idx}`} className="rounded-xl border border-zinc-200 p-2 bg-zinc-50">
                     <p className="text-xs text-zinc-700">{s.reason}</p>
                     <p className="text-xs text-zinc-500 mt-1">{s.website} — {s.task}</p>
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        className="crm-button-secondary"
+                        onClick={() => acceptSuggestions([s])}
+                        disabled={busy}
+                        type="button"
+                      >
+                        Accept
+                      </button>
+                      <button
+                        className="crm-button-secondary"
+                        onClick={() => rejectSuggestions([s])}
+                        disabled={busy}
+                        type="button"
+                      >
+                        Reject
+                      </button>
+                    </div>
                   </div>
                 ))}
                 <div className="flex gap-2">
-                  <button className="crm-button-secondary" onClick={acceptSuggestions} disabled={busy} type="button">
-                    Accept
+                  <button
+                    className="crm-button-secondary"
+                    onClick={() => acceptSuggestions(suggestions.slice(0, 5))}
+                    disabled={busy}
+                    type="button"
+                  >
+                    Accept all
                   </button>
-                  <button className="crm-button-secondary" onClick={rejectSuggestions} disabled={busy} type="button">
-                    Reject
+                  <button
+                    className="crm-button-secondary"
+                    onClick={() => rejectSuggestions(suggestions.slice(0, 5))}
+                    disabled={busy}
+                    type="button"
+                  >
+                    Reject all
                   </button>
                 </div>
               </div>

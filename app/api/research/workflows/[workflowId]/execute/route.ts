@@ -2,11 +2,38 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
+import { mapWithConcurrency } from "@/lib/async/concurrency";
+import { ingestWebSourceAsDocument } from "@/lib/research/web-ingest";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
   const m = meta as Record<string, unknown>;
   return typeof m.company_name === "string" ? m.company_name : "Company";
+}
+
+type StepRow = {
+  id: string;
+  workflow_id: string;
+  position: number;
+  status: string;
+  website: string;
+  task: string;
+  depends_on_step_ids: string[] | null;
+};
+
+function runnableSteps(steps: StepRow[], maxBatch: number): StepRow[] {
+  const stepIds = new Set(steps.map((s) => s.id));
+  const doneIds = new Set(steps.filter((s) => s.status === "done").map((s) => s.id));
+
+  const depsOk = (s: StepRow) => {
+    const deps = Array.isArray(s.depends_on_step_ids) ? s.depends_on_step_ids : [];
+    return deps.every((d) => stepIds.has(d) && doneIds.has(d));
+  };
+
+  return steps
+    .filter((s) => (s.status === "todo" || s.status === "failed") && depsOk(s))
+    .sort((a, b) => a.position - b.position)
+    .slice(0, maxBatch);
 }
 
 export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: string }> }) {
@@ -26,9 +53,13 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
     .eq("workflow_id", workflowId)
     .order("position", { ascending: true });
   if (stepRes.error) return NextResponse.json({ error: stepRes.error.message }, { status: 500 });
-  const steps = stepRes.data ?? [];
-  const ready = steps.filter((s) => s.status === "todo" || s.status === "failed");
-  if (!ready.length) return NextResponse.json({ ok: true, runs: [], message: "No ready steps to execute." });
+  const steps = (stepRes.data ?? []) as StepRow[];
+
+  const maxBatch = Math.max(1, Math.min(20, Number(process.env.RESEARCH_EXECUTE_MAX_BATCH || 8)));
+  const concurrency = Math.max(1, Math.min(8, Number(process.env.RESEARCH_EXECUTE_CONCURRENCY || 4)));
+
+  const toRun = runnableSteps(steps, maxBatch);
+  if (!toRun.length) return NextResponse.json({ ok: true, runs: [], message: "No ready steps to execute." });
 
   const dealRes = await admin
     .schema("deal_intel")
@@ -41,16 +72,19 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
   const companyName = asCompanyName(dealRes.data?.metadata);
   const companyContext = JSON.stringify((dealRes.data?.metadata ?? {}) as Record<string, unknown>, null, 2);
 
-  const runs: unknown[] = [];
-
-  for (const step of ready.slice(0, 5)) {
+  const executed = await mapWithConcurrency(toRun, concurrency, async (step) => {
     const result = await executeResearchStep({
       companyName,
       companyContext,
       website: step.website,
       task: step.task,
     });
+    return { step, result };
+  });
 
+  const runs: unknown[] = [];
+
+  for (const { step, result } of executed) {
     const run = await admin
       .schema("deal_intel")
       .from("deal_research_step_run")
@@ -70,6 +104,39 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
       .single();
     if (run.error) return NextResponse.json({ error: run.error.message }, { status: 500 });
     runs.push(run.data);
+
+    // Persist the first cited URL into `deal_intel.document_*` (fast path). Keeps UX snappy.
+    const ingested: string[] = [];
+    const first = Array.isArray(result.sources) ? result.sources[0] : null;
+    if (first?.url) {
+      try {
+        const doc = await ingestWebSourceAsDocument({
+          admin,
+          userId: user.id,
+          dealId: String(workflow.deal_id),
+          sourceUrl: first.url,
+          title: first.title,
+          workflowId,
+          stepId: step.id,
+          timeoutMs: 6000,
+        });
+        if (doc?.documentId) ingested.push(doc.documentId);
+      } catch {
+        // ignore
+      }
+    }
+    if (ingested.length) {
+      await admin
+        .schema("deal_intel")
+        .from("deal_research_step_run")
+        .update({
+          metadata: {
+            ...(run.data?.metadata && typeof run.data.metadata === "object" ? run.data.metadata : {}),
+            ingestedDocumentIds: ingested,
+          },
+        })
+        .eq("id", run.data.id);
+    }
 
     const stepUpdate = await admin
       .schema("deal_intel")
@@ -97,4 +164,3 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
 
   return NextResponse.json({ ok: true, runs });
 }
-

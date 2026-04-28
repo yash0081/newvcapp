@@ -1,6 +1,8 @@
-import { runWithPdf } from "@/lib/gemini";
+import { parseJsonFromResponseWithRepair } from "@/lib/gemini";
 import { normalizePhase1Parsing } from "@/lib/phase1-normalize";
 import { PROMPT_DEAL_INTEL_SCHEMA_FACTS } from "@/lib/deal-intel/schema-facts-prompt";
+import { vertexRunWithPdf } from "@/lib/vertex";
+import { getDealIntelIngestionModel } from "@/lib/deal-intel/ingestion-model-env";
 
 function asRecord(raw: unknown): Record<string, unknown> {
   if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
@@ -21,7 +23,9 @@ export async function extractDealIntelSchemaFactsFromPdf(opts: {
   modelTier?: "flash_lite" | "flash";
 }): Promise<Record<string, unknown>> {
   const { pdfBuffer, modelTier } = opts;
-  const parsed = await runWithPdf(PROMPT_DEAL_INTEL_SCHEMA_FACTS, pdfBuffer, modelTier ?? "flash_lite", false);
+  const modelName = getDealIntelIngestionModel(modelTier ?? "flash_lite");
+  const raw = await vertexRunWithPdf(modelName, pdfBuffer, PROMPT_DEAL_INTEL_SCHEMA_FACTS, false);
+  const parsed = (await parseJsonFromResponseWithRepair(raw)) as unknown;
   const obj = asRecord(parsed);
   // Reuse deterministic normalizer: trims + lowercases prose, preserves `name` keys’ casing.
   return normalizePhase1Parsing(obj);

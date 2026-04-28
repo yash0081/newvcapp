@@ -32,6 +32,24 @@ function isAbortLike(e: unknown): boolean {
   return msg.includes("AbortError") || msg.includes("aborted") || msg.includes("The operation was aborted");
 }
 
+function formatWorkerError(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === "object") {
+    const o = e as Record<string, unknown>;
+    const parts: Record<string, unknown> = {};
+    for (const k of ["message", "details", "hint", "code", "status"]) {
+      if (o[k] != null) parts[k] = o[k];
+    }
+    if (Object.keys(parts).length) return JSON.stringify(parts);
+    try {
+      return JSON.stringify(e);
+    } catch {
+      /* fall through */
+    }
+  }
+  return String(e);
+}
+
 async function embedMissingDocumentChunks(admin: ReturnType<typeof createAdminClient>, documentId: string) {
   const { data: rows, error } = await admin
     .schema("deal_intel")
@@ -233,9 +251,15 @@ export async function runBgWorkerLoop(opts: BgWorkerOptions = {}): Promise<never
         await handleJob(admin, j);
         await admin.rpc("deal_intel_finish_job", { p_job_id: j.id, p_ok: true, p_error: null });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = formatWorkerError(e);
+        if (isAbortLike(e)) {
+          // Dev-only noise when tied to Next render aborts; child-process worker avoids this.
+          console.warn("bg-worker job aborted (ignored for logging)", { jobId: j.id, jobType: j.job_type });
+          await admin.rpc("deal_intel_finish_job", { p_job_id: j.id, p_ok: false, p_error: `aborted: ${msg.slice(0, 2000)}` });
+          continue;
+        }
         console.error("bg-worker job failed", { jobId: j.id, jobType: j.job_type, msg });
-        await admin.rpc("deal_intel_finish_job", { p_job_id: j.id, p_ok: false, p_error: msg });
+        await admin.rpc("deal_intel_finish_job", { p_job_id: j.id, p_ok: false, p_error: msg.slice(0, 8000) });
       }
     }
   }

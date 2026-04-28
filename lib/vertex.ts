@@ -5,15 +5,21 @@ import { Storage } from "@google-cloud/storage";
 type VertexEnv = {
   projectId: string;
   location: string;
+  apiEndpoint: string;
   gcsBucket: string | null;
 };
 
 function vertexEnv(): VertexEnv {
   const projectId = process.env.GOOGLE_CLOUD_PROJECT;
   if (!projectId) throw new Error("GOOGLE_CLOUD_PROJECT is not set");
+  const location = process.env.VERTEX_GENERATIVE_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || "global";
   return {
     projectId,
-    location: process.env.GOOGLE_CLOUD_LOCATION || "global",
+    // Generative Gemini calls: default to global endpoint for best availability.
+    // Keep embeddings separate via `VERTEX_EMBEDDING_LOCATION` in `lib/vertex-embeddings.ts`.
+    location,
+    // IMPORTANT: Vertex "global" uses `aiplatform.googleapis.com` (NOT `global-aiplatform.googleapis.com`).
+    apiEndpoint: location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`,
     gcsBucket: process.env.VERTEX_GCS_BUCKET ?? null,
   };
 }
@@ -29,6 +35,7 @@ function getVertexClient(): VertexAI {
   const client = new VertexAI({
     project: env.projectId,
     location: env.location,
+    apiEndpoint: env.apiEndpoint,
   });
   vertexClients.set(key, client);
   return client;

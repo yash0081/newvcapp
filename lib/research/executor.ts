@@ -1,4 +1,6 @@
-import { parseJsonFromResponseOrNull, runWithTextMultiRaw } from "@/lib/gemini";
+import { parseJsonFromResponseOrNull } from "@/lib/gemini";
+import { vertexRunWithTextMulti } from "@/lib/vertex";
+import { getResearchModel } from "@/lib/research/research-model-env";
 import type { ResearchSource } from "@/lib/research/types";
 
 type ExecutionResult = {
@@ -115,7 +117,8 @@ Rules:
 
   let raw = "";
   try {
-    raw = await runWithTextMultiRaw(
+    raw = await vertexRunWithTextMulti(
+      getResearchModel("flash"),
       prompt,
       [
         { label: "Company name", value: args.companyName || "Unknown" },
@@ -123,7 +126,6 @@ Rules:
         { label: "Preferred website", value: args.website },
         { label: "Research task", value: args.task },
       ],
-      "flash",
       true
     );
     const parsed = parseExecution(raw);

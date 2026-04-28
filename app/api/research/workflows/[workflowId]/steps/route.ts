@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
+import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 
 type StepPatch = {
   id?: string;
@@ -52,6 +53,55 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ workflowId: s
     }));
 
   const admin = createAdminClient();
+
+  // Preference learning: detect step additions/removals (best-effort).
+  const prevRes = await admin
+    .schema("deal_intel")
+    .from("deal_research_step")
+    .select("website, task, metadata")
+    .eq("workflow_id", workflowId);
+  const prevSteps = (prevRes.data ?? []) as Array<{ website: string; task: string; metadata: Record<string, unknown> | null }>;
+  const prevSet = new Set(prevSteps.map((s) => `${String(s.website || "").trim().toLowerCase()}||${String(s.task || "").trim()}`));
+  const nextSet = new Set(normalized.map((s) => `${String(s.website || "").trim().toLowerCase()}||${String(s.task || "").trim()}`));
+  const added = normalized.filter((s) => !prevSet.has(`${s.website.toLowerCase()}||${s.task}`));
+  const removed = prevSteps.filter((s) => !nextSet.has(`${String(s.website || "").trim().toLowerCase()}||${String(s.task || "").trim()}`));
+
+  if (workflow.deal_id) {
+    const categoryFor = (meta: unknown) => {
+      if (!meta || typeof meta !== "object") return "general";
+      const m = meta as Record<string, unknown>;
+      return typeof m.category === "string" ? m.category : "general";
+    };
+    const events = [
+      ...added.map((s) => ({
+        domain: s.website,
+        category: categoryFor(s.metadata),
+        deltaPreferenceScore: 0.08,
+        deltaUsageCount: 1,
+        reason: "User added/kept a research step in the plan.",
+        task: s.task,
+      })),
+      ...removed.map((s) => ({
+        domain: s.website,
+        category: categoryFor(s.metadata),
+        deltaPreferenceScore: -0.08,
+        deltaUsageCount: 0,
+        reason: "User removed a research step from the plan.",
+        task: s.task,
+      })),
+    ];
+    try {
+      await recordResearchPreferenceEvents({
+        admin,
+        userId: user.id,
+        dealId: String(workflow.deal_id),
+        events,
+      });
+    } catch {
+      // ignore preference learning failures
+    }
+  }
+
   const del = await admin.schema("deal_intel").from("deal_research_step").delete().eq("workflow_id", workflowId);
   if (del.error) return NextResponse.json({ error: del.error.message }, { status: 500 });
 
