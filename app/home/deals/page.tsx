@@ -1,9 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { createCompanyAction, updateCompanyStageAction } from "@/app/home/deals/server-actions";
 import { StageMenu } from "@/components/crm/stage-menu";
-import { StageSelect } from "@/components/crm/stage-select";
+import { NewCompanyForm } from "@/components/crm/new-company-form";
 
 type Stage = "screened" | "in_process" | "invested" | "passed";
 
@@ -41,32 +40,7 @@ export default async function DealsListPage() {
           <CardTitle className="text-sm">New company</CardTitle>
         </CardHeader>
         <CardContent>
-          <form action={createCompanyAction} className="flex flex-col md:flex-row gap-2 md:items-end">
-            <div className="flex-1 min-w-0">
-              <label className="block text-xs text-zinc-600 mb-1">Name</label>
-              <input
-                name="company_name"
-                required
-                className="crm-input"
-                placeholder="Acme AI"
-              />
-            </div>
-            <div className="flex-1 min-w-0">
-              <label className="block text-xs text-zinc-600 mb-1">Website (optional)</label>
-              <input
-                name="website"
-                className="crm-input"
-                placeholder="https://acme.com"
-              />
-            </div>
-            <div className="w-full md:w-44">
-              <label className="block text-xs text-zinc-600 mb-1">Stage</label>
-              <StageSelect name="crm_stage" defaultValue="screened" />
-            </div>
-            <button className="crm-button">
-              Create
-            </button>
-          </form>
+          <NewCompanyForm />
         </CardContent>
       </Card>
 
@@ -97,7 +71,7 @@ export default async function DealsListPage() {
                         </a>
                       </CardTitle>
                     </div>
-                    <StageMenu dealId={deal.id} current={stage ?? "screened"} action={updateCompanyStageAction} />
+                    <StageMenu dealId={deal.id} current={stage ?? "screened"} />
                   </div>
                   <p className="text-xs text-zinc-400 mt-2">
                     Created {deal.created_at ? new Date(deal.created_at).toLocaleDateString() : "—"}

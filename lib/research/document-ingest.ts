@@ -1,4 +1,3 @@
-import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { chunkPageText } from "@/lib/deal-intel/chunking";
 import { extractKeywords } from "@/lib/data-layer/shared/text";
@@ -6,10 +5,8 @@ import { embedText } from "@/lib/vertex-embeddings";
 import { vectorParam } from "@/lib/data-layer/shared/vector";
 
 export type AdminClient = {
-  schema: (s: string) => {
-    from: (t: string) => unknown;
-  };
-  rpc: (fn: string, args: Record<string, unknown>) => unknown;
+  schema: (s: string) => any;
+  rpc: (fn: string, args: Record<string, unknown>) => any;
 };
 
 const EMBEDDING_MODEL = process.env.VERTEX_EMBEDDING_MODEL || "text-embedding-004";
@@ -39,6 +36,11 @@ export type IngestTextArgs = {
   maxChunks?: number;
   /** Override fast-path embedding count for this ingest. */
   fastEmbedLimit?: number;
+  /**
+   * Optional precomputed chunks. Used for research-step output documents so chunks
+   * can align to citation link boundaries instead of arbitrary page text slicing.
+   */
+  chunkTextsOverride?: string[];
 };
 
 export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ documentId: string } | null> {
@@ -89,7 +91,16 @@ export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ docu
   // Idempotent replace.
   await args.admin.schema("deal_intel").from("document_chunk").delete().eq("document_id", docId);
 
-  const chunks = chunkPageText({ pageNumber: 1, text });
+  const chunks =
+    Array.isArray(args.chunkTextsOverride) && args.chunkTextsOverride.length
+      ? args.chunkTextsOverride.map((t, i) => ({
+          pageStart: 1,
+          pageEnd: 1,
+          charStart: 0 + i, // placeholder; not used for viewer; improves ordering stability
+          charEnd: 0 + i,
+          text: String(t || "").trim(),
+        }))
+      : chunkPageText({ pageNumber: 1, text });
   const fastLimit = Math.max(1, Math.min(args.fastEmbedLimit ?? FAST_EMBED_CHUNK_LIMIT, MAX_FAST_CHUNKS));
   const maxChunks = Math.max(1, args.maxChunks ?? 200);
 
@@ -108,6 +119,7 @@ export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ docu
 
   let embeddedCount = 0;
   for (const ch of chunks) {
+    if (!ch.text) continue;
     const kw = extractKeywords(ch.text, 20);
     const shouldEmbedNow = embeddedCount < fastLimit;
     const emb = shouldEmbedNow ? await embedText(ch.text.slice(0, 8000)) : null;
@@ -147,6 +159,15 @@ export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ docu
     p_subject_id: docId,
     p_payload: { document_id: docId },
     p_priority: 160,
+  });
+
+  // Generate claims from chunked thoughts (background).
+  await args.admin.rpc("deal_intel_enqueue_job", {
+    p_job_type: "doc_extract_claims",
+    p_subject_kind: "document",
+    p_subject_id: docId,
+    p_payload: { document_id: docId },
+    p_priority: 155,
   });
 
   return { documentId: docId };

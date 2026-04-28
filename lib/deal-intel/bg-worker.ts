@@ -1,8 +1,8 @@
-import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { backfillDealIntelFactEmbeddings } from "@/lib/deal-intel/backfill-facts";
 import { backfillDealIntelKeywordGraph, reconcileDealIntelKeywordClustersOffline } from "@/lib/deal-intel/keywords";
 import { materializeDealIntelTree } from "@/lib/deal-intel/materialize-tree";
+import { extractClaimsForDocument } from "@/lib/deal-intel/claim-extract";
 import { embedTexts } from "@/lib/vertex-embeddings";
 import { cosineSimilarity, parseVector, vectorParam, weightedCentroid } from "@/lib/data-layer/shared/vector";
 import { chunkArray, mapWithConcurrency } from "@/lib/async/concurrency";
@@ -206,6 +206,20 @@ async function handleJob(admin: ReturnType<typeof createAdminClient>, job: JobRo
       const documentId = String(payload.document_id ?? job.subject_id);
       await embedMissingDocumentChunks(admin, documentId);
       await mergeAdjacentRefinedChunks(admin, documentId);
+      // Mark document usable; further enrichment is optional.
+      await admin
+        .schema("deal_intel")
+        .from("document")
+        .update({ status: "ready", error_message: null, updated_at: new Date().toISOString() })
+        .eq("id", documentId);
+      return;
+    }
+    case "doc_extract_claims": {
+      const documentId = String(payload.document_id ?? job.subject_id);
+      await extractClaimsForDocument(
+        admin as unknown as { schema: (s: string) => { from: (t: string) => unknown }; rpc: (fn: string, args: Record<string, unknown>) => unknown },
+        documentId
+      );
       return;
     }
     default:

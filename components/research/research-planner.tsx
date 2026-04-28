@@ -94,6 +94,7 @@ export function ResearchPlanner(props: {
   const [error, setError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dismissedSuggestionKeys, setDismissedSuggestionKeys] = useState<Record<string, "accepted" | "rejected">>({});
+  const [dirty, setDirty] = useState(false);
 
   const suggestions = useMemo(() => {
     const all = getSuggestedUpdates(runs);
@@ -145,6 +146,7 @@ export function ResearchPlanner(props: {
       if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
       setWorkflow((json?.workflow ?? null) as Workflow | null);
       setSteps((json?.steps ?? []) as Step[]);
+      setDirty(false);
       setMessage("Research plan generated.");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -169,16 +171,19 @@ export function ResearchPlanner(props: {
         metadata: { category: "general", manual: true },
       },
     ]);
+    setDirty(true);
   }
 
   function removeStep(id: string) {
     setSteps((prev) => prev.filter((s) => s.id !== id).map((s, i) => ({ ...s, position: i })));
+    setDirty(true);
   }
 
   function updateStep(id: string, patch: Partial<Step>) {
     setSteps((prev) =>
       prev.map((s) => (s.id === id ? { ...s, ...patch } : s)).map((s, i) => ({ ...s, position: i }))
     );
+    setDirty(true);
   }
 
   function onDrop(targetId: string) {
@@ -192,6 +197,7 @@ export function ResearchPlanner(props: {
       next.splice(to, 0, moved);
       return next.map((s, i) => ({ ...s, position: i }));
     });
+    setDirty(true);
   }
 
   async function saveSteps() {
@@ -226,6 +232,7 @@ export function ResearchPlanner(props: {
       if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
       setWorkflow((json?.workflow ?? null) as Workflow | null);
       setSteps((json?.steps ?? []) as Step[]);
+      setDirty(false);
       setMessage("Workflow saved.");
       await fetch(`/api/research/workflows/${workflow.id}/feedback`, {
         method: "POST",
@@ -249,6 +256,10 @@ export function ResearchPlanner(props: {
     setError(null);
     setMessage(null);
     try {
+      if (dirty) {
+        // Ensure newly added/edited steps exist in DB before execution.
+        await saveSteps();
+      }
       const res = await fetch(`/api/research/workflows/${workflow.id}/execute`, {
         method: "POST",
       });
@@ -272,6 +283,9 @@ export function ResearchPlanner(props: {
     setBusy(true);
     setError(null);
     try {
+      if (dirty) {
+        await saveSteps();
+      }
       const res = await fetch(`/api/research/workflows/${workflow.id}/execute/${stepId}`, {
         method: "POST",
       });
@@ -388,7 +402,7 @@ export function ResearchPlanner(props: {
               Add step
             </button>
             <button className="crm-button-secondary" onClick={saveSteps} disabled={busy || !workflow} type="button">
-              Save edits
+              {dirty ? "Save edits" : "Saved"}
             </button>
             <button className="crm-button" onClick={runAll} disabled={busy || !workflow || !steps.length} type="button">
               Run ready steps

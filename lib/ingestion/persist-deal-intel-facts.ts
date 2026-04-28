@@ -249,7 +249,37 @@ export async function persistDealIntelFacts(opts: {
   }> = [];
 
   for (const batch of chunk(factRows, BATCH)) {
-    const toInsert: FactNodeDbInsert[] = batch.map((r) => {
+    // Prefetch existing nodes for these paths (idempotent inserts without DB upserts).
+    // This prevents duplicate key violations on (deal_id, path) during retries / re-runs.
+    const batchPaths = batch.map((r) => r.path);
+    const batchParentPaths = batch
+      .map((r) => {
+        const parts = r.path.split("/").filter(Boolean);
+        return parts.length > 1 ? parts.slice(0, -1).join("/") : null;
+      })
+      .filter((p): p is string => Boolean(p));
+    const lookupPaths = Array.from(new Set([...batchPaths, ...batchParentPaths]));
+
+    const { data: existingNodes, error: existErr } = await admin
+      .schema("deal_intel")
+      .from("deal_fact_node")
+      .select("id, path")
+      .eq("deal_id", dealId)
+      .in("path", lookupPaths);
+    if (existErr) {
+      if (!existing) {
+        await admin.rpc("deal_intel_delete_deal", { p_deal_id: dealId });
+      }
+      console.error("persistDealIntelFacts: deal_fact_node prefetch", existErr);
+      throw new Error(existErr.message);
+    }
+    for (const n of (existingNodes ?? []) as Array<{ id: string; path: string }>) {
+      if (n?.path && n?.id) pathToId.set(String(n.path), String(n.id));
+    }
+
+    const toInsert: FactNodeDbInsert[] = batch
+      .filter((r) => !pathToId.has(r.path))
+      .map((r) => {
       const parts = r.path.split("/").filter(Boolean);
       const parentPath = parts.length > 1 ? parts.slice(0, -1).join("/") : null;
       const perPathSources = provenance?.sources_by_path?.[r.path];
@@ -273,11 +303,14 @@ export async function persistDealIntelFacts(opts: {
           node_path: r.path,
         },
       };
-    });
+      });
 
-    const { data: inserted, error: nodeErr } = await admin.rpc("deal_intel_insert_fact_nodes", {
-      p_rows: toInsert,
-    });
+    const { data: inserted, error: nodeErr } =
+      toInsert.length === 0
+        ? { data: [], error: null }
+        : await admin.rpc("deal_intel_insert_fact_nodes", {
+            p_rows: toInsert,
+          });
 
     if (nodeErr) {
       if (!existing) {

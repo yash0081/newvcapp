@@ -9,6 +9,8 @@ type DocRow = {
   id: string;
   original_filename: string | null;
   folder_path: string | null;
+  source_kind?: string | null;
+  mime_type?: string | null;
   status: string;
   created_at: string;
 };
@@ -59,7 +61,7 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
     supabase
       .schema("deal_intel")
       .from("document")
-      .select("id, original_filename, folder_path, status, created_at")
+      .select("id, original_filename, folder_path, source_kind, mime_type, status, created_at")
       .eq("deal_id", id)
       .order("created_at", { ascending: false }),
   ]);

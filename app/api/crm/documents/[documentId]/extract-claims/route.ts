@@ -136,7 +136,14 @@ export async function POST(_req: Request, ctx: { params: Promise<{ documentId: s
     admin,
     userId: user.id,
     existing: { dealId, revisionId },
-    facts: { claims: claimRows.map((c) => ({ claim_type: c.claim_type, key: c.key, quote: c.quote })) },
+    // Avoid collisions on deal_fact_node (unique on deal_id+path): store under a unique per-run root.
+    facts: {
+      [`claims_doc_${documentId.replaceAll("-", "")}_${revisionId.replaceAll("-", "")}`]: claimRows.map((c) => ({
+        claim_type: c.claim_type,
+        key: c.key,
+        quote: c.quote,
+      })),
+    },
     provenance: {
       primary_document_id: documentId,
       sources: [{ document_id: documentId }],

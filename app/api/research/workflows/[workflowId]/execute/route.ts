@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
 import { mapWithConcurrency } from "@/lib/async/concurrency";
-import { ingestSourcesForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
+import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -86,12 +86,16 @@ async function runOneStep(args: {
     });
 
     if (result.ok) {
-      const ingestedDocumentIds = await ingestSourcesForRun({
+      const ingestedDocumentIds = await ingestStepOutputForRun({
         admin,
         userId,
         dealId,
         workflowId,
         stepId: step.id,
+        runId,
+        website: step.website,
+        task: step.task,
+        notes: result.notes,
         sources: result.sources,
       });
 

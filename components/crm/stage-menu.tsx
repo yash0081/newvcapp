@@ -1,8 +1,7 @@
 "use client";
 
-import { useRef } from "react";
+import { useState } from "react";
 import { ChevronDown } from "lucide-react";
-import type { updateCompanyStageAction } from "@/app/home/deals/server-actions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,29 +32,37 @@ function stageRowClass(active: boolean): string {
 export function StageMenu(props: {
   dealId: string;
   current: Stage;
-  action: typeof updateCompanyStageAction;
 }) {
-  const formRef = useRef<HTMLFormElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [val, setVal] = useState<Stage>(props.current);
 
-  const setStage = (s: Stage) => {
-    if (inputRef.current) inputRef.current.value = s;
-    formRef.current?.requestSubmit();
+  const setStage = async (s: Stage) => {
+    if (busy) return;
+    setBusy(true);
+    setVal(s);
+    try {
+      await fetch("/api/crm/companies/stage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deal_id: props.dealId, crm_stage: s }),
+      });
+      window.location.reload();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <form ref={formRef} action={props.action} className="shrink-0">
-      <input type="hidden" name="deal_id" value={props.dealId} />
-      <input ref={inputRef} type="hidden" name="crm_stage" value={props.current} />
-
+    <div className="shrink-0">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 shadow-sm hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900/10"
+            disabled={busy}
+            className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 shadow-sm hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 disabled:opacity-60"
           >
-            <span className={`h-2 w-2 rounded-full ${stageDotClass(props.current)}`} />
-            <span>{stageLabel(props.current)}</span>
+            <span className={`h-2 w-2 rounded-full ${stageDotClass(val)}`} />
+            <span>{stageLabel(val)}</span>
             <ChevronDown className="h-3.5 w-3.5 text-zinc-500" />
           </button>
         </DropdownMenuTrigger>
@@ -66,8 +73,8 @@ export function StageMenu(props: {
           {(["screened", "in_process", "invested", "passed"] as Stage[]).map((s) => (
             <DropdownMenuItem
               key={s}
-              onSelect={() => setStage(s)}
-              className={`rounded-xl px-3 py-2 text-sm focus:bg-zinc-100 ${stageRowClass(s === props.current)}`}
+              onSelect={() => void setStage(s)}
+              className={`rounded-xl px-3 py-2 text-sm focus:bg-zinc-100 ${stageRowClass(s === val)}`}
             >
               <div className="flex items-center gap-2">
                 <span className={`h-2 w-2 rounded-full ${stageDotClass(s)}`} />
@@ -77,7 +84,7 @@ export function StageMenu(props: {
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
-    </form>
+    </div>
   );
 }
 

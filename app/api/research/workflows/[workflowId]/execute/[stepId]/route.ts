@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
-import { ingestSourcesForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
+import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -99,12 +99,16 @@ export async function POST(
     });
 
     if (result.ok) {
-      const ingestedDocumentIds = await ingestSourcesForRun({
+      const ingestedDocumentIds = await ingestStepOutputForRun({
         admin,
         userId: user.id,
         dealId: String(workflow.deal_id),
         workflowId,
         stepId,
+        runId,
+        website: stepRes.data.website,
+        task: stepRes.data.task,
+        notes: result.notes,
         sources: result.sources,
       });
 

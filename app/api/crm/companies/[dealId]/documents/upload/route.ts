@@ -32,7 +32,7 @@ export async function POST(request: NextRequest, ctx: { params: Promise<{ dealId
   const file = formData.get("file");
   const folderPathRaw = formData.get("folderPath");
   const folderPath =
-    typeof folderPathRaw === "string" && folderPathRaw.trim().length > 0 ? folderPathRaw.trim() : null;
+    typeof folderPathRaw === "string" && folderPathRaw.trim().length > 0 ? folderPathRaw.trim() : "Company documents";
 
   if (!(file instanceof Blob)) {
     return NextResponse.json({ error: "No PDF file provided" }, { status: 400 });

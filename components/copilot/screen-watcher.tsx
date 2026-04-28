@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_CHANGE_THRESHOLD,
   computeFrameHash,
@@ -34,6 +34,7 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 export function ScreenWatcher(props: Props) {
+  const onFrame = props.onFrame;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const lastHashRef = useRef<FrameHash | null>(null);
@@ -83,7 +84,7 @@ export function ScreenWatcher(props: Props) {
     }
   }
 
-  async function captureAndMaybeSend() {
+  const captureAndMaybeSend = useCallback(async () => {
     if (tickingRef.current) return;
     if (props.paused) return;
     const video = videoRef.current;
@@ -112,11 +113,11 @@ export function ScreenWatcher(props: Props) {
       if (!blob) return;
 
       const base64 = await blobToBase64(blob);
-      await props.onFrame(base64, "image/jpeg", hostname ?? undefined);
+      await onFrame(base64, "image/jpeg", hostname ?? undefined);
     } finally {
       tickingRef.current = false;
     }
-  }
+  }, [props.paused, onFrame, hostname]);
 
   useEffect(() => {
     if (!active) return;
@@ -124,14 +125,12 @@ export function ScreenWatcher(props: Props) {
       captureAndMaybeSend().catch(() => undefined);
     }, SAMPLE_MS);
     return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, props.paused]);
+  }, [active, captureAndMaybeSend]);
 
   useEffect(() => {
     return () => {
       stopStream();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (

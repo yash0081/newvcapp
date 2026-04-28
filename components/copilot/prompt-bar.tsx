@@ -19,7 +19,7 @@ export function PromptBar(props: {
     <div className="rounded-2xl border border-zinc-200 bg-white p-4 space-y-2">
       <p className="text-sm font-medium text-zinc-900">Ask the copilot</p>
       <p className="text-xs text-zinc-500">
-        Examples: <span className="italic">add the 2025 revenue stats</span>, <span className="italic">grab the founders' background</span>.
+        Examples: <span className="italic">add the 2025 revenue stats</span>, <span className="italic">grab the founders&apos; background</span>.
       </p>
       <div className="flex gap-2">
         <input

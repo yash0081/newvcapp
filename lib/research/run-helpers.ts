@@ -1,61 +1,43 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ingestWebSourceAsDocument } from "@/lib/research/web-ingest";
 import type { ResearchSource } from "@/lib/research/types";
+import { ingestResearchStepOutputAsDocument } from "@/lib/research/step-output-ingest";
 
-const MULTI_INGEST_LIMIT = Math.max(1, Math.min(5, Number(process.env.RESEARCH_INGEST_PER_RUN_LIMIT || 3)));
-const MULTI_INGEST_BUDGET_MS = Math.max(2000, Math.min(20000, Number(process.env.RESEARCH_INGEST_BUDGET_MS || 9000)));
-const PER_SOURCE_TIMEOUT_MS = Math.max(1000, Math.min(15000, Number(process.env.RESEARCH_INGEST_PER_SOURCE_TIMEOUT_MS || 5000)));
+type MinimalAdmin = {
+  schema: (s: string) => { from: (t: string) => unknown };
+  rpc: (fn: string, args: Record<string, unknown>) => unknown;
+};
 
-function uniqueByHostname(sources: ResearchSource[]): ResearchSource[] {
-  const seen = new Set<string>();
-  const out: ResearchSource[] = [];
-  for (const s of sources) {
-    if (!s?.url) continue;
-    let host = "";
-    try {
-      host = new URL(s.url).hostname.toLowerCase();
-    } catch {
-      continue;
-    }
-    if (!host || seen.has(host)) continue;
-    seen.add(host);
-    out.push(s);
-  }
-  return out;
-}
-
-export async function ingestSourcesForRun(args: {
+export async function ingestStepOutputForRun(args: {
   admin: SupabaseClient;
   userId: string;
   dealId: string;
   workflowId: string;
   stepId: string;
+  runId: string;
+  website: string;
+  task: string;
+  notes: string;
   sources: ResearchSource[];
 }): Promise<string[]> {
-  const candidates = uniqueByHostname(args.sources).slice(0, MULTI_INGEST_LIMIT);
-  if (candidates.length === 0) return [];
-
-  const ingested: string[] = [];
-  const startedAt = Date.now();
-  for (const s of candidates) {
-    if (Date.now() - startedAt > MULTI_INGEST_BUDGET_MS) break;
-    try {
-      const doc = await ingestWebSourceAsDocument({
-        admin: args.admin,
-        userId: args.userId,
-        dealId: args.dealId,
-        sourceUrl: s.url,
-        title: s.title,
-        workflowId: args.workflowId,
-        stepId: args.stepId,
-        timeoutMs: PER_SOURCE_TIMEOUT_MS,
-      });
-      if (doc?.documentId) ingested.push(doc.documentId);
-    } catch {
-      // best-effort; skip failures
-    }
+  try {
+    const doc = await ingestResearchStepOutputAsDocument({
+      // SupabaseClient is structurally compatible with our minimal AdminClient typing.
+      // We intentionally avoid importing Next-only modules in the worker path.
+      admin: args.admin as unknown as MinimalAdmin,
+      userId: args.userId,
+      dealId: args.dealId,
+      workflowId: args.workflowId,
+      stepId: args.stepId,
+      runId: args.runId,
+      website: args.website,
+      task: args.task,
+      notes: args.notes,
+      sources: args.sources,
+    });
+    return doc?.documentId ? [doc.documentId] : [];
+  } catch {
+    return [];
   }
-  return ingested;
 }
 
 export async function recomputeWorkflowStatus(args: {

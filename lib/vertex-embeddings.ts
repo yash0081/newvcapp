@@ -1,4 +1,3 @@
-import "server-only";
 import { GoogleAuth } from "google-auth-library";
 
 /** Vertex text-embedding-004 outputs 768 dimensions. */
@@ -19,6 +18,9 @@ function embeddingEnv() {
 
 const MAX_CHARS = 8000;
 const DEFAULT_BATCH_SIZE = Number(process.env.VERTEX_EMBEDDING_BATCH_SIZE || 24);
+// Vertex applies an input token budget across the whole request; approximate with chars.
+// Very conservative to avoid 400s ("input token count ... supports up to 20000").
+const MAX_REQUEST_CHARS = Number(process.env.VERTEX_EMBEDDING_MAX_REQUEST_CHARS || 60000);
 
 let authClient: GoogleAuth | null = null;
 
@@ -59,8 +61,19 @@ export async function embedTexts(texts: string[], batchSize = DEFAULT_BATCH_SIZE
 
   const out: number[][] = [];
   const bs = Math.max(1, Math.min(96, Math.floor(batchSize || DEFAULT_BATCH_SIZE)));
-  for (let i = 0; i < inputs.length; i += bs) {
-    const batch = inputs.slice(i, i + bs);
+
+  for (let i = 0; i < inputs.length; ) {
+    const batch: string[] = [];
+    let totalChars = 0;
+    while (i < inputs.length && batch.length < bs) {
+      const next = inputs[i]!;
+      // always include at least one
+      if (batch.length > 0 && (totalChars + next.length) > MAX_REQUEST_CHARS) break;
+      batch.push(next);
+      totalChars += next.length;
+      i++;
+    }
+
     const res = await fetch(url, {
       method: "POST",
       headers: {
