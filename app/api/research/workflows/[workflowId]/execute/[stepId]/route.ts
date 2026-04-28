@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
-import { ingestWebSourceAsDocument } from "@/lib/research/web-ingest";
+import { ingestSourcesForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -63,78 +63,128 @@ export async function POST(
   const companyName = asCompanyName(dealRes.data?.metadata);
   const companyContext = JSON.stringify((dealRes.data?.metadata ?? {}) as Record<string, unknown>, null, 2);
 
-  const result = await executeResearchStep({
-    companyName,
-    companyContext,
-    website: stepRes.data.website,
-    task: stepRes.data.task,
-  });
-
-  const run = await admin
+  const runIns = await admin
     .schema("deal_intel")
     .from("deal_research_step_run")
     .insert({
       workflow_id: workflowId,
       step_id: stepId,
-      run_status: "done",
-      output_notes: result.notes,
-      sources: result.sources,
-      metadata: {
-        suggestedStepUpdates: result.suggestedStepUpdates,
-        website: stepRes.data.website,
-        task: stepRes.data.task,
-      },
+      run_status: "running",
+      output_notes: null,
+      sources: [],
+      metadata: { website: stepRes.data.website, task: stepRes.data.task },
     })
     .select("id, workflow_id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
     .single();
-  if (run.error) return NextResponse.json({ error: run.error.message }, { status: 500 });
+  if (runIns.error || !runIns.data) {
+    return NextResponse.json({ error: runIns.error?.message ?? "Failed to create run row" }, { status: 500 });
+  }
+  const runId = runIns.data.id as string;
 
-  // Persist web sources into the same document/chunk store as uploads (best-effort, fast path).
-  const ingested: string[] = [];
-  const first = Array.isArray(result.sources) ? result.sources[0] : null;
-  if (first?.url) {
-    try {
-      const doc = await ingestWebSourceAsDocument({
+  await admin
+    .schema("deal_intel")
+    .from("deal_research_step")
+    .update({ status: "running", updated_at: new Date().toISOString() })
+    .eq("id", stepId)
+    .eq("workflow_id", workflowId);
+
+  let runRow: typeof runIns.data = runIns.data;
+
+  try {
+    const result = await executeResearchStep({
+      companyName,
+      companyContext,
+      website: stepRes.data.website,
+      task: stepRes.data.task,
+    });
+
+    if (result.ok) {
+      const ingestedDocumentIds = await ingestSourcesForRun({
         admin,
         userId: user.id,
         dealId: String(workflow.deal_id),
-        sourceUrl: first.url,
-        title: first.title,
         workflowId,
         stepId,
-        timeoutMs: 6000,
+        sources: result.sources,
       });
-      if (doc?.documentId) ingested.push(doc.documentId);
-    } catch {
-      // ignore
-    }
-  }
 
-  if (ingested.length) {
+      const upd = await admin
+        .schema("deal_intel")
+        .from("deal_research_step_run")
+        .update({
+          run_status: "done",
+          output_notes: result.notes,
+          sources: result.sources,
+          error_message: null,
+          metadata: {
+            suggestedStepUpdates: result.suggestedStepUpdates,
+            website: stepRes.data.website,
+            task: stepRes.data.task,
+            ingestedDocumentIds,
+          },
+        })
+        .eq("id", runId)
+        .select("id, workflow_id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
+        .single();
+      if (upd.error) throw new Error(upd.error.message);
+      runRow = upd.data;
+
+      const stepUpd = await admin
+        .schema("deal_intel")
+        .from("deal_research_step")
+        .update({
+          status: "done",
+          notes: result.notes.slice(0, 5000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", stepId)
+        .eq("workflow_id", workflowId);
+      if (stepUpd.error) throw new Error(stepUpd.error.message);
+    } else {
+      const upd = await admin
+        .schema("deal_intel")
+        .from("deal_research_step_run")
+        .update({
+          run_status: "failed",
+          output_notes: null,
+          sources: [],
+          error_message: result.errorMessage,
+          metadata: { website: stepRes.data.website, task: stepRes.data.task },
+        })
+        .eq("id", runId)
+        .select("id, workflow_id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
+        .single();
+      if (!upd.error && upd.data) runRow = upd.data;
+
+      await admin
+        .schema("deal_intel")
+        .from("deal_research_step")
+        .update({ status: "failed", updated_at: new Date().toISOString() })
+        .eq("id", stepId)
+        .eq("workflow_id", workflowId);
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     await admin
       .schema("deal_intel")
       .from("deal_research_step_run")
       .update({
-        metadata: {
-          ...(run.data?.metadata && typeof run.data.metadata === "object" ? run.data.metadata : {}),
-          ingestedDocumentIds: ingested,
-        },
+        run_status: "failed",
+        error_message: message,
+        output_notes: null,
+        sources: [],
       })
-      .eq("id", run.data.id);
+      .eq("id", runId);
+    await admin
+      .schema("deal_intel")
+      .from("deal_research_step")
+      .update({ status: "failed", updated_at: new Date().toISOString() })
+      .eq("id", stepId)
+      .eq("workflow_id", workflowId);
+    runRow = { ...runRow, run_status: "failed", error_message: message };
   }
 
-  const stepUpd = await admin
-    .schema("deal_intel")
-    .from("deal_research_step")
-    .update({
-      status: "done",
-      notes: result.notes.slice(0, 5000),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", stepId)
-    .eq("workflow_id", workflowId);
-  if (stepUpd.error) return NextResponse.json({ error: stepUpd.error.message }, { status: 500 });
+  await recomputeWorkflowStatus({ admin, workflowId, userId: user.id });
 
-  return NextResponse.json({ ok: true, run: run.data });
+  return NextResponse.json({ ok: true, run: runRow });
 }
-

@@ -3,13 +3,21 @@ import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import type { ResearchSource } from "@/lib/research/types";
 
-type ExecutionResult = {
+export type ExecutionOk = {
+  ok: true;
   notes: string;
   sources: ResearchSource[];
   suggestedStepUpdates: Array<{ reason: string; website: string; task: string }>;
 };
 
-function parseExecution(raw: string): ExecutionResult | null {
+export type ExecutionErr = {
+  ok: false;
+  errorMessage: string;
+};
+
+export type ExecutionResult = ExecutionOk | ExecutionErr;
+
+function parseExecution(raw: string): Omit<ExecutionOk, "ok"> | null {
   const normalizeSource = (s: unknown): ResearchSource | null => {
     if (!s || typeof s !== "object") return null;
     const x = s as Record<string, unknown>;
@@ -63,14 +71,14 @@ function parseExecution(raw: string): ExecutionResult | null {
                 .filter(Boolean)
                 .join("\n")
             : "";
-    if (!notes) return null;
+    if (!notes && sources.length === 0) return null;
     return { notes, sources, suggestedStepUpdates: updates };
   } catch {
     return null;
   }
 }
 
-function fallbackFromRaw(raw: string): ExecutionResult {
+function fallbackFromRaw(raw: string): Omit<ExecutionOk, "ok"> | null {
   const text = raw.trim();
   const urlRegex = /(https?:\/\/[^\s)]+[^\s),.!?;:])/gi;
   const seen = new Set<string>();
@@ -89,6 +97,8 @@ function fallbackFromRaw(raw: string): ExecutionResult {
     .filter(Boolean)
     .slice(0, 16)
     .join("\n");
+
+  if (!lines && sources.length === 0) return null;
 
   return {
     notes: lines || "Execution completed, but model output was unstructured.",
@@ -128,16 +138,25 @@ Rules:
       ],
       true
     );
-    const parsed = parseExecution(raw);
-    if (parsed) return parsed;
   } catch (e) {
     return {
-      notes: `Execution failed while running this step: ${e instanceof Error ? e.message : String(e)}`,
-      sources: [],
-      suggestedStepUpdates: [],
+      ok: false,
+      errorMessage: `Execution failed while running this step: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
 
-  return raw ? fallbackFromRaw(raw) : { notes: "Execution returned no content.", sources: [], suggestedStepUpdates: [] };
-}
+  const parsed = parseExecution(raw);
+  if (parsed) {
+    return { ok: true, ...parsed };
+  }
 
+  if (raw) {
+    const fb = fallbackFromRaw(raw);
+    if (fb) return { ok: true, ...fb };
+  }
+
+  return {
+    ok: false,
+    errorMessage: "Execution returned no usable content.",
+  };
+}

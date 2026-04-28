@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { redirect, notFound } from "next/navigation";
+import Link from "next/link";
 import { ResearchPlanner } from "@/components/research/research-planner";
 
 type Workflow = {
@@ -29,6 +30,7 @@ type Run = {
   run_status: string;
   output_notes: string | null;
   sources: Array<{ url: string; title?: string; snippet?: string }> | null;
+  error_message: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
 };
@@ -98,7 +100,7 @@ export default async function DealResearchPage(props: { params: Promise<{ id: st
       admin
         .schema("deal_intel")
         .from("deal_research_step_run")
-        .select("id, step_id, run_status, output_notes, sources, metadata, created_at")
+        .select("id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
         .eq("workflow_id", workflow.id)
         .order("created_at", { ascending: false })
         .limit(100),
@@ -117,6 +119,14 @@ export default async function DealResearchPage(props: { params: Promise<{ id: st
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-end">
+        <Link
+          className="crm-button-secondary"
+          href={`/home/deal-intel/${dealId}/copilot`}
+        >
+          Open research copilot
+        </Link>
+      </div>
       <ResearchPlanner
         dealId={dealId}
         companyName={companyName}

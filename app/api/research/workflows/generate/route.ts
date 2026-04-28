@@ -53,70 +53,41 @@ export async function POST(req: Request) {
     .maybeSingle();
   if (existing.error) return NextResponse.json({ error: existing.error.message }, { status: 500 });
 
-  let workflow:
-    | {
-        id: string;
-        deal_id: string;
-        user_id: string;
-        title: string;
-        status: string;
-        version: number;
-        metadata: Record<string, unknown> | null;
-        created_at: string;
-        updated_at: string;
-      }
-    | null = null;
-
   if (existing.data) {
-    const upd = await admin
+    const archive = await admin
       .schema("deal_intel")
       .from("deal_research_workflow")
       .update({
-        title: `${companyName} research`,
-        status: "ready",
-        version: (existing.data.version ?? 1) + 1,
-        metadata: {
-          summary: suggestion.summary,
-          generated_at: new Date().toISOString(),
-          generated_by: "planner",
-        },
+        status: "archived",
         updated_at: new Date().toISOString(),
       })
       .eq("id", existing.data.id)
-      .eq("user_id", user.id)
-      .select("id, deal_id, user_id, title, status, version, metadata, created_at, updated_at")
-      .single();
-    if (upd.error) return NextResponse.json({ error: upd.error.message }, { status: 500 });
-    workflow = upd.data;
-  } else {
-    const ins = await admin
-      .schema("deal_intel")
-      .from("deal_research_workflow")
-      .insert({
-        deal_id: dealId,
-        user_id: user.id,
-        title: `${companyName} research`,
-        status: "ready",
-        metadata: {
-          summary: suggestion.summary,
-          generated_at: new Date().toISOString(),
-          generated_by: "planner",
-        },
-      })
-      .select("id, deal_id, user_id, title, status, version, metadata, created_at, updated_at")
-      .single();
-    if (ins.error) return NextResponse.json({ error: ins.error.message }, { status: 500 });
-    workflow = ins.data;
+      .eq("user_id", user.id);
+    if (archive.error) return NextResponse.json({ error: archive.error.message }, { status: 500 });
   }
 
-  if (!workflow) return NextResponse.json({ error: "Failed to create workflow" }, { status: 500 });
-
-  const del = await admin
+  const wfIns = await admin
     .schema("deal_intel")
-    .from("deal_research_step")
-    .delete()
-    .eq("workflow_id", workflow.id);
-  if (del.error) return NextResponse.json({ error: del.error.message }, { status: 500 });
+    .from("deal_research_workflow")
+    .insert({
+      deal_id: dealId,
+      user_id: user.id,
+      title: `${companyName} research`,
+      status: "ready",
+      version: 1,
+      metadata: {
+        summary: suggestion.summary,
+        generated_at: new Date().toISOString(),
+        generated_by: "planner",
+        archived_predecessor_id: existing.data?.id ?? null,
+      },
+    })
+    .select("id, deal_id, user_id, title, status, version, metadata, created_at, updated_at")
+    .single();
+  if (wfIns.error) return NextResponse.json({ error: wfIns.error.message }, { status: 500 });
+  const workflow = wfIns.data;
+
+  if (!workflow) return NextResponse.json({ error: "Failed to create workflow" }, { status: 500 });
 
   const stepRows = suggestion.steps.map((s, i) => ({
     workflow_id: workflow.id,
@@ -130,16 +101,16 @@ export async function POST(req: Request) {
       generated: true,
     },
   }));
-  const ins = await admin
+  const stepIns = await admin
     .schema("deal_intel")
     .from("deal_research_step")
     .insert(stepRows)
     .select("id, workflow_id, position, status, website, task, notes, depends_on_step_ids, metadata, created_at, updated_at");
-  if (ins.error) return NextResponse.json({ error: ins.error.message }, { status: 500 });
+  if (stepIns.error) return NextResponse.json({ error: stepIns.error.message }, { status: 500 });
 
   return NextResponse.json({
     workflow,
-    steps: ins.data ?? [],
+    steps: stepIns.data ?? [],
   });
 }
 

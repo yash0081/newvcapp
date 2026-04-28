@@ -28,9 +28,27 @@ type Run = {
   run_status: string;
   output_notes: string | null;
   sources: Array<{ url: string; title?: string; snippet?: string }> | null;
+  error_message?: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
 };
+
+function statusClass(status: string): string {
+  switch (status) {
+    case "running":
+      return "text-zinc-700 bg-zinc-100";
+    case "failed":
+      return "text-rose-700 bg-rose-50";
+    case "done":
+      return "text-emerald-700 bg-emerald-50";
+    case "queued":
+      return "text-amber-700 bg-amber-50";
+    case "blocked":
+      return "text-zinc-500 bg-zinc-50";
+    default:
+      return "text-zinc-600 bg-zinc-50";
+  }
+}
 
 type SuggestedUpdate = {
   reason: string;
@@ -82,15 +100,33 @@ export function ResearchPlanner(props: {
     return all.filter((s) => !dismissedSuggestionKeys[suggestionKey(s)]);
   }, [runs, dismissedSuggestionKeys]);
 
-  async function refresh() {
+  async function refresh(): Promise<{ steps: Step[] } | null> {
     const res = await fetch(`/api/research/workflows/by-deal/${props.dealId}`);
     const json = (await res.json().catch(() => null)) as
       | { workflow?: Workflow | null; steps?: Step[]; runs?: Run[]; error?: string }
       | null;
     if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+    const nextSteps = (json?.steps ?? []) as Step[];
     setWorkflow((json?.workflow ?? null) as Workflow | null);
-    setSteps((json?.steps ?? []) as Step[]);
+    setSteps(nextSteps);
     setRuns((json?.runs ?? []) as Run[]);
+    return { steps: nextSteps };
+  }
+
+  async function pollUntilSettled(maxTicks = 6, intervalMs = 1500) {
+    for (let i = 0; i < maxTicks; i++) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+      let snapshot: { steps: Step[] } | null = null;
+      try {
+        snapshot = await refresh();
+      } catch {
+        return;
+      }
+      const stillRunning = (snapshot?.steps ?? []).some(
+        (s) => s.status === "running" || s.status === "queued"
+      );
+      if (!stillRunning) return;
+    }
   }
 
   async function generate() {
@@ -218,7 +254,11 @@ export function ResearchPlanner(props: {
       });
       const json = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
-      await refresh();
+      const snapshot = await refresh();
+      const stillRunning = (snapshot?.steps ?? []).some(
+        (s) => s.status === "running" || s.status === "queued"
+      );
+      if (stillRunning) await pollUntilSettled();
       setMessage("Executed ready steps.");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -237,7 +277,11 @@ export function ResearchPlanner(props: {
       });
       const json = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
-      await refresh();
+      const snapshot = await refresh();
+      const stillRunning = (snapshot?.steps ?? []).some(
+        (s) => s.status === "running" || s.status === "queued"
+      );
+      if (stillRunning) await pollUntilSettled();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -375,11 +419,32 @@ export function ResearchPlanner(props: {
                 className="rounded-2xl border border-zinc-200 bg-white p-4 space-y-2"
               >
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs text-zinc-500">Step {step.position + 1} · {step.status}</p>
                   <div className="flex items-center gap-2">
-                    <button className="crm-button-secondary" onClick={() => runStep(step.id)} disabled={busy || !workflow} type="button">
-                      Run
-                    </button>
+                    <p className="text-xs text-zinc-500">Step {step.position + 1}</p>
+                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusClass(step.status)}`}>
+                      {step.status}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {step.status === "failed" ? (
+                      <button
+                        className="crm-button-secondary"
+                        onClick={() => runStep(step.id)}
+                        disabled={busy || !workflow}
+                        type="button"
+                      >
+                        Retry
+                      </button>
+                    ) : (
+                      <button
+                        className="crm-button-secondary"
+                        onClick={() => runStep(step.id)}
+                        disabled={busy || !workflow || step.status === "running"}
+                        type="button"
+                      >
+                        {step.status === "running" ? "Running…" : "Run"}
+                      </button>
+                    )}
                     <button className="crm-button-secondary" onClick={() => removeStep(step.id)} disabled={busy} type="button">
                       Delete
                     </button>
@@ -471,9 +536,22 @@ export function ResearchPlanner(props: {
               <div className="space-y-2 max-h-96 overflow-auto">
                 {runs.map((r) => (
                   <div key={r.id} className="rounded-xl border border-zinc-200 p-2">
-                    <p className="text-[11px] text-zinc-500">{new Date(r.created_at).toLocaleString()}</p>
-                    <p className="text-xs text-zinc-700 whitespace-pre-wrap mt-1">{r.output_notes || "No notes"}</p>
-                    {Array.isArray(r.sources) && r.sources.length ? (
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] text-zinc-500">{new Date(r.created_at).toLocaleString()}</p>
+                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${statusClass(r.run_status)}`}>
+                        {r.run_status}
+                      </span>
+                    </div>
+                    {r.run_status === "failed" ? (
+                      <p className="text-xs text-rose-700 whitespace-pre-wrap mt-1">
+                        {r.error_message || "Run failed without an error message."}
+                      </p>
+                    ) : r.run_status === "running" ? (
+                      <p className="text-xs text-zinc-500 italic mt-1">Running…</p>
+                    ) : (
+                      <p className="text-xs text-zinc-700 whitespace-pre-wrap mt-1">{r.output_notes || "No notes"}</p>
+                    )}
+                    {r.run_status !== "failed" && Array.isArray(r.sources) && r.sources.length ? (
                       <div className="mt-2 space-y-1">
                         {r.sources.slice(0, 4).map((s, i) => (
                           <a

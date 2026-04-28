@@ -77,6 +77,9 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
           <Link className="crm-button-secondary w-full sm:w-auto text-center" href={`/home/deal-intel/${id}/research`}>
             Research planner
           </Link>
+          <Link className="crm-button-secondary w-full sm:w-auto text-center" href={`/home/deal-intel/${id}/copilot`}>
+            Research copilot
+          </Link>
           <Link className="crm-button w-full sm:w-auto text-center" href={`/home/deal-intel/${id}/meet`}>
             Start live meeting
           </Link>

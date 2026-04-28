@@ -1,3 +1,4 @@
+import { parseJsonFromResponseOrNull } from "@/lib/gemini";
 import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { rankSitesForTask } from "@/lib/research/site-ranking";
 import { getResearchModel } from "@/lib/research/research-model-env";
@@ -10,12 +11,6 @@ type UserPref = {
   success_rate: number;
   usage_count: number;
 };
-
-function stripCodeFence(raw: string): string {
-  const s = raw.trim();
-  if (!s.startsWith("```")) return s;
-  return s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-}
 
 function toStringSafe(v: unknown): string {
   return typeof v === "string" ? v : "";
@@ -39,31 +34,74 @@ function asCategory(v: unknown): WebsiteCategory | undefined {
 }
 
 function parseSuggestion(raw: string): ResearchPlanSuggestion | null {
-  try {
-    const parsed = JSON.parse(stripCodeFence(raw)) as {
-      summary?: unknown;
-      steps?: Array<{ website?: unknown; task?: unknown; category?: unknown; dependsOnStepIds?: unknown }>;
-    };
-    const steps = Array.isArray(parsed.steps)
-      ? parsed.steps
-          .map((s) => ({
-            website: toStringSafe(s.website),
-            task: toStringSafe(s.task),
-            category: asCategory(s.category),
-            dependsOnStepIds: Array.isArray(s.dependsOnStepIds)
-              ? s.dependsOnStepIds.filter((x): x is string => typeof x === "string")
-              : [],
-          }))
-          .filter((s) => s.website && s.task)
-      : [];
-    if (!steps.length) return null;
-    return {
-      summary: toStringSafe(parsed.summary) || "Auto-generated research plan.",
-      steps,
-    };
-  } catch {
-    return null;
+  const parsed = parseJsonFromResponseOrNull(raw) as
+    | {
+        summary?: unknown;
+        steps?: Array<{ website?: unknown; task?: unknown; category?: unknown; dependsOnStepIds?: unknown }>;
+      }
+    | null;
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const steps = Array.isArray(parsed.steps)
+    ? parsed.steps
+        .map((s) => ({
+          website: toStringSafe(s.website),
+          task: toStringSafe(s.task),
+          category: asCategory(s.category),
+          dependsOnStepIds: Array.isArray(s.dependsOnStepIds)
+            ? s.dependsOnStepIds.filter((x): x is string => typeof x === "string")
+            : [],
+        }))
+        .filter((s) => s.website && s.task)
+    : [];
+  if (!steps.length) return null;
+  return {
+    summary: toStringSafe(parsed.summary) || "Auto-generated research plan.",
+    steps,
+  };
+}
+
+function fallbackFromRaw(args: {
+  raw: string;
+  companyName: string;
+  prefs: UserPref[];
+}): ResearchPlanSuggestion | null {
+  const text = args.raw.trim();
+  if (!text) return null;
+
+  const lines = text
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const enumeratedTasks: string[] = [];
+  for (const line of lines) {
+    const m = line.match(/^(?:\d+[.)]|[-*•])\s+(.+)$/);
+    if (m && m[1]) enumeratedTasks.push(m[1].trim());
+    if (enumeratedTasks.length >= 6) break;
   }
+
+  if (enumeratedTasks.length < 3) return null;
+
+  const steps = enumeratedTasks.map((task) => {
+    const top = rankSitesForTask({
+      task,
+      companyName: args.companyName,
+      userPreferences: args.prefs,
+      limit: 1,
+    })[0];
+    return {
+      website: top?.domain || "company-website",
+      task,
+      category: top?.category || "general",
+      dependsOnStepIds: [] as string[],
+    };
+  });
+
+  return {
+    summary: `Recovered plan for ${args.companyName || "this company"} (model output was loosely structured).`,
+    steps,
+  };
 }
 
 function deterministicFallback(args: {
@@ -129,8 +167,9 @@ Rules:
 - Keep tasks specific and evidence-oriented.
 - If website is company website, use "company-website".`;
 
+  let raw = "";
   try {
-    const raw = await vertexRunWithTextMulti(
+    raw = await vertexRunWithTextMulti(
       getResearchModel("flash"),
       prompt,
       [
@@ -143,8 +182,15 @@ Rules:
     );
     const parsed = parseSuggestion(raw);
     if (parsed) return parsed;
+
+    const recovered = fallbackFromRaw({
+      raw,
+      companyName: args.companyName,
+      prefs: args.preferences,
+    });
+    if (recovered) return recovered;
   } catch {
-    // Fallback below
+    // Fall through to deterministic fallback below
   }
 
   return deterministicFallback({
@@ -153,4 +199,3 @@ Rules:
     prefs: args.preferences,
   });
 }
-

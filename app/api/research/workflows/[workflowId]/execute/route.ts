@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
 import { mapWithConcurrency } from "@/lib/async/concurrency";
-import { ingestWebSourceAsDocument } from "@/lib/research/web-ingest";
+import { ingestSourcesForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -34,6 +34,144 @@ function runnableSteps(steps: StepRow[], maxBatch: number): StepRow[] {
     .filter((s) => (s.status === "todo" || s.status === "failed") && depsOk(s))
     .sort((a, b) => a.position - b.position)
     .slice(0, maxBatch);
+}
+
+type AdminClient = ReturnType<typeof createAdminClient>;
+
+async function runOneStep(args: {
+  admin: AdminClient;
+  userId: string;
+  workflowId: string;
+  dealId: string;
+  step: StepRow;
+  companyName: string;
+  companyContext: string;
+}) {
+  const { admin, userId, workflowId, dealId, step, companyName, companyContext } = args;
+
+  // Mark running.
+  const runIns = await admin
+    .schema("deal_intel")
+    .from("deal_research_step_run")
+    .insert({
+      workflow_id: workflowId,
+      step_id: step.id,
+      run_status: "running",
+      output_notes: null,
+      sources: [],
+      metadata: { website: step.website, task: step.task },
+    })
+    .select("id, workflow_id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
+    .single();
+  if (runIns.error || !runIns.data) {
+    throw new Error(runIns.error?.message ?? "Failed to create run row");
+  }
+  const runId = runIns.data.id as string;
+
+  await admin
+    .schema("deal_intel")
+    .from("deal_research_step")
+    .update({ status: "running", updated_at: new Date().toISOString() })
+    .eq("id", step.id)
+    .eq("workflow_id", workflowId);
+
+  let runRow: typeof runIns.data = runIns.data;
+
+  try {
+    const result = await executeResearchStep({
+      companyName,
+      companyContext,
+      website: step.website,
+      task: step.task,
+    });
+
+    if (result.ok) {
+      const ingestedDocumentIds = await ingestSourcesForRun({
+        admin,
+        userId,
+        dealId,
+        workflowId,
+        stepId: step.id,
+        sources: result.sources,
+      });
+
+      const upd = await admin
+        .schema("deal_intel")
+        .from("deal_research_step_run")
+        .update({
+          run_status: "done",
+          output_notes: result.notes,
+          sources: result.sources,
+          error_message: null,
+          metadata: {
+            suggestedStepUpdates: result.suggestedStepUpdates,
+            website: step.website,
+            task: step.task,
+            ingestedDocumentIds,
+          },
+        })
+        .eq("id", runId)
+        .select("id, workflow_id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
+        .single();
+      if (upd.error) throw new Error(upd.error.message);
+      runRow = upd.data;
+
+      const stepUpd = await admin
+        .schema("deal_intel")
+        .from("deal_research_step")
+        .update({
+          status: "done",
+          notes: result.notes.slice(0, 5000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", step.id)
+        .eq("workflow_id", workflowId);
+      if (stepUpd.error) throw new Error(stepUpd.error.message);
+    } else {
+      const upd = await admin
+        .schema("deal_intel")
+        .from("deal_research_step_run")
+        .update({
+          run_status: "failed",
+          output_notes: null,
+          sources: [],
+          error_message: result.errorMessage,
+          metadata: { website: step.website, task: step.task },
+        })
+        .eq("id", runId)
+        .select("id, workflow_id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
+        .single();
+      if (!upd.error && upd.data) runRow = upd.data;
+
+      await admin
+        .schema("deal_intel")
+        .from("deal_research_step")
+        .update({ status: "failed", updated_at: new Date().toISOString() })
+        .eq("id", step.id)
+        .eq("workflow_id", workflowId);
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await admin
+      .schema("deal_intel")
+      .from("deal_research_step_run")
+      .update({
+        run_status: "failed",
+        error_message: message,
+        output_notes: null,
+        sources: [],
+      })
+      .eq("id", runId);
+    await admin
+      .schema("deal_intel")
+      .from("deal_research_step")
+      .update({ status: "failed", updated_at: new Date().toISOString() })
+      .eq("id", step.id)
+      .eq("workflow_id", workflowId);
+    runRow = { ...runRow, run_status: "failed", error_message: message };
+  }
+
+  return runRow;
 }
 
 export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: string }> }) {
@@ -72,95 +210,19 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
   const companyName = asCompanyName(dealRes.data?.metadata);
   const companyContext = JSON.stringify((dealRes.data?.metadata ?? {}) as Record<string, unknown>, null, 2);
 
-  const executed = await mapWithConcurrency(toRun, concurrency, async (step) => {
-    const result = await executeResearchStep({
+  const runs = await mapWithConcurrency(toRun, concurrency, (step) =>
+    runOneStep({
+      admin,
+      userId: user.id,
+      workflowId,
+      dealId: String(workflow.deal_id),
+      step,
       companyName,
       companyContext,
-      website: step.website,
-      task: step.task,
-    });
-    return { step, result };
-  });
-
-  const runs: unknown[] = [];
-
-  for (const { step, result } of executed) {
-    const run = await admin
-      .schema("deal_intel")
-      .from("deal_research_step_run")
-      .insert({
-        workflow_id: workflowId,
-        step_id: step.id,
-        run_status: "done",
-        output_notes: result.notes,
-        sources: result.sources,
-        metadata: {
-          suggestedStepUpdates: result.suggestedStepUpdates,
-          website: step.website,
-          task: step.task,
-        },
-      })
-      .select("id, workflow_id, step_id, run_status, output_notes, sources, error_message, metadata, created_at")
-      .single();
-    if (run.error) return NextResponse.json({ error: run.error.message }, { status: 500 });
-    runs.push(run.data);
-
-    // Persist the first cited URL into `deal_intel.document_*` (fast path). Keeps UX snappy.
-    const ingested: string[] = [];
-    const first = Array.isArray(result.sources) ? result.sources[0] : null;
-    if (first?.url) {
-      try {
-        const doc = await ingestWebSourceAsDocument({
-          admin,
-          userId: user.id,
-          dealId: String(workflow.deal_id),
-          sourceUrl: first.url,
-          title: first.title,
-          workflowId,
-          stepId: step.id,
-          timeoutMs: 6000,
-        });
-        if (doc?.documentId) ingested.push(doc.documentId);
-      } catch {
-        // ignore
-      }
-    }
-    if (ingested.length) {
-      await admin
-        .schema("deal_intel")
-        .from("deal_research_step_run")
-        .update({
-          metadata: {
-            ...(run.data?.metadata && typeof run.data.metadata === "object" ? run.data.metadata : {}),
-            ingestedDocumentIds: ingested,
-          },
-        })
-        .eq("id", run.data.id);
-    }
-
-    const stepUpdate = await admin
-      .schema("deal_intel")
-      .from("deal_research_step")
-      .update({
-        status: "done",
-        notes: result.notes.slice(0, 5000),
-      })
-      .eq("id", step.id)
-      .eq("workflow_id", workflowId);
-    if (stepUpdate.error) return NextResponse.json({ error: stepUpdate.error.message }, { status: 500 });
-  }
-
-  const wfUpdate = await admin
-    .schema("deal_intel")
-    .from("deal_research_workflow")
-    .update({
-      status: "running",
-      version: workflow.version + 1,
-      updated_at: new Date().toISOString(),
     })
-    .eq("id", workflowId)
-    .eq("user_id", user.id);
-  if (wfUpdate.error) return NextResponse.json({ error: wfUpdate.error.message }, { status: 500 });
+  );
+
+  await recomputeWorkflowStatus({ admin, workflowId, userId: user.id });
 
   return NextResponse.json({ ok: true, runs });
 }
