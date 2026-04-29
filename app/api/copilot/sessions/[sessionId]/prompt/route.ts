@@ -7,11 +7,11 @@ import {
   insertCopilotEvent,
   insertCopilotEvents,
 } from "@/lib/copilot/db";
-import { extractFromImage } from "@/lib/copilot/extract";
 import { analyzeAgainstDeal } from "@/lib/copilot/analyze";
-import type { Extracted } from "@/lib/copilot/types";
-
-const MAX_IMAGE_BASE64_BYTES = 1_400_000;
+import { normalizeExtractedSnapshot } from "@/lib/copilot/extracted-snapshot";
+import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
+import { suggestionRepeatKey } from "@/lib/copilot/repeat-key";
+import type { Extracted, ExtractedKeyValue } from "@/lib/copilot/types";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -19,112 +19,139 @@ function asCompanyName(meta: unknown): string {
   return typeof m.company_name === "string" ? m.company_name : "Company";
 }
 
-function stripDataUrl(b64: string): string {
-  if (!b64) return "";
-  const idx = b64.indexOf(",");
-  if (b64.startsWith("data:") && idx > 0) return b64.slice(idx + 1);
-  return b64;
+function getSessionAcceptedSnippets(meta: unknown): Array<{ text: string; source_label?: string | null; accepted_at?: string | null }> {
+  if (!meta || typeof meta !== "object") return [];
+  const m = meta as Record<string, unknown>;
+  if (!Array.isArray(m.acceptedSnippets)) return [];
+  const out: Array<{ text: string; source_label?: string | null; accepted_at?: string | null }> = [];
+  for (const raw of m.acceptedSnippets) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const text = typeof r.text === "string" ? r.text.trim() : "";
+    if (!text) continue;
+    out.push({
+      text: text.slice(0, 1200),
+      source_label: typeof r.source_label === "string" ? r.source_label : null,
+      accepted_at: typeof r.accepted_at === "string" ? r.accepted_at : null,
+    });
+    if (out.length >= 25) break;
+  }
+  return out;
+}
+
+export async function OPTIONS(req: Request) {
+  return copilotPreflight(req);
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = await ctx.params;
   const user = await getAuthedUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!user) return withCopilotCors(req, NextResponse.json({ error: "Unauthorized" }, { status: 401 }));
 
   const body = (await req.json().catch(() => null)) as
-    | { text?: string; image?: string; mimeType?: string; hostnameHint?: string }
+    | {
+        text?: string;
+        hostnameHint?: string;
+        urlHint?: string;
+        extracted?: {
+          visible_text?: unknown;
+          page_title?: unknown;
+          hostname?: unknown;
+          key_value_claims?: unknown;
+          outbound_links?: unknown;
+        } | null;
+      }
     | null;
   const text = String(body?.text ?? "").trim();
-  if (!text) return NextResponse.json({ error: "text is required" }, { status: 400 });
+  if (!text) return withCopilotCors(req, NextResponse.json({ error: "text is required" }, { status: 400 }));
 
   const admin = createAdminClient();
   const session = await getSessionForUser({ admin, sessionId, userId: user.id });
-  if (!session) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  if (!session) return withCopilotCors(req, NextResponse.json({ error: "Session not found" }, { status: 404 }));
   if (session.status !== "active") {
-    return NextResponse.json({ error: "Session is not active" }, { status: 409 });
+    return withCopilotCors(req, NextResponse.json({ error: "Session is not active" }, { status: 409 }));
   }
 
-  const dealRes = await admin
-    .schema("deal_intel")
-    .from("deal")
-    .select("metadata")
-    .eq("id", session.deal_id)
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (dealRes.error) return NextResponse.json({ error: dealRes.error.message }, { status: 500 });
+  // Parallelize: deal metadata, recent claims, recent suggestion keys, and
+  // the prompt event insert all run concurrently.
+  const fallbackContextPromise =
+    body?.extracted && typeof body.extracted === "object"
+      ? Promise.resolve(null)
+      : admin
+          .schema("deal_intel")
+          .from("copilot_event")
+          .select("hostname, payload")
+          .eq("session_id", sessionId)
+          .eq("kind", "observation")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+  const [dealRes, recentClaims, recentSuggestionsRes, promptEvent, fallback] = await Promise.all([
+    admin
+      .schema("deal_intel")
+      .from("deal")
+      .select("metadata")
+      .eq("id", session.deal_id)
+      .eq("user_id", user.id)
+      .maybeSingle(),
+    getRecentDealClaims({ admin, dealId: session.deal_id, userId: user.id, limit: 12 }),
+    admin
+      .schema("deal_intel")
+      .from("copilot_event")
+      .select("payload")
+      .eq("session_id", sessionId)
+      .eq("kind", "suggestion")
+      .order("created_at", { ascending: false })
+      .limit(40),
+    insertCopilotEvent({
+      admin,
+      event: {
+        session_id: sessionId,
+        kind: "prompt",
+        payload: { text },
+      },
+    }),
+    fallbackContextPromise,
+  ]);
+  if (dealRes.error) return withCopilotCors(req, NextResponse.json({ error: dealRes.error.message }, { status: 500 }));
   const dealMeta = (dealRes.data?.metadata ?? {}) as Record<string, unknown>;
   const companyName = asCompanyName(dealMeta);
-
-  const promptEvent = await insertCopilotEvent({
-    admin,
-    event: {
-      session_id: sessionId,
-      kind: "prompt",
-      payload: { text },
-    },
-  });
   const promptEventId = promptEvent.data?.id ?? null;
 
   let extracted: Extracted | null = null;
-  const rawImage = stripDataUrl(typeof body?.image === "string" ? body.image : "");
-  if (rawImage) {
-    if (rawImage.length > MAX_IMAGE_BASE64_BYTES) {
-      return NextResponse.json({ error: "image too large" }, { status: 413 });
-    }
-    try {
-      extracted = await extractFromImage({
-        imageBase64: rawImage,
-        mimeType: typeof body?.mimeType === "string" ? body.mimeType : "image/jpeg",
-        hintText: text,
-      });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      await insertCopilotEvent({
-        admin,
-        event: {
-          session_id: sessionId,
-          kind: "error",
-          payload: { stage: "prompt_extract", message },
-          parent_event_id: promptEventId,
-        },
-      });
-      return NextResponse.json({ error: message }, { status: 502 });
-    }
-  } else {
-    // Best-effort: pull the most recent observation's extracted text so the
-    // user can prompt without a fresh frame upload.
-    const last = await admin
-      .schema("deal_intel")
-      .from("copilot_event")
-      .select("hostname, payload")
-      .eq("session_id", sessionId)
-      .eq("kind", "observation")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (last.data?.payload) {
-      const p = last.data.payload as Record<string, unknown>;
-      extracted = {
-        visible_text: typeof p.visible_text === "string" ? p.visible_text : "",
-        page_title: typeof p.page_title === "string" ? p.page_title : undefined,
-        hostname:
-          typeof p.hostname === "string"
-            ? p.hostname
-            : typeof last.data.hostname === "string"
-              ? last.data.hostname
-              : undefined,
-        key_value_claims: Array.isArray(p.key_value_claims) ? (p.key_value_claims as Extracted["key_value_claims"]) : [],
-      };
-    }
+  if (body?.extracted && typeof body.extracted === "object") {
+    extracted = normalizeExtractedSnapshot(body.extracted);
+  } else if (fallback?.data?.payload) {
+    const p = fallback.data.payload as Record<string, unknown>;
+    extracted = {
+      visible_text: typeof p.visible_text === "string" ? p.visible_text : "",
+      page_title: typeof p.page_title === "string" ? p.page_title : undefined,
+      hostname:
+        typeof p.hostname === "string"
+          ? p.hostname
+          : typeof fallback.data.hostname === "string"
+            ? fallback.data.hostname
+            : undefined,
+      key_value_claims: Array.isArray(p.key_value_claims)
+        ? (p.key_value_claims as ExtractedKeyValue[])
+        : [],
+      outbound_links: Array.isArray(p.outbound_links)
+        ? (p.outbound_links as Array<{ url: string; text: string }>)
+        : [],
+    };
   }
 
   if (!extracted || !extracted.visible_text) {
-    return NextResponse.json({
-      ok: true,
-      suggestions: [],
-      reason: "no_screen_context",
-      message: "I don't have a recent screen capture. Start watching a tab and try again.",
-    });
+    return withCopilotCors(
+      req,
+      NextResponse.json({
+        ok: true,
+        suggestions: [],
+        reason: "no_screen_context",
+        message: "I don't have a recent screen capture. Start watching a tab and try again.",
+      }),
+    );
   }
 
   const hostname =
@@ -132,7 +159,15 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     extracted.hostname ||
     null;
 
-  const recentClaims = await getRecentDealClaims({ admin, dealId: session.deal_id, userId: user.id, limit: 50 });
+  const sessionAcceptedSnippets = getSessionAcceptedSnippets(session.metadata);
+  const recentSuggestionKeys = (recentSuggestionsRes.data ?? [])
+    .map((r) => {
+      const payload = (r.payload ?? {}) as Record<string, unknown>;
+      const summary = typeof payload.summary === "string" ? payload.summary : "";
+      const snippet = typeof payload.snippet === "string" ? payload.snippet : "";
+      return summary && snippet ? suggestionRepeatKey(summary, snippet) : null;
+    })
+    .filter((v): v is string => Boolean(v));
 
   let suggestions;
   try {
@@ -140,7 +175,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       extracted,
       hostname,
       userInstruction: text,
-      deal: { companyName, metadata: dealMeta, recentClaims },
+      deal: { companyName, metadata: dealMeta, recentClaims, sessionAcceptedSnippets, recentSuggestionKeys },
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -154,7 +189,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         parent_event_id: promptEventId,
       },
     });
-    return NextResponse.json({ error: message }, { status: 502 });
+    return withCopilotCors(req, NextResponse.json({ error: message }, { status: 502 }));
   }
 
   if (suggestions.length === 0) {
@@ -168,7 +203,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         payload: { text: "I couldn't find anything matching that on the current screen." },
       },
     });
-    return NextResponse.json({ ok: true, suggestions: [], reply: "I couldn't find anything matching that on the current screen." });
+    return withCopilotCors(
+      req,
+      NextResponse.json({
+        ok: true,
+        suggestions: [],
+        reply: "I couldn't find anything matching that on the current screen.",
+      }),
+    );
   }
 
   const insertedEvents = await insertCopilotEvents({
@@ -185,20 +227,24 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         kind: s.kind,
         confidence: s.confidence,
         source_label: s.source_label,
+        link_url: s.link_url ?? null,
         from_prompt: true,
       },
     })),
   });
   if (insertedEvents.error) {
-    return NextResponse.json({ error: insertedEvents.error.message }, { status: 500 });
+    return withCopilotCors(req, NextResponse.json({ error: insertedEvents.error.message }, { status: 500 }));
   }
 
-  return NextResponse.json({
-    ok: true,
-    promptEventId,
-    suggestions: (insertedEvents.data ?? []).map((row, i) => ({
-      ...suggestions[i],
-      event_id: row.id,
-    })),
-  });
+  return withCopilotCors(
+    req,
+    NextResponse.json({
+      ok: true,
+      promptEventId,
+      suggestions: (insertedEvents.data ?? []).map((row, i) => ({
+        ...suggestions[i],
+        event_id: row.id,
+      })),
+    }),
+  );
 }

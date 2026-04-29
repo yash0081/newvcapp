@@ -29,7 +29,7 @@ export async function getRecentDealClaims(args: {
   userId: string;
   limit?: number;
 }): Promise<Array<{ key?: string; value: string; source?: string }>> {
-  const limit = Math.max(1, Math.min(200, args.limit ?? 50));
+  const limit = Math.max(1, Math.min(200, args.limit ?? 12));
   const res = await args.admin
     .schema("deal_intel")
     .from("claim")

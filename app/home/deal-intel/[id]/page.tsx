@@ -1,8 +1,10 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { cookies } from "next/headers";
 import { redirect, notFound } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CompanyDocuments } from "@/components/crm/company-documents";
+import { DealContentsDebug } from "@/components/crm/deal-contents-debug";
 import Link from "next/link";
 
 type DocRow = {
@@ -57,6 +59,20 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
   const companyName = typeof meta.company_name === "string" ? meta.company_name : "Company";
   const stage = typeof meta.crm_stage === "string" ? meta.crm_stage : null;
 
+  // Lightweight, non-HttpOnly hint cookie so the Chrome extension knows which
+  // deal to default to. Only contains id + display name (no secrets).
+  try {
+    const cookieStore = await cookies();
+    cookieStore.set("vcapp_active_deal", JSON.stringify({ id, name: companyName }), {
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 7,
+      httpOnly: false,
+    });
+  } catch {
+    // setting cookies in some render contexts can be a no-op; ignore
+  }
+
   const [{ data: docs }] = await Promise.all([
     supabase
       .schema("deal_intel")
@@ -94,6 +110,15 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
         </CardHeader>
         <CardContent>
           <CompanyDocuments dealId={id} initialDocs={((docs ?? []) as DocRow[])} />
+        </CardContent>
+      </Card>
+
+      <Card className="border-zinc-200/90 bg-white">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">Deal contents (debug)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <DealContentsDebug dealId={id} userId={user.id} />
         </CardContent>
       </Card>
     </div>

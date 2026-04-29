@@ -37,9 +37,10 @@ export type Extracted = {
   page_title?: string;
   hostname?: string;
   key_value_claims: ExtractedKeyValue[];
+  outbound_links?: Array<{ url: string; text: string }>;
 };
 
-export type SuggestionKind = "new" | "aligns" | "contradicts";
+export type SuggestionKind = "new" | "aligns" | "contradicts" | "explore";
 
 export type Suggestion = {
   /** Stable client-side id; mirrored to the persisted suggestion event. */
@@ -50,6 +51,7 @@ export type Suggestion = {
   confidence: number;
   source_label: string;
   hostname?: string | null;
+  link_url?: string | null;
 };
 
 export type CopilotEventKind =

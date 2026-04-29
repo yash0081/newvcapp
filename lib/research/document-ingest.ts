@@ -13,11 +13,20 @@ const EMBEDDING_MODEL = process.env.VERTEX_EMBEDDING_MODEL || "text-embedding-00
 const FAST_EMBED_CHUNK_LIMIT = Number(process.env.DEAL_INTEL_FAST_CHUNK_EMBED_LIMIT || 12);
 const MAX_FAST_CHUNKS = 8;
 
+export type IngestPage = {
+  pageNumber: number;
+  text: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type IngestTextArgs = {
   admin: AdminClient;
   userId: string;
   dealId: string;
-  text: string;
+  /** Single-page text. Ignored when `pages` is provided. */
+  text?: string;
+  /** Multi-page mode: provide explicit page boundaries. Required if `text` omitted. */
+  pages?: IngestPage[];
   /** "web" | "copilot_session" | etc. Stored on document.source_kind. */
   sourceKind: string;
   /** Free-form classifier (e.g. "web_research", "copilot_research"). */
@@ -30,11 +39,14 @@ export type IngestTextArgs = {
   storagePathPrefix?: string;
   folderPath?: string;
   routingReason?: string;
-  /** Extra context attached to document_page.metadata.kind === sourceKind. */
+  /** Extra context attached to document_page.metadata.kind === sourceKind. Merged with per-page metadata. */
   pageMetadata?: Record<string, unknown>;
   /** Hard cap on chunk rows (defaults to 200). */
   maxChunks?: number;
-  /** Override fast-path embedding count for this ingest. */
+  /**
+   * Override fast-path embedding count for this ingest. Pass 0 to skip
+   * synchronous embeddings entirely (the worker will fill them in).
+   */
   fastEmbedLimit?: number;
   /**
    * Optional precomputed chunks. Used for research-step output documents so chunks
@@ -44,10 +56,22 @@ export type IngestTextArgs = {
 };
 
 export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ documentId: string } | null> {
-  const text = String(args.text ?? "").trim();
-  if (!text) return null;
+  const pages: IngestPage[] = (args.pages && args.pages.length
+    ? args.pages
+    : [{ pageNumber: 1, text: String(args.text ?? "") }]
+  )
+    .map((p) => ({
+      pageNumber: Math.max(1, Math.floor(p.pageNumber || 1)),
+      text: String(p.text ?? "").trim(),
+      metadata: p.metadata,
+    }))
+    .filter((p) => p.text.length > 0);
+  if (pages.length === 0) return null;
 
-  const sha = createHash("sha256").update(text).digest("hex");
+  const fullText = pages.map((p) => p.text).join("\n\n");
+  if (!fullText) return null;
+
+  const sha = createHash("sha256").update(fullText).digest("hex");
   const docId = randomUUID();
   const mime = args.mimeType ?? "text/plain";
   const bucket = args.storageBucket ?? args.sourceKind;
@@ -62,7 +86,7 @@ export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ docu
     doc_type: args.docType,
     original_filename: args.originalFilename,
     mime_type: mime,
-    byte_size: text.length,
+    byte_size: fullText.length,
     sha256: sha,
     storage_provider: "supabase_storage",
     storage_bucket: bucket,
@@ -75,18 +99,24 @@ export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ docu
   })) as { error: { message: string } | null };
   if (insDoc.error) return null;
 
-  const insPage = (await args.admin.schema("deal_intel").from("document_page").insert({
+  const ingestedAt = new Date().toISOString();
+  const pageRows = pages.map((p) => ({
     document_id: docId,
-    page_number: 1,
-    text,
-    char_count: text.length,
+    page_number: p.pageNumber,
+    text: p.text,
+    char_count: p.text.length,
     metadata: {
       kind: args.sourceKind,
-      ingested_at: new Date().toISOString(),
+      ingested_at: ingestedAt,
       ...(args.pageMetadata ?? {}),
+      ...(p.metadata ?? {}),
     },
-  })) as { error: { message: string } | null };
-  if (insPage.error) return null;
+  }));
+  const insPages = (await args.admin
+    .schema("deal_intel")
+    .from("document_page")
+    .insert(pageRows)) as { error: { message: string } | null };
+  if (insPages.error) return null;
 
   // Idempotent replace.
   await args.admin.schema("deal_intel").from("document_chunk").delete().eq("document_id", docId);
@@ -100,8 +130,11 @@ export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ docu
           charEnd: 0 + i,
           text: String(t || "").trim(),
         }))
-      : chunkPageText({ pageNumber: 1, text });
-  const fastLimit = Math.max(1, Math.min(args.fastEmbedLimit ?? FAST_EMBED_CHUNK_LIMIT, MAX_FAST_CHUNKS));
+      : pages.flatMap((page) => chunkPageText({ pageNumber: page.pageNumber, text: page.text }));
+  const fastLimit =
+    args.fastEmbedLimit !== undefined
+      ? Math.max(0, Math.min(args.fastEmbedLimit, MAX_FAST_CHUNKS))
+      : Math.max(1, Math.min(FAST_EMBED_CHUNK_LIMIT, MAX_FAST_CHUNKS));
   const maxChunks = Math.max(1, args.maxChunks ?? 200);
 
   const chunkRows: Array<{

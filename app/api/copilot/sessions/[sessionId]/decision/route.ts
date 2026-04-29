@@ -8,6 +8,7 @@ import {
   insertCopilotEvent,
 } from "@/lib/copilot/db";
 import type { AcceptedSnippet } from "@/lib/copilot/types";
+import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
 
 const ACCEPT_DELTA = 0.10;
 const REJECT_DELTA = -0.10;
@@ -16,10 +17,14 @@ function asString(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+export async function OPTIONS(req: Request) {
+  return copilotPreflight(req);
+}
+
 export async function POST(req: Request, ctx: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = await ctx.params;
   const user = await getAuthedUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!user) return withCopilotCors(req, NextResponse.json({ error: "Unauthorized" }, { status: 401 }));
 
   const body = (await req.json().catch(() => null)) as
     | { suggestionEventId?: string; action?: "accept" | "reject" }
@@ -27,14 +32,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   const suggestionEventId = asString(body?.suggestionEventId);
   const action = body?.action === "accept" || body?.action === "reject" ? body.action : null;
   if (!suggestionEventId || !action) {
-    return NextResponse.json({ error: "suggestionEventId and action are required" }, { status: 400 });
+    return withCopilotCors(req, NextResponse.json({ error: "suggestionEventId and action are required" }, { status: 400 }));
   }
 
   const admin = createAdminClient();
   const session = await getSessionForUser({ admin, sessionId, userId: user.id });
-  if (!session) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  if (!session) return withCopilotCors(req, NextResponse.json({ error: "Session not found" }, { status: 404 }));
   if (session.status !== "active") {
-    return NextResponse.json({ error: "Session is not active" }, { status: 409 });
+    return withCopilotCors(req, NextResponse.json({ error: "Session is not active" }, { status: 409 }));
   }
 
   const sugRes = await admin
@@ -44,9 +49,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     .eq("id", suggestionEventId)
     .eq("session_id", sessionId)
     .maybeSingle();
-  if (sugRes.error) return NextResponse.json({ error: sugRes.error.message }, { status: 500 });
+  if (sugRes.error) return withCopilotCors(req, NextResponse.json({ error: sugRes.error.message }, { status: 500 }));
   if (!sugRes.data || sugRes.data.kind !== "suggestion") {
-    return NextResponse.json({ error: "Suggestion not found" }, { status: 404 });
+    return withCopilotCors(req, NextResponse.json({ error: "Suggestion not found" }, { status: 404 }));
   }
   const suggestion = sugRes.data;
   const payload = (suggestion.payload ?? {}) as Record<string, unknown>;
@@ -57,7 +62,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
 
   if (action === "accept") {
     if (!snippet) {
-      return NextResponse.json({ error: "Cannot accept an empty suggestion" }, { status: 400 });
+      return withCopilotCors(req, NextResponse.json({ error: "Cannot accept an empty suggestion" }, { status: 400 }));
     }
     const acceptedSnippet: AcceptedSnippet = {
       text: snippet,
@@ -114,5 +119,5 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     }
   }
 
-  return NextResponse.json({ ok: true, action });
+  return withCopilotCors(req, NextResponse.json({ ok: true, action }));
 }
