@@ -1,14 +1,12 @@
 import { randomUUID } from "node:crypto";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { persistDealIntelFacts } from "@/lib/ingestion/persist-deal-intel-facts";
 import { materializeDealIntelTree } from "@/lib/deal-intel/materialize-tree";
 import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { getDealIntelIngestionModel } from "@/lib/deal-intel/ingestion-model-env";
 import { chunkArray, mapWithConcurrency } from "@/lib/async/concurrency";
 
-type Admin = {
-  schema: (s: string) => any;
-  rpc: (fn: string, args: Record<string, unknown>) => any;
-};
+type Admin = SupabaseClient;
 
 type LlmClaim = {
   claim_type: string;
@@ -170,7 +168,7 @@ export async function extractClaimsForDocument(admin: Admin, documentId: string)
   });
 
   await persistDealIntelFacts({
-    admin: admin as any,
+    admin,
     userId,
     existing: { dealId, revisionId },
     // IMPORTANT: avoid collisions on deal_fact_node (unique on deal_id+path).
@@ -188,7 +186,7 @@ export async function extractClaimsForDocument(admin: Admin, documentId: string)
     },
   });
 
-  await materializeDealIntelTree({ admin: admin as any, dealId, revisionId, mode: "fast" });
+  await materializeDealIntelTree({ admin, dealId, revisionId, mode: "fast" });
 
   // Enqueue enrichment for the new facts.
   await admin.rpc("deal_intel_enqueue_job", {

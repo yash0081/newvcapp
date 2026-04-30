@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { embedText } from "@/lib/vertex-embeddings";
 import { vectorParam } from "@/lib/data-layer/shared/vector";
+import { createHash } from "node:crypto";
 
 export type MeetingEventKind =
   | "contradiction"
@@ -140,13 +141,48 @@ export async function matchClaimsHybrid(admin: SupabaseClient, opts: { userId: s
  */
 export async function createMeetingAssistantEvent(admin: SupabaseClient, input: MeetingAssistantEventInput) {
   const severity: MeetingEventSeverity = input.severity ?? "low";
+  const sourceMap = (input.source_map && typeof input.source_map === "object" ? input.source_map : {}) as Record<string, unknown>;
+  const fastLane = sourceMap.fast_lane === true;
+  const dedupeKey =
+    typeof sourceMap.dedupe_key === "string" && sourceMap.dedupe_key.trim()
+      ? sourceMap.dedupe_key.trim()
+      : createHash("sha256")
+          .update(`${input.meeting_id}|${input.kind}|${input.title ?? ""}|${input.body.slice(0, 280)}`)
+          .digest("hex")
+          .slice(0, 24);
+
+  // Best-effort dedupe: avoid inserting the same card repeatedly.
+  // We only scan recent rows (cheap) and match on source_map.dedupe_key.
+  if (!fastLane) {
+    try {
+      const recent = await admin
+        .schema("deal_intel")
+        .from("meeting_assistant_event")
+        .select("id, source_map")
+        .eq("meeting_id", input.meeting_id)
+        .order("created_at", { ascending: false })
+        .limit(80);
+      if (!recent.error) {
+        for (const r of (recent.data ?? []) as Array<{ id: string; source_map: unknown }>) {
+          const sm = (r.source_map && typeof r.source_map === "object" ? (r.source_map as Record<string, unknown>) : {}) as Record<
+            string,
+            unknown
+          >;
+          if (String(sm.dedupe_key ?? "") === dedupeKey) return { data: { id: r.id }, error: null };
+        }
+      }
+    } catch {
+      // ignore dedupe read errors
+    }
+  }
+
   const row = {
     meeting_id: input.meeting_id,
     kind: input.kind,
     title: input.title ?? null,
     body: input.body,
     severity,
-    source_map: input.source_map ?? {},
+    source_map: { ...sourceMap, dedupe_key: dedupeKey },
   };
   const res = await admin.schema("deal_intel").from("meeting_assistant_event").insert(row).select("id").maybeSingle();
   if (res.error) {

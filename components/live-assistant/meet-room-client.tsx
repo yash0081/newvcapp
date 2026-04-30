@@ -6,7 +6,6 @@ import { useSearchParams } from "next/navigation";
 import { ControlBar, GridLayout, LiveKitRoom, ParticipantTile, RoomAudioRenderer, useTracks } from "@livekit/components-react";
 import { Track } from "livekit-client";
 import "@livekit/components-styles";
-import { createClient } from "@/lib/supabase/client";
 
 type AssistantEvent = {
   id: string;
@@ -18,15 +17,41 @@ type AssistantEvent = {
   source_map?: Record<string, unknown> | null;
 };
 
-type TranscriptSegment = {
+type TrackedQuestion = {
   id: string;
-  segment_key: string;
   text: string;
-  speaker: string | null;
-  revision: number;
-  is_final: boolean;
+  section: string;
+  importance_weight: number;
+  state: string;
+  provenance: string;
+  venue: string;
+  metadata?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type QuestionEvidence = {
+  relation: string;
+  claim_text: string;
+  scores: unknown;
   created_at: string;
 };
+
+type EventLane = "attention" | "context" | "memo";
+
+type NoteRow = {
+  id: string;
+  section: string;
+  text: string;
+  t_ms: number;
+  importance_score: number;
+  source_claim_ids: string[];
+  parent_bullet_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type NotesSections = Record<string, { bullets: NoteRow[]; subbullets: Record<string, NoteRow[]> }>;
 
 type JoinResponse = {
   livekitUrl: string;
@@ -153,8 +178,15 @@ function ConnectedMeetingView(props: { meetingId: string; guestToken: string | n
       >
         <RoomAudioRenderer />
         <div
-          className={`h-full grid gap-4 p-4 ${isHost ? "grid-cols-1 lg:grid-cols-[1fr_360px]" : "grid-cols-1"}`}
+          className={`h-full grid gap-4 p-4 ${
+            isHost ? "grid-cols-1 lg:grid-cols-[320px_1fr_420px]" : "grid-cols-1"
+          }`}
         >
+          {isHost ? (
+            <div className="rounded-2xl border border-zinc-200 bg-gradient-to-b from-white to-zinc-50/40 p-4 overflow-auto space-y-4 min-h-0">
+              <LeftSidebarPanel meetingId={props.meetingId} />
+            </div>
+          ) : null}
           <div className="rounded-2xl border border-zinc-200 bg-white p-4 overflow-hidden flex flex-col min-h-0">
             <div className="flex items-start justify-between gap-3 pb-3">
               <div>
@@ -175,14 +207,149 @@ function ConnectedMeetingView(props: { meetingId: string; guestToken: string | n
             </div>
           </div>
           {isHost ? (
-            <div className="rounded-2xl border border-zinc-200 bg-white p-4 overflow-auto space-y-4 min-h-0">
+            <div className="rounded-2xl border border-zinc-200 bg-gradient-to-b from-white to-zinc-50/40 p-4 overflow-auto space-y-4 min-h-0">
               <AssistantControlPanel meetingId={props.meetingId} />
-              <TranscriptPanel meetingId={props.meetingId} />
               <AssistantEventsPanel meetingId={props.meetingId} dealId={props.join.dealId} />
             </div>
           ) : null}
         </div>
       </LiveKitRoom>
+    </div>
+  );
+}
+
+function LeftSidebarPanel(props: { meetingId: string }) {
+  const [tab, setTab] = useState<"open" | "answered" | "notes">("open");
+  const [trackedQuestions, setTrackedQuestions] = useState<TrackedQuestion[]>([]);
+  const [evidenceByQuestionId, setEvidenceByQuestionId] = useState<Record<string, QuestionEvidence[]>>({});
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const mid = props.meetingId;
+    if (!mid) return;
+    let isCancelled = false;
+
+    const load = async () => {
+      const res = await fetch(`/api/meetings/${mid}/questions?includeAnswered=1`, { method: "GET" });
+      const json = (await res.json().catch(() => null)) as
+        | { questions?: TrackedQuestion[]; evidenceByQuestionId?: Record<string, QuestionEvidence[]>; error?: string }
+        | null;
+      if (isCancelled) return;
+      if (!res.ok) {
+        setErr(json?.error || `Failed (${res.status})`);
+        return;
+      }
+      setErr(null);
+      setTrackedQuestions(Array.isArray(json?.questions) ? json!.questions! : []);
+      setEvidenceByQuestionId((json?.evidenceByQuestionId && typeof json.evidenceByQuestionId === "object" ? json.evidenceByQuestionId : {}) as Record<
+        string,
+        QuestionEvidence[]
+      >);
+    };
+
+    void load();
+    const pollId = window.setInterval(() => void load(), 4_000);
+    return () => {
+      isCancelled = true;
+      window.clearInterval(pollId);
+    };
+  }, [props.meetingId]);
+
+  const active = useMemo(() => {
+    return trackedQuestions.filter((q) => {
+      const st = String(q.state || "").trim().toLowerCase();
+      return st !== "answered" && st !== "contradicted";
+    });
+  }, [trackedQuestions]);
+
+  const answered = useMemo(() => {
+    return trackedQuestions.filter((q) => String(q.state || "").trim().toLowerCase() === "answered");
+  }, [trackedQuestions]);
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-base font-semibold tracking-tight text-zinc-900">Questions</p>
+        <p className="text-xs text-zinc-500 leading-relaxed">
+          Assumptions, peer questions, and evidence gaps. They’ll disappear when strongly answered.
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setTab("open")}
+          className={`h-8 px-3 rounded-full text-xs font-medium border ${
+            tab === "open" ? "bg-zinc-900 text-white border-zinc-900" : "bg-white text-zinc-700 border-zinc-200"
+          }`}
+        >
+          Open <span className={tab === "open" ? "text-white/80" : "text-zinc-400"}>({active.length})</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("answered")}
+          className={`h-8 px-3 rounded-full text-xs font-medium border ${
+            tab === "answered" ? "bg-zinc-900 text-white border-zinc-900" : "bg-white text-zinc-700 border-zinc-200"
+          }`}
+        >
+          Answered <span className={tab === "answered" ? "text-white/80" : "text-zinc-400"}>({answered.length})</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("notes")}
+          className={`h-8 px-3 rounded-full text-xs font-medium border ${
+            tab === "notes" ? "bg-zinc-900 text-white border-zinc-900" : "bg-white text-zinc-700 border-zinc-200"
+          }`}
+        >
+          Notes
+        </button>
+      </div>
+      {err ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{err}</div> : null}
+      {tab === "notes" ? (
+        <NotesPanel meetingId={props.meetingId} />
+      ) : tab === "answered" ? (
+        answered.length ? (
+          <ul className="space-y-2">
+            {answered.slice(0, 14).map((q) => {
+              const ev = evidenceByQuestionId[q.id]?.[0];
+              return (
+                <li key={q.id} className="rounded-2xl border border-emerald-200/70 bg-white p-3 shadow-sm">
+                  <div className="flex flex-wrap gap-1.5 text-[10px] text-zinc-500">
+                    <span className="rounded-full bg-emerald-50 text-emerald-800 px-2 py-0.5">answered</span>
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.provenance}</span>
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.section}</span>
+                  </div>
+                  <p className="mt-2 font-serif text-[15px] leading-snug text-zinc-800">{q.text}</p>
+                  {ev?.claim_text ? (
+                    <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50/40 px-3 py-2">
+                      <p className="text-[11px] font-medium text-emerald-900">Answer</p>
+                      <p className="mt-1 text-[13px] leading-snug text-emerald-900/90">{ev.claim_text.slice(0, 260)}</p>
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-xs text-zinc-500">No answer excerpt captured yet.</p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="text-sm text-zinc-500">No answered questions yet.</p>
+        )
+      ) : active.length ? (
+        <ul className="space-y-2">
+          {active.slice(0, 18).map((q) => (
+            <li key={q.id} className="rounded-2xl border border-violet-200/70 bg-white p-3 shadow-sm">
+              <div className="flex flex-wrap gap-1.5 text-[10px] text-zinc-500">
+                <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.state}</span>
+                <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.provenance}</span>
+                <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.section}</span>
+              </div>
+              <p className="mt-2 font-serif text-[15px] leading-snug text-zinc-800">{q.text}</p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-zinc-500">No open questions yet.</p>
+      )}
     </div>
   );
 }
@@ -274,7 +441,7 @@ function AssistantControlPanel(props: { meetingId: string }) {
       ) : null}
       {enabled === false ? (
         <p className="text-xs text-amber-700">
-          {reason ?? "Assistant autostart is disabled. Set LIVE_ASSISTANT_AUTOSTART_LOCAL=1 in local development."}
+          {reason ?? "Local assistant is disabled."}
         </p>
       ) : (
         <button className="crm-button w-full" disabled={loading} onClick={running ? stop : start} type="button">
@@ -286,21 +453,19 @@ function AssistantControlPanel(props: { meetingId: string }) {
   );
 }
 
-function TranscriptPanel(props: { meetingId: string }) {
-  const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+function NotesPanel(props: { meetingId: string }) {
+  const [sections, setSections] = useState<NotesSections>({});
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let isCancelled = false;
     const poll = async () => {
       try {
-        const res = await fetch(`/api/meetings/${props.meetingId}/transcript`, { method: "GET" });
-        const json = (await res.json().catch(() => null)) as
-          | { segments?: TranscriptSegment[]; error?: string }
-          | null;
-        if (!res.ok) throw new Error(json?.error || `Failed to load transcript (${res.status})`);
+        const res = await fetch(`/api/meetings/${props.meetingId}/notes`, { method: "GET" });
+        const json = (await res.json().catch(() => null)) as { sections?: NotesSections; error?: string } | null;
+        if (!res.ok) throw new Error(json?.error || `Failed to load notes (${res.status})`);
         if (!isCancelled) {
-          setSegments((json?.segments ?? []) as TranscriptSegment[]);
+          setSections((json?.sections && typeof json.sections === "object" ? json.sections : {}) as NotesSections);
           setErr(null);
         }
       } catch (e) {
@@ -308,45 +473,62 @@ function TranscriptPanel(props: { meetingId: string }) {
       }
     };
     poll();
-    const t = window.setInterval(poll, 2000);
+    const t = window.setInterval(poll, 2500);
     return () => {
       isCancelled = true;
       window.clearInterval(t);
     };
   }, [props.meetingId]);
 
+  const orderedSections = useMemo(() => {
+    const pref = ["problem", "solution", "traction", "product", "market", "gtm", "team", "competition", "financials", "risks", "other"];
+    const keys = Object.keys(sections || {});
+    keys.sort((a, b) => {
+      const ai = pref.indexOf(a);
+      const bi = pref.indexOf(b);
+      if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      return a.localeCompare(b);
+    });
+    return keys;
+  }, [sections]);
+
   return (
     <div className="space-y-2">
       <div>
-        <p className="text-sm font-medium text-zinc-900">Live transcript</p>
-        <p className="text-xs text-zinc-500">Live segments from the transcription worker.</p>
+        <p className="text-sm font-semibold text-zinc-900">Notes</p>
+        <p className="text-xs text-zinc-500">Auto-built bullets from classified claims (grouped by section).</p>
       </div>
       {err ? <p className="text-xs text-rose-600">{err}</p> : null}
-      {segments.length ? (
-        <div className="space-y-2 max-h-56 overflow-auto pr-1">
-          {segments.map((s) => (
-            <div key={s.id} className="rounded-xl border border-zinc-200 bg-white p-2">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-[11px] text-zinc-600">{s.speaker || "speaker"}</p>
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`text-[10px] rounded-full px-1.5 py-0.5 border ${
-                      s.is_final
-                        ? "text-emerald-700 border-emerald-300 bg-emerald-50"
-                        : "text-amber-700 border-amber-300 bg-amber-50"
-                    }`}
-                  >
-                    {s.is_final ? "final" : "interim"}
-                  </span>
-                  <p className="text-[11px] text-zinc-500">{new Date(s.created_at).toLocaleTimeString()}</p>
-                </div>
+      {orderedSections.length ? (
+        <div className="space-y-4 max-h-80 overflow-auto pr-1">
+          {orderedSections.map((sec) => {
+            const s = sections[sec];
+            if (!s) return null;
+            return (
+              <div key={sec}>
+                <p className="text-[11px] font-semibold tracking-wide text-zinc-700 uppercase">{sec}</p>
+                <ul className="mt-2 space-y-1.5 list-disc pl-5">
+                  {s.bullets.slice(0, 18).map((b) => (
+                    <li key={b.id} className="text-[14.5px] leading-snug text-zinc-800">
+                      <span className="font-serif">{b.text}</span>
+                      {s.subbullets?.[b.id]?.length ? (
+                        <ul className="mt-2 space-y-1 list-disc pl-5 text-[13px] text-zinc-700">
+                          {s.subbullets[b.id]!.slice(0, 5).map((sb) => (
+                            <li key={sb.id} className="leading-snug">
+                              {sb.text}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
               </div>
-              <p className="mt-1 text-sm text-zinc-800 whitespace-pre-wrap">{s.text}</p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
-        <p className="text-sm text-zinc-500">No transcript yet.</p>
+        <p className="text-sm text-zinc-500">No notes yet.</p>
       )}
     </div>
   );
@@ -392,10 +574,54 @@ function AssistantEventCrmLinks(props: { sourceMap: unknown; dealId?: string }) 
   );
 }
 
+function laneForEvent(e: AssistantEvent): EventLane {
+  const lane = e.source_map && typeof e.source_map === "object" ? String((e.source_map as Record<string, unknown>).lane ?? "") : "";
+  if (lane === "attention" || lane === "context" || lane === "memo") return lane;
+  if (e.kind === "contradiction" || e.kind === "action_prompt") return "attention";
+  if (e.kind === "crm_fact") return "context";
+  return "memo";
+}
+
+function eventPriority(e: AssistantEvent): number {
+  const sm = e.source_map && typeof e.source_map === "object" ? (e.source_map as Record<string, unknown>) : {};
+  const k = typeof sm.kind === "string" ? sm.kind : "";
+  const reasoned = sm.reasoned === true;
+  if (e.kind === "contradiction" && (reasoned || k.startsWith("deep_"))) return 100;
+  if (e.kind === "contradiction" && sm.fast_lane === true) return 10;
+  if (e.kind === "action_prompt") return 60;
+  if (e.kind === "crm_fact") return 30;
+  return 20;
+}
+
+function verifyQueryForEvent(e: AssistantEvent): string | null {
+  if (!e.source_map || typeof e.source_map !== "object") return null;
+  const sm = e.source_map as Record<string, unknown>;
+  const q = sm.verify_query;
+  return typeof q === "string" && q.trim() ? q.trim() : null;
+}
+
 /** Host-only: subscribed from parent when `role === "host"`. */
 function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
   const [events, setEvents] = useState<AssistantEvent[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [tab, setTab] = useState<EventLane>(() => {
+    try {
+      const raw = window.sessionStorage.getItem(`meet_tab:${props.meetingId}`) || "";
+      if (raw === "attention" || raw === "context" || raw === "memo") return raw;
+    } catch {
+      // ignore
+    }
+    return "attention";
+  });
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(`meet_tab:${props.meetingId}`, tab);
+    } catch {
+      // ignore
+    }
+  }, [props.meetingId, tab]);
 
   useEffect(() => {
     const mid = props.meetingId;
@@ -403,63 +629,185 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
 
     let isCancelled = false;
 
-    const supabase = createClient();
-    (async () => {
-      const res = await supabase
-        .schema("deal_intel")
-        .from("meeting_assistant_event")
-        .select("id, kind, title, body, severity, created_at, source_map")
-        .eq("meeting_id", mid)
-        .order("created_at", { ascending: false })
-        .limit(50);
+    const load = async () => {
+      const evRes = await fetch(`/api/meetings/${mid}/events`, { method: "GET" });
+      const json = (await evRes.json().catch(() => null)) as { events?: AssistantEvent[]; error?: string } | null;
       if (isCancelled) return;
-      if (res.error) setErr(res.error.message);
-      else setEvents((res.data ?? []) as AssistantEvent[]);
-    })().catch((e) => {
-      if (!isCancelled) setErr(e instanceof Error ? e.message : String(e));
-    });
+      if (!evRes.ok) {
+        setErr(json?.error || `Failed (${evRes.status})`);
+        return;
+      }
+      setErr(null);
+      setEvents(Array.isArray(json?.events) ? json!.events! : []);
+    };
 
-    const channel = supabase
-      .channel(`meeting_assistant_event:${mid}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "deal_intel", table: "meeting_assistant_event", filter: `meeting_id=eq.${mid}` },
-        (payload) => {
-          const row = payload.new as AssistantEvent;
-          setEvents((prev) => [row, ...prev].slice(0, 50));
-        },
-      )
-      .subscribe();
+    void load();
 
-    const pollMs = 12_000;
+    const pollMs = 4_000;
     const pollId = window.setInterval(() => {
-      void (async () => {
-        const res = await supabase
-          .schema("deal_intel")
-          .from("meeting_assistant_event")
-          .select("id, kind, title, body, severity, created_at, source_map")
-          .eq("meeting_id", mid)
-          .order("created_at", { ascending: false })
-          .limit(50);
-        if (isCancelled || res.error) return;
-        setEvents((res.data ?? []) as AssistantEvent[]);
-      })();
+      void load();
     }, pollMs);
 
     return () => {
       isCancelled = true;
       window.clearInterval(pollId);
-      supabase.removeChannel(channel);
     };
   }, [props.meetingId]);
+
+  const grouped = useMemo(() => {
+    const out: Record<EventLane, AssistantEvent[]> = { attention: [], context: [], memo: [] };
+    for (const e of events) out[laneForEvent(e)].push(e);
+    for (const lane of Object.keys(out) as EventLane[]) {
+      out[lane].sort((a, b) => {
+        const pa = eventPriority(a);
+        const pb = eventPriority(b);
+        if (pa !== pb) return pb - pa;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+    }
+    return out;
+  }, [events]);
+
+  const tabButton = (lane: EventLane, label: string) => {
+    const active = tab === lane;
+    return (
+      <button
+        type="button"
+        onClick={() => setTab(lane)}
+        className={`px-3 py-1.5 text-xs font-medium rounded-full border transition ${
+          active ? "bg-zinc-900 text-white border-zinc-900" : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50"
+        }`}
+      >
+        {label}
+        <span className={`ml-2 text-[11px] ${active ? "text-white/80" : "text-zinc-500"}`}>{grouped[lane].length}</span>
+      </button>
+    );
+  };
+
+  const renderBody = (body: string) => {
+    const lines = String(body || "").split("\n").filter((l) => l.trim().length > 0);
+    return (
+      <div className="mt-2 space-y-2 font-serif text-[15px] leading-[1.55] text-zinc-800">
+        {lines.map((l, idx) => (
+          <p key={idx} className={l.startsWith("Follow-up:") ? "font-sans font-medium text-zinc-900 text-[14px]" : ""}>
+            {l}
+          </p>
+        ))}
+      </div>
+    );
+  };
+
+  const renderLane = (lane: EventLane, title: string, subtitle: string) => (
+    <div className="space-y-2">
+      <div>
+        <p className="text-sm font-semibold text-zinc-900">{title}</p>
+        <p className="text-xs text-zinc-500">{subtitle}</p>
+      </div>
+      {grouped[lane].length ? (
+        grouped[lane].map((e) => (
+          <div
+            key={e.id}
+            className={`rounded-2xl border p-4 shadow-sm ${
+              lane === "attention"
+                ? e.severity === "high"
+                  ? "border-rose-200 bg-white"
+                  : "border-amber-200 bg-white"
+                : lane === "context"
+                  ? "border-blue-200 bg-white"
+                  : "border-zinc-200 bg-white"
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold tracking-tight text-zinc-900 truncate">{e.title ?? e.kind}</p>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                  <span className="rounded-full border border-zinc-200 px-2 py-0.5 bg-zinc-50">{e.kind}</span>
+                  <span className="rounded-full border border-zinc-200 px-2 py-0.5 bg-zinc-50">{e.severity}</span>
+                  <span>{new Date(e.created_at).toLocaleTimeString()}</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {verifyQueryForEvent(e) ? (
+                  <button
+                    className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                    disabled={busyId === e.id}
+                    onClick={async () => {
+                      const query = verifyQueryForEvent(e) || "";
+                      window.open(`https://www.google.com/search?q=${encodeURIComponent(query)}`, "_blank", "noopener,noreferrer");
+                      const url = window.prompt("Paste the best URL you found (optional):", "") || "";
+                      const notes = window.prompt("Paste short notes (optional):", "") || "";
+                      const decision = window.confirm("Save as ACCEPTED verification? (Cancel = Reject)") ? "accepted" : "rejected";
+                      setBusyId(e.id);
+                      setErr(null);
+                      try {
+                        const res = await fetch(`/api/meetings/${props.meetingId}/verify`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ decision, query, url, notes, event_id: e.id }),
+                        });
+                        const json = (await res.json().catch(() => null)) as { error?: string } | null;
+                        if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+                      } catch (ex) {
+                        setErr(ex instanceof Error ? ex.message : String(ex));
+                      } finally {
+                        setBusyId(null);
+                      }
+                    }}
+                    type="button"
+                    title="Web search"
+                  >
+                    Web search
+                  </button>
+                ) : null}
+                {e.kind === "contradiction" || e.kind === "suggested_question" ? (
+                  <button
+                    className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                    disabled={busyId === e.id}
+                    onClick={async () => {
+                      setBusyId(e.id);
+                      setErr(null);
+                      try {
+                        const res = await fetch(`/api/meetings/${props.meetingId}/events/${e.id}`, { method: "DELETE" });
+                        const json = (await res.json().catch(() => null)) as { error?: string } | null;
+                        if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+                        setEvents((prev) => prev.filter((x) => x.id !== e.id));
+                      } catch (ex) {
+                        setErr(ex instanceof Error ? ex.message : String(ex));
+                      } finally {
+                        setBusyId(null);
+                      }
+                    }}
+                    type="button"
+                    title="Dismiss"
+                  >
+                    {busyId === e.id ? "…" : "Dismiss"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            {renderBody(e.body)}
+            <AssistantEventCrmLinks sourceMap={e.source_map} dealId={props.dealId} />
+          </div>
+        ))
+      ) : (
+        <p className="text-xs text-zinc-500">No {title.toLowerCase()} cards yet.</p>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-3">
       <div>
-        <p className="text-sm font-medium text-zinc-900">Live CRM assistant</p>
-        <p className="text-xs text-zinc-500">
+        <p className="text-base font-semibold tracking-tight text-zinc-900">Live assistant</p>
+        <p className="text-xs text-zinc-500 leading-relaxed">
           Indexed deal materials, contradiction checks, and links back to your company workspace (transcription worker).
         </p>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {tabButton("attention", "Attention")}
+        {tabButton("context", "Context")}
+        {tabButton("memo", "Memo")}
       </div>
 
       {err ? (
@@ -467,24 +815,7 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
       ) : null}
 
       {events.length ? (
-        <div className="space-y-2">
-          {events.map((e) => (
-            <div
-              key={e.id}
-              className="rounded-xl border border-zinc-200 bg-white p-3"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-medium text-zinc-900">{e.title ?? e.kind}</p>
-                <span className="text-[11px] text-zinc-500">{new Date(e.created_at).toLocaleTimeString()}</span>
-              </div>
-              <pre className="mt-2 whitespace-pre-wrap text-sm text-zinc-700">{e.body}</pre>
-              <div className="mt-2 text-[11px] text-zinc-500">
-                {e.kind} · {e.severity}
-              </div>
-              <AssistantEventCrmLinks sourceMap={e.source_map} dealId={props.dealId} />
-            </div>
-          ))}
-        </div>
+        <div className="space-y-4">{renderLane(tab, tab === "attention" ? "Attention" : tab === "context" ? "Context" : "Memo", tab === "attention" ? "Contradictions and urgent prompts" : tab === "context" ? "Memory and linked evidence" : "Key points and prompts")}</div>
       ) : (
         <p className="text-sm text-zinc-500">
           No assistant cards yet. Enable the live assistant worker and speak; cards pull from your CRM claims and facts.
@@ -496,16 +827,20 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
 
 function MeetingVideoGrid() {
   // Must be called under the LiveKit Room context.
-  const tracks = useTracks(
-    [
-      { source: Track.Source.Camera, withPlaceholder: true },
-    ],
-    { onlySubscribed: false },
-  );
-  const visibleTracks = tracks.filter((t) => {
-    const identity = (t as { participant?: { identity?: string } }).participant?.identity || "";
-    return !identity.startsWith("worker:transcribe:");
-  });
+  const tracks = useTracks([{ source: Track.Source.Camera, withPlaceholder: false }], { onlySubscribed: true });
+  const visibleTracks = useMemo(() => {
+    const filtered = tracks.filter((t) => {
+      const identity = (t as { participant?: { identity?: string } }).participant?.identity || "";
+      return !identity.startsWith("worker:transcribe:");
+    });
+    filtered.sort((a, b) => {
+      const ai = (a as { participant?: { identity?: string } }).participant?.identity || "";
+      const bi = (b as { participant?: { identity?: string } }).participant?.identity || "";
+      if (ai !== bi) return ai.localeCompare(bi);
+      return String((a as { source?: unknown }).source ?? "").localeCompare(String((b as { source?: unknown }).source ?? ""));
+    });
+    return filtered;
+  }, [tracks]);
   return (
     <GridLayout tracks={visibleTracks}>
       <ParticipantTile />

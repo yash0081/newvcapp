@@ -6,6 +6,15 @@ import { extractClaimsForDocument } from "@/lib/deal-intel/claim-extract";
 import { embedTexts } from "@/lib/vertex-embeddings";
 import { cosineSimilarity, parseVector, vectorParam, weightedCentroid } from "@/lib/data-layer/shared/vector";
 import { chunkArray, mapWithConcurrency } from "@/lib/async/concurrency";
+import { runSlowReasoningForClaim } from "@/lib/live-assistant/reasoning";
+import type { ClassifiedClaim } from "@/lib/live-assistant/claim-classifier";
+import { runDeepContradictionBatch } from "@/lib/live-assistant/deep-contradictions";
+import { fetchDealIntelGroundingPack } from "@/lib/live-assistant/deal-intel-grounding";
+import { runKpiMiddlePath } from "@/lib/live-assistant/kpi-middle-path";
+import { runMeetingQuestionEngineTick } from "@/lib/live-assistant/question-engine-tick";
+import { dedupeFastContradictionEvents } from "@/lib/live-assistant/dedupe-contradictions";
+import { runMeetingNotesTick } from "@/lib/live-assistant/notes";
+import { loadLiveAssistantPreferenceSignals } from "@/lib/live-assistant/preferences";
 
 type JobRow = {
   id: string;
@@ -220,6 +229,127 @@ async function handleJob(admin: ReturnType<typeof createAdminClient>, job: JobRo
         admin as unknown as { schema: (s: string) => { from: (t: string) => unknown }; rpc: (fn: string, args: Record<string, unknown>) => unknown },
         documentId
       );
+      return;
+    }
+    case "meeting_claim_reasoning": {
+      const meetingId = String(payload.meeting_id ?? job.subject_id);
+      const userId = String(payload.user_id ?? "");
+      const dealId = String(payload.deal_id ?? "");
+      const dedupeKey = payload.dedupe_key == null ? null : String(payload.dedupe_key);
+      const claim = {
+        text: String(payload.quote ?? payload.source_text ?? ""),
+        section: String(payload.section ?? "other"),
+        intent: String(payload.intent ?? "claim"),
+        confidence: Number(payload.confidence ?? 0.5),
+      };
+      if (!meetingId || !userId || !dealId || !claim.text) return;
+      // Best-effort dedupe: if we already emitted a reasoned card with this dedupe_key, skip.
+      if (dedupeKey) {
+        const recent = await admin
+          .schema("deal_intel")
+          .from("meeting_assistant_event")
+          .select("id, source_map")
+          .eq("meeting_id", meetingId)
+          .order("created_at", { ascending: false })
+          .limit(80);
+        if (!recent.error) {
+          const rows = (recent.data ?? []) as Array<{ id: string; source_map: unknown }>;
+          for (const r of rows) {
+            const sm = (r.source_map && typeof r.source_map === "object" ? (r.source_map as Record<string, unknown>) : {}) as Record<
+              string,
+              unknown
+            >;
+            if (String(sm.dedupe_key ?? "") === dedupeKey) return;
+          }
+        }
+      }
+      const typedClaim: ClassifiedClaim = {
+        text: claim.text,
+        section: claim.section as ClassifiedClaim["section"],
+        intent: claim.intent as ClassifiedClaim["intent"],
+        confidence: Number.isFinite(claim.confidence) ? claim.confidence : 0.5,
+      };
+      await runSlowReasoningForClaim(admin, {
+        meetingId,
+        userId,
+        dealId,
+        claim: typedClaim,
+        sourceText: String(payload.source_text ?? claim.text),
+        preferenceContext:
+          payload.preference_context && typeof payload.preference_context === "object"
+            ? (payload.preference_context as {
+                hints?: string[];
+                sectionWeights?: Record<string, number>;
+                preferredDomains?: string[];
+                confidence?: number;
+              })
+            : {
+                hints: Array.isArray(payload.preference_hints) ? payload.preference_hints.map((x) => String(x)) : [],
+              },
+      });
+      return;
+    }
+    case "meeting_deep_contradictions": {
+      const meetingId = String(payload.meeting_id ?? job.subject_id);
+      const userId = String(payload.user_id ?? "");
+      const dealId = String(payload.deal_id ?? "");
+      const section = String(payload.section ?? "other");
+      if (!meetingId || !userId || !dealId) return;
+      await runDeepContradictionBatch(admin, { meetingId, userId, dealId, section });
+      return;
+    }
+    case "meeting_dedupe_contradictions": {
+      const meetingId = String(payload.meeting_id ?? job.subject_id);
+      if (!meetingId) return;
+      await dedupeFastContradictionEvents(admin, meetingId);
+      return;
+    }
+    case "meeting_notes_tick": {
+      const meetingId = String(payload.meeting_id ?? job.subject_id);
+      const userId = String(payload.user_id ?? "");
+      if (!meetingId || !userId) return;
+      const pref = await loadLiveAssistantPreferenceSignals(admin, userId).catch(() => null);
+      await runMeetingNotesTick(admin, { meetingId, userId, pref });
+      return;
+    }
+    case "meeting_question_engine_tick": {
+      const meetingId = String(payload.meeting_id ?? job.subject_id);
+      if (!meetingId) return;
+      await runMeetingQuestionEngineTick(admin, payload);
+      return;
+    }
+    case "meeting_kpi_middle": {
+      const meetingId = String(payload.meeting_id ?? job.subject_id);
+      const dealId = String(payload.deal_id ?? "");
+      const chunkText = String(payload.chunk_text ?? "");
+      const dedupeKey = payload.dedupe_key == null ? "" : String(payload.dedupe_key);
+      if (!meetingId || !dealId || !chunkText) return;
+      if (dedupeKey) {
+        const recent = await admin
+          .schema("deal_intel")
+          .from("meeting_assistant_event")
+          .select("id, source_map")
+          .eq("meeting_id", meetingId)
+          .order("created_at", { ascending: false })
+          .limit(50);
+        if (!recent.error) {
+          for (const r of (recent.data ?? []) as Array<{ source_map: unknown }>) {
+            const sm = (r.source_map && typeof r.source_map === "object" ? (r.source_map as Record<string, unknown>) : {}) as Record<
+              string,
+              unknown
+            >;
+            if (String(sm.parent_dedupe ?? "") === dedupeKey && sm.kind === "kpi_middle_path") return;
+          }
+        }
+      }
+      const pack = await fetchDealIntelGroundingPack(admin, dealId);
+      await runKpiMiddlePath(admin, {
+        meetingId,
+        dealId,
+        chunkText,
+        pack,
+        dedupeKey: dedupeKey || `mid:${meetingId}`,
+      });
       return;
     }
     default:

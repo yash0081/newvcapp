@@ -1,4 +1,3 @@
-import "server-only";
 import { ingestTextAsDocument, type AdminClient } from "@/lib/research/document-ingest";
 import type { ResearchSource } from "@/lib/research/types";
 

@@ -4,6 +4,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export async function GET(_req: Request, ctx: { params: Promise<{ meetingId: string }> }) {
   const { meetingId } = await ctx.params;
+  const u = new URL(_req.url);
+  const mode = u.searchParams.get("mode")?.trim().toLowerCase();
   const supabase = await createClient();
   const {
     data: { user },
@@ -32,6 +34,24 @@ export async function GET(_req: Request, ctx: { params: Promise<{ meetingId: str
     .limit(120);
   if (transcript.error) return NextResponse.json({ error: transcript.error.message || "Failed to load transcript" }, { status: 500 });
 
-  return NextResponse.json({ segments: transcript.data ?? [] });
+  const rows = (transcript.data ?? []) as Array<{
+    id: string;
+    segment_key: string;
+    text: string;
+    speaker: string | null;
+    revision: number;
+    is_final: boolean;
+    created_at: string;
+  }>;
+  if (mode !== "latest") {
+    return NextResponse.json({ segments: rows });
+  }
+  const byKey = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    const prev = byKey.get(r.segment_key);
+    if (!prev || r.revision > prev.revision) byKey.set(r.segment_key, r);
+  }
+  const latest = Array.from(byKey.values()).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return NextResponse.json({ segments: latest });
 }
 

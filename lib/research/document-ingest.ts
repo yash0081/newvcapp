@@ -1,13 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { chunkPageText } from "@/lib/deal-intel/chunking";
 import { extractKeywords } from "@/lib/data-layer/shared/text";
 import { embedText } from "@/lib/vertex-embeddings";
 import { vectorParam } from "@/lib/data-layer/shared/vector";
 
-export type AdminClient = {
-  schema: (s: string) => any;
-  rpc: (fn: string, args: Record<string, unknown>) => any;
-};
+export type AdminClient = SupabaseClient;
 
 const EMBEDDING_MODEL = process.env.VERTEX_EMBEDDING_MODEL || "text-embedding-004";
 const FAST_EMBED_CHUNK_LIMIT = Number(process.env.DEAL_INTEL_FAST_CHUNK_EMBED_LIMIT || 12);

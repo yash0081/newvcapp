@@ -21,17 +21,18 @@ type WorkerProcessState = WorkerState & {
 
 const workers = new Map<string, WorkerProcessState>();
 
-function envFlag(name: string): boolean {
+function envFlagExplicitFalse(name: string): boolean {
   const v = process.env[name]?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
+  return v === "0" || v === "false" || v === "no" || v === "off";
 }
 
 export function ensureLocalAutostartEnabled(): { ok: true } | { ok: false; reason: string } {
-  if (!envFlag("LIVE_ASSISTANT_AUTOSTART_LOCAL")) {
-    return { ok: false, reason: "Local assistant autostart is disabled (set LIVE_ASSISTANT_AUTOSTART_LOCAL=1)." };
-  }
   if (process.env.NODE_ENV !== "development") {
     return { ok: false, reason: "Assistant autostart is only supported in local development." };
+  }
+  // In local dev, enable by default. Allow explicit disable for safety.
+  if (envFlagExplicitFalse("LIVE_ASSISTANT_AUTOSTART_LOCAL")) {
+    return { ok: false, reason: "Local assistant is disabled (set LIVE_ASSISTANT_AUTOSTART_LOCAL=1 to re-enable)." };
   }
   return { ok: true };
 }
