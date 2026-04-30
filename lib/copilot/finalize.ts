@@ -1,4 +1,3 @@
-import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   ingestTextAsDocument,
@@ -41,6 +40,8 @@ export async function finalizeCopilotSessionToDocument(args: {
   admin: SupabaseClient;
   session: CopilotSession;
   companyName: string;
+  /** When set, refresh this document row in place instead of creating a new document id. */
+  existingDocumentId?: string | null;
 }): Promise<{ documentId: string | null }> {
   const meta = (args.session.metadata ?? {}) as { acceptedSnippets?: AcceptedSnippet[] };
   const snippets = Array.isArray(meta.acceptedSnippets) ? meta.acceptedSnippets : [];
@@ -72,6 +73,7 @@ export async function finalizeCopilotSessionToDocument(args: {
     }),
   ];
 
+  const existing = args.existingDocumentId?.trim();
   const ingested = await ingestTextAsDocument({
     admin: args.admin as unknown as AdminClient,
     userId: args.session.user_id,
@@ -100,6 +102,7 @@ export async function finalizeCopilotSessionToDocument(args: {
     // Skip synchronous embeddings; doc_refine_chunks worker fills them in.
     // Keeps the Finalize POST under ~500ms locally.
     fastEmbedLimit: 0,
+    reuseDocumentId: existing || undefined,
   });
 
   return { documentId: ingested?.documentId ?? null };

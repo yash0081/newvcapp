@@ -15,6 +15,16 @@ import { runMeetingQuestionEngineTick } from "@/lib/live-assistant/question-engi
 import { dedupeFastContradictionEvents } from "@/lib/live-assistant/dedupe-contradictions";
 import { runMeetingNotesTick } from "@/lib/live-assistant/notes";
 import { loadLiveAssistantPreferenceSignals } from "@/lib/live-assistant/preferences";
+import { finalizeCopilotSessionToDocument } from "@/lib/copilot/finalize";
+import { syncCopilotSessionToFactsSchema } from "@/lib/copilot/schema-sync";
+import type { AcceptedSnippet } from "@/lib/copilot/types";
+import {
+  getCopilotSessionById,
+  getDealForUser,
+  insertCopilotEvent,
+  updateCopilotSessionMetadata,
+  updateSessionFinalizedDocumentId,
+} from "@/lib/copilot/db";
 
 type JobRow = {
   id: string;
@@ -82,6 +92,145 @@ async function embedMissingDocumentChunks(admin: ReturnType<typeof createAdminCl
       .from("document_chunk")
       .update({ embedding: vectorParam(vecs[idx]!), embedding_model: model, produced_by: "refined" })
       .eq("id", r.id);
+  });
+}
+
+function asCompanyName(meta: unknown): string {
+  if (!meta || typeof meta !== "object") return "Company";
+  const m = meta as Record<string, unknown>;
+  return typeof m.company_name === "string" ? m.company_name : "Company";
+}
+
+/** ~every 90s: enqueue copilot_session_sync for active sessions with accepts older than 60s and still unsynced. */
+async function enqueueDueCopilotSessionSyncs(admin: ReturnType<typeof createAdminClient>) {
+  const { data: rows, error } = await admin
+    .schema("deal_intel")
+    .from("copilot_session")
+    .select("id, metadata")
+    .eq("status", "active")
+    .limit(200);
+  if (error || !rows?.length) return;
+  const now = Date.now();
+  for (const row of rows) {
+    const meta = (row.metadata ?? {}) as Record<string, unknown>;
+    const unsynced = Number(meta.unsynced_accept_count ?? 0);
+    if (unsynced <= 0) continue;
+    const lastAccept = meta.last_accept_at ? new Date(String(meta.last_accept_at)).getTime() : 0;
+    if (!lastAccept) continue;
+    if (now - lastAccept < 60_000) continue;
+    const lastSynced = meta.last_synced_at ? new Date(String(meta.last_synced_at)).getTime() : 0;
+    if (lastSynced >= lastAccept) continue;
+    await admin.rpc("deal_intel_enqueue_job", {
+      p_job_type: "copilot_session_sync",
+      p_subject_kind: "copilot_session",
+      p_subject_id: row.id,
+      p_payload: { periodic: true },
+      p_priority: 120,
+    });
+  }
+}
+
+async function handleCopilotSessionSyncJob(admin: ReturnType<typeof createAdminClient>, job: JobRow) {
+  const payload = (job.payload && typeof job.payload === "object" ? job.payload : {}) as Record<string, unknown>;
+  const terminal = Boolean(payload.terminal);
+  const sessionId = String(job.subject_id);
+
+  let session = await getCopilotSessionById({ admin, sessionId });
+  if (!session) return;
+
+  if (!terminal && session.status !== "active") return;
+
+  const meta0 = (session.metadata ?? {}) as Record<string, unknown>;
+  const snippets = Array.isArray(meta0.acceptedSnippets) ? (meta0.acceptedSnippets as AcceptedSnippet[]) : [];
+  if (snippets.length === 0) return;
+
+  if (!terminal) {
+    const unsynced = Number(meta0.unsynced_accept_count ?? 0);
+    if (unsynced <= 0) return;
+    const lastAccept = meta0.last_accept_at ? new Date(String(meta0.last_accept_at)).getTime() : 0;
+    const lastSynced = meta0.last_synced_at ? new Date(String(meta0.last_synced_at)).getTime() : 0;
+    if (lastAccept && lastSynced >= lastAccept) return;
+  }
+
+  const acceptAtStart = meta0.last_accept_at;
+  const existingDoc =
+    typeof meta0.synced_document_id === "string" && meta0.synced_document_id.trim()
+      ? meta0.synced_document_id.trim()
+      : undefined;
+
+  const deal = await getDealForUser({ admin, dealId: session.deal_id, userId: session.user_id });
+  if (!deal) throw new Error("deal not found for copilot session sync");
+  const companyName = asCompanyName(deal.metadata);
+
+  session = (await getCopilotSessionById({ admin, sessionId })) ?? session;
+
+  const docResult = await finalizeCopilotSessionToDocument({
+    admin,
+    session,
+    companyName,
+    existingDocumentId: existingDoc ?? null,
+  });
+  const documentId = docResult.documentId;
+
+  session = (await getCopilotSessionById({ admin, sessionId })) ?? session;
+
+  let factsRevisionId: string | null = null;
+  let factsPeople = 0;
+  try {
+    const schemaSync = await syncCopilotSessionToFactsSchema({
+      admin,
+      session,
+      companyName,
+    });
+    factsRevisionId = schemaSync.revisionId;
+    factsPeople = schemaSync.insertedPeople;
+  } catch (e) {
+    await insertCopilotEvent({
+      admin,
+      event: {
+        session_id: sessionId,
+        kind: "error",
+        payload: {
+          stage: "copilot_session_schema_sync",
+          message: e instanceof Error ? e.message : String(e),
+        },
+      },
+    });
+  }
+
+  const fresh = await getCopilotSessionById({ admin, sessionId });
+  if (!fresh) return;
+  const m = {
+    ...(typeof fresh.metadata === "object" && fresh.metadata ? (fresh.metadata as Record<string, unknown>) : {}),
+  } as Record<string, unknown>;
+  if (documentId) {
+    m.synced_document_id = documentId;
+    if (terminal) {
+      await updateSessionFinalizedDocumentId({ admin, sessionId, documentId });
+    }
+  }
+  const acceptNow = m.last_accept_at;
+  if (acceptAtStart != null && acceptNow === acceptAtStart) {
+    m.unsynced_accept_count = 0;
+  }
+  m.last_synced_at = new Date().toISOString();
+  await updateCopilotSessionMetadata({ admin, sessionId, metadata: m });
+
+  await insertCopilotEvent({
+    admin,
+    event: {
+      session_id: sessionId,
+      kind: "reply",
+      payload: {
+        text: terminal
+          ? "Research session ended; document ingested and embeddings queued."
+          : "Copilot research document refreshed from accepted snippets.",
+        document_id: documentId,
+        terminal,
+        facts_revision_id: factsRevisionId,
+        people_rows: factsPeople,
+      },
+    },
   });
 }
 
@@ -352,6 +501,10 @@ async function handleJob(admin: ReturnType<typeof createAdminClient>, job: JobRo
       });
       return;
     }
+    case "copilot_session_sync": {
+      await handleCopilotSessionSyncJob(admin, job);
+      return;
+    }
     default:
       return;
   }
@@ -372,8 +525,15 @@ export async function runBgWorkerLoop(opts: BgWorkerOptions = {}): Promise<never
   const workerId = opts.workerId || `bg-worker:${defaultId}`;
   const claimLimit = Math.max(1, Math.min(50, opts.claimLimit ?? 5));
   const idleSleepMs = Math.max(250, Math.min(10_000, opts.idleSleepMs ?? 1000));
+  let lastPeriodicEnqueueAt = 0;
 
   while (true) {
+    const tick = Date.now();
+    if (tick - lastPeriodicEnqueueAt >= 90_000) {
+      lastPeriodicEnqueueAt = tick;
+      await enqueueDueCopilotSessionSyncs(admin).catch((e) => console.error("enqueueDueCopilotSessionSyncs", e));
+    }
+
     const { data: jobs, error } = await admin.rpc("deal_intel_claim_jobs", { p_worker_id: workerId, p_limit: claimLimit });
     if (error) {
       // In dev, Next may abort renders/restarts; treat aborts as normal noise.

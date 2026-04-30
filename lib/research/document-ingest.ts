@@ -51,6 +51,11 @@ export type IngestTextArgs = {
    * can align to citation link boundaries instead of arbitrary page text slicing.
    */
   chunkTextsOverride?: string[];
+  /**
+   * Reuse an existing `deal_intel.document` id: delete its pages/chunks, update the
+   * document row, then re-insert pages and chunks. Keeps a stable document per session.
+   */
+  reuseDocumentId?: string;
 };
 
 export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ documentId: string } | null> {
@@ -70,32 +75,58 @@ export async function ingestTextAsDocument(args: IngestTextArgs): Promise<{ docu
   if (!fullText) return null;
 
   const sha = createHash("sha256").update(fullText).digest("hex");
-  const docId = randomUUID();
+  const reuseId = args.reuseDocumentId?.trim();
+  const docId = reuseId || randomUUID();
   const mime = args.mimeType ?? "text/plain";
   const bucket = args.storageBucket ?? args.sourceKind;
   const prefix = args.storagePathPrefix ?? `${args.sourceKind}/${args.userId}`;
   const folder = args.folderPath ?? args.sourceKind;
 
-  const insDoc = (await args.admin.schema("deal_intel").from("document").insert({
-    id: docId,
-    user_id: args.userId,
-    deal_id: args.dealId,
-    source_kind: args.sourceKind,
-    doc_type: args.docType,
-    original_filename: args.originalFilename,
-    mime_type: mime,
-    byte_size: fullText.length,
-    sha256: sha,
-    storage_provider: "supabase_storage",
-    storage_bucket: bucket,
-    storage_path: `${prefix}/${docId}.txt`,
-    folder_path: folder,
-    status: "parsed",
-    error_message: null,
-    routing_confidence: 1,
-    routing_reason: args.routingReason ?? `${args.sourceKind}_ingest`,
-  })) as { error: { message: string } | null };
-  if (insDoc.error) return null;
+  if (reuseId) {
+    await args.admin.schema("deal_intel").from("document_page").delete().eq("document_id", docId);
+    await args.admin.schema("deal_intel").from("document_chunk").delete().eq("document_id", docId);
+    const updDoc = (await args.admin
+      .schema("deal_intel")
+      .from("document")
+      .update({
+        byte_size: fullText.length,
+        sha256: sha,
+        original_filename: args.originalFilename,
+        mime_type: mime,
+        storage_bucket: bucket,
+        storage_path: `${prefix}/${docId}.txt`,
+        folder_path: folder,
+        status: "parsed",
+        error_message: null,
+        routing_confidence: 1,
+        routing_reason: args.routingReason ?? `${args.sourceKind}_ingest`,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", docId)
+      .eq("user_id", args.userId)) as { error: { message: string } | null };
+    if (updDoc.error) return null;
+  } else {
+    const insDoc = (await args.admin.schema("deal_intel").from("document").insert({
+      id: docId,
+      user_id: args.userId,
+      deal_id: args.dealId,
+      source_kind: args.sourceKind,
+      doc_type: args.docType,
+      original_filename: args.originalFilename,
+      mime_type: mime,
+      byte_size: fullText.length,
+      sha256: sha,
+      storage_provider: "supabase_storage",
+      storage_bucket: bucket,
+      storage_path: `${prefix}/${docId}.txt`,
+      folder_path: folder,
+      status: "parsed",
+      error_message: null,
+      routing_confidence: 1,
+      routing_reason: args.routingReason ?? `${args.sourceKind}_ingest`,
+    })) as { error: { message: string } | null };
+    if (insDoc.error) return null;
+  }
 
   const ingestedAt = new Date().toISOString();
   const pageRows = pages.map((p) => ({

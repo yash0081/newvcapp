@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AcceptedSnippet, CopilotSession, Suggestion } from "@/lib/copilot/types";
+import { parseStoredAgenda, describeAgendaForUI } from "@/lib/copilot/research-agenda";
 import { ScreenWatcher } from "@/components/copilot/screen-watcher";
 import { SuggestionCard } from "@/components/copilot/suggestion-card";
 import { PromptBar } from "@/components/copilot/prompt-bar";
@@ -25,6 +26,13 @@ export function CopilotPanel(props: {
   const acceptedSnippets: AcceptedSnippet[] = useMemo(() => {
     const meta = (session?.metadata ?? {}) as { acceptedSnippets?: AcceptedSnippet[] };
     return Array.isArray(meta.acceptedSnippets) ? meta.acceptedSnippets : [];
+  }, [session]);
+
+  const agendaReadout = useMemo(() => {
+    const meta = (session?.metadata ?? {}) as { research_agenda?: unknown };
+    const agenda = parseStoredAgenda(meta.research_agenda);
+    if (!agenda) return null;
+    return describeAgendaForUI(agenda);
   }, [session]);
 
   const inflight = useRef(false);
@@ -153,19 +161,19 @@ export function CopilotPanel(props: {
     }
   }
 
-  async function finalize() {
+  async function endSession() {
     if (!session) return;
     setBusy(true);
     setError(null);
     setMessage(null);
     try {
-      const res = await fetch(`/api/copilot/sessions/${session.id}/finalize`, { method: "POST" });
-      const json = (await res.json().catch(() => null)) as { documentId?: string; error?: string } | null;
-      if (!res.ok) throw new Error(json?.error || `Finalize failed (${res.status})`);
+      const res = await fetch(`/api/copilot/sessions/${session.id}/end`, { method: "POST" });
+      const json = (await res.json().catch(() => null)) as { ok?: boolean; ended?: string; error?: string } | null;
+      if (!res.ok) throw new Error(json?.error || `End session failed (${res.status})`);
       setMessage(
-        json?.documentId
-          ? "Saved as a deal document. You can find it under the deal docs."
-          : "Session ended (nothing to save)."
+        json?.ended === "abandoned"
+          ? "Session ended with no saved snippets."
+          : "Session ended. Research document and facts are syncing in the background.",
       );
       setSession(null);
       setSuggestions([]);
@@ -205,8 +213,8 @@ export function CopilotPanel(props: {
                 >
                   {paused ? "Resume watching" : "Pause"}
                 </button>
-                <button className="crm-button" onClick={finalize} disabled={busy} type="button">
-                  {busy ? "Saving…" : "Finalize and save"}
+                <button className="crm-button" onClick={endSession} disabled={busy} type="button">
+                  {busy ? "Ending…" : "End session"}
                 </button>
               </>
             )}
@@ -224,6 +232,24 @@ export function CopilotPanel(props: {
           onFrame={sendObservation}
           onError={(msg) => setError(msg)}
         />
+      ) : null}
+
+      {session && agendaReadout && (agendaReadout.nextQuestion || agendaReadout.avoidHosts.length) ? (
+        <div className="rounded-2xl border border-zinc-200 bg-white p-4 space-y-1 text-sm">
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">Auto-research agenda</p>
+          {agendaReadout.nextQuestion ? (
+            <p className="text-zinc-900">
+              <span className="text-zinc-500">Now researching: </span>
+              {agendaReadout.nextQuestion}
+            </p>
+          ) : null}
+          {agendaReadout.avoidHosts.length ? (
+            <p className="text-zinc-600">
+              <span className="text-zinc-500">Avoiding: </span>
+              {agendaReadout.avoidHosts.join(", ")}
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       {session ? (

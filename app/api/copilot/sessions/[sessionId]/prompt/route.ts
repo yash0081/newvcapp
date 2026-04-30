@@ -4,6 +4,7 @@ import { getAuthedUser } from "@/lib/research/db";
 import {
   getRecentDealClaims,
   getSessionForUser,
+  getVisitedUrls,
   insertCopilotEvent,
   insertCopilotEvents,
 } from "@/lib/copilot/db";
@@ -12,6 +13,7 @@ import { normalizeExtractedSnapshot } from "@/lib/copilot/extracted-snapshot";
 import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
 import { suggestionRepeatKey } from "@/lib/copilot/repeat-key";
 import type { Extracted, ExtractedKeyValue } from "@/lib/copilot/types";
+import { getUserSitePreferences } from "@/lib/research/preferences";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -87,7 +89,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
           .limit(1)
           .maybeSingle();
 
-  const [dealRes, recentClaims, recentSuggestionsRes, promptEvent, fallback] = await Promise.all([
+  const [dealRes, recentClaims, recentSuggestionsRes, promptEvent, fallback, sitePrefs] = await Promise.all([
     admin
       .schema("deal_intel")
       .from("deal")
@@ -113,6 +115,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       },
     }),
     fallbackContextPromise,
+    getUserSitePreferences({ admin, userId: user.id, limit: 80 }),
   ]);
   if (dealRes.error) return withCopilotCors(req, NextResponse.json({ error: dealRes.error.message }, { status: 500 }));
   const dealMeta = (dealRes.data?.metadata ?? {}) as Record<string, unknown>;
@@ -159,7 +162,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     extracted.hostname ||
     null;
 
+  // Session metadata is the live source of truth for accepts (may be ahead of company_* until background sync).
   const sessionAcceptedSnippets = getSessionAcceptedSnippets(session.metadata);
+  const visitedUrls = getVisitedUrls(session.metadata);
   const recentSuggestionKeys = (recentSuggestionsRes.data ?? [])
     .map((r) => {
       const payload = (r.payload ?? {}) as Record<string, unknown>;
@@ -175,7 +180,16 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       extracted,
       hostname,
       userInstruction: text,
-      deal: { companyName, metadata: dealMeta, recentClaims, sessionAcceptedSnippets, recentSuggestionKeys },
+      deal: {
+        companyName,
+        metadata: dealMeta,
+        recentClaims,
+        sessionAcceptedSnippets,
+        recentSuggestionKeys,
+        visitedUrls,
+        preferredHostnames: sitePrefs.preferred.map((p) => ({ domain: p.domain, score: p.preference_score, category: p.category })),
+        dislikedHostnames: sitePrefs.disliked.map((d) => d.domain),
+      },
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

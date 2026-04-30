@@ -63,12 +63,28 @@ export async function getSessionByDeal(dealId: string): Promise<{
   return apiFetch<{ session: CopilotSession | null }>(`/api/copilot/sessions/by-deal/${encodeURIComponent(dealId)}`);
 }
 
+export async function getSessionById(sessionId: string): Promise<{
+  session: CopilotSession | null;
+}> {
+  return apiFetch<{ session: CopilotSession | null }>(`/api/copilot/sessions/${encodeURIComponent(sessionId)}`);
+}
+
 export async function startSession(dealId: string, tabHint?: string): Promise<CopilotSession> {
   const data = await apiFetch<{ session: CopilotSession }>(`/api/copilot/sessions`, {
     method: "POST",
     body: JSON.stringify({ dealId, tabHint }),
   });
   return data.session;
+}
+
+export async function setCopilotSteering(
+  sessionId: string,
+  note: string,
+): Promise<{ ok: boolean; session: CopilotSession | null }> {
+  return apiFetch(`/api/copilot/sessions/${encodeURIComponent(sessionId)}/steering`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
 }
 
 export async function observeText(
@@ -90,6 +106,80 @@ export async function observeText(
       urlHint: snapshot.url,
       hostnameHint: snapshot.hostname,
     }),
+  });
+}
+
+export async function planNext(
+  sessionId: string,
+  snapshot: DomSnapshot,
+  currentUrl: string,
+  copilotExploreLinks?: Array<{ url: string; text: string }>,
+  planPageContext?: {
+    visible_text_chars: number;
+    scroll_depth_ratio: number;
+    draft_items_this_url: number;
+    pending_suggestions_count: number;
+  },
+): Promise<{ next: { action: "navigate" | "scroll" | "stop"; url?: string; rationale?: string } }> {
+  return apiFetch(`/api/copilot/sessions/${sessionId}/plan-next`, {
+    method: "POST",
+    body: JSON.stringify({
+      snapshot: {
+        visible_text: snapshot.visible_text,
+        page_title: snapshot.page_title,
+        hostname: snapshot.hostname,
+        key_value_claims: snapshot.key_value_claims,
+        outbound_links: snapshot.outbound_links ?? [],
+      },
+      currentUrl,
+      ...(copilotExploreLinks?.length ? { copilot_explore_links: copilotExploreLinks } : {}),
+      ...(planPageContext ? { plan_page_context: planPageContext } : {}),
+    }),
+  });
+}
+
+export async function autoDraftOp(
+  sessionId: string,
+  body: {
+    op: "append" | "edit" | "remove" | "approve" | "discard";
+    snippet?: {
+      id?: string;
+      text?: string;
+      source_label?: string;
+      hostname?: string | null;
+      source_url?: string | null;
+      accepted_at?: string;
+      suggestion_event_id?: string | null;
+      confidence?: number | null;
+      kind?: string | null;
+      from_suggestion_event_id?: string | null;
+    };
+    id?: string;
+    text?: string;
+    snippetIds?: string[];
+  },
+): Promise<{
+  draft: {
+    status: "open" | "approved" | "discarded";
+    started_at?: string;
+    last_added_at?: string;
+    snippets: Array<{
+      id: string;
+      text: string;
+      source_label: string;
+      hostname?: string | null;
+      source_url?: string | null;
+      accepted_at: string;
+      suggestion_event_id?: string | null;
+      confidence?: number | null;
+      kind?: string | null;
+      from_suggestion_event_id?: string | null;
+    }>;
+  };
+}> {
+  return apiFetch(`/api/copilot/sessions/${sessionId}/auto-draft`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 
@@ -133,8 +223,9 @@ export async function decide(
   });
 }
 
-export async function finalize(sessionId: string): Promise<{ documentId: string | null }> {
-  return apiFetch<{ documentId: string | null }>(`/api/copilot/sessions/${sessionId}/finalize`, {
+/** Ends the active copilot session; document + facts sync run via background jobs. */
+export async function endCopilotSession(sessionId: string): Promise<{ ok: boolean; ended?: string }> {
+  return apiFetch(`/api/copilot/sessions/${sessionId}/end`, {
     method: "POST",
     body: JSON.stringify({}),
   });

@@ -1,11 +1,15 @@
 import { ACTIVE_DEAL_COOKIE, APP_ORIGIN, MIN_OBSERVE_SPACING_MS } from "@shared/config";
 import {
+  autoDraftOp,
   decide,
-  finalize,
+  endCopilotSession,
+  getSessionById,
   getSessionByDeal,
   listDeals,
   observeText,
+  planNext,
   promptCopilot,
+  setCopilotSteering,
   startSession,
 } from "@shared/api";
 import type {
@@ -15,6 +19,8 @@ import type {
   FinalizeResponse,
   ListDealsResponse,
   ObserveResponse,
+  AutoDraftResponse,
+  PlanNextResponse,
   PromptResponse,
   SessionResponse,
 } from "@shared/messages";
@@ -92,7 +98,27 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
       }
       case "GET_ACTIVE_SESSION": {
         const state = await loadState();
-        // Refresh from server when we have an active deal cookie.
+        // Prefer refresh by known active session id. This survives navigation to
+        // non-VC pages where active-deal cookie may be unavailable.
+        if (state.activeSessionId) {
+          try {
+            const fresh = await getSessionById(state.activeSessionId);
+            const session = fresh.session;
+            if (session && session.status === "active") {
+              await saveState({
+                ...state,
+                activeSessionId: session.id,
+                activeSession: session,
+              });
+              const payload: SessionResponse = { session };
+              return { ok: true, payload };
+            }
+            await saveState({ ...state, activeSessionId: null, activeSession: null });
+          } catch {
+            // fall through
+          }
+        }
+        // Fallback refresh from active deal cookie.
         const activeDeal = await readActiveDealCookie();
         if (activeDeal) {
           try {
@@ -161,19 +187,81 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
         const payload: PromptResponse = res;
         return { ok: true, payload };
       }
+      case "SET_AUTO_STEERING": {
+        const state = await loadState();
+        if (!state.activeSessionId) return { ok: false, error: "No active session" };
+        const res = await setCopilotSteering(state.activeSessionId, req.note);
+        const fresh = res.session;
+        if (fresh) {
+          await saveState({
+            ...(await loadState()),
+            activeSessionId: fresh.id,
+            activeSession: fresh,
+          });
+        }
+        const payload: SessionResponse = { session: fresh ?? null };
+        return { ok: true, payload };
+      }
+      case "PLAN_NEXT": {
+        const state = await loadState();
+        if (!state.activeSessionId) return { ok: false, error: "No active session" };
+        const res = await planNext(
+          state.activeSessionId,
+          req.snapshot,
+          req.currentUrl,
+          req.copilotExploreLinks,
+          req.plan_page_context,
+        );
+        const payload: PlanNextResponse = res;
+        return { ok: true, payload };
+      }
+      case "AUTO_DRAFT_OP": {
+        const state = await loadState();
+        if (!state.activeSessionId) return { ok: false, error: "No active session" };
+        const res = await autoDraftOp(state.activeSessionId, {
+          op: req.op,
+          snippet: req.snippet,
+          id: req.id,
+          text: req.text,
+          snippetIds: req.snippetIds,
+        });
+        const payload: AutoDraftResponse = res;
+        return { ok: true, payload };
+      }
       case "DECISION": {
         const state = await loadState();
         if (!state.activeSessionId) return { ok: false, error: "No active session" };
         await decide(state.activeSessionId, req.suggestionEventId, req.action);
+        const activeDeal = await readActiveDealCookie();
+        if (activeDeal) {
+          try {
+            const fresh = await getSessionByDeal(activeDeal.id);
+            if (fresh.session?.status === "active") {
+              await saveState({
+                ...(await loadState()),
+                activeSessionId: fresh.session.id,
+                activeSession: fresh.session,
+              });
+            }
+          } catch {
+            // ignore
+          }
+        }
         return { ok: true };
       }
+      case "END_SESSION":
       case "FINALIZE": {
         const state = await loadState();
         if (!state.activeSessionId) return { ok: false, error: "No active session" };
-        const res = await finalize(state.activeSessionId);
+        try {
+          await endCopilotSession(state.activeSessionId);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return { ok: false, error: msg };
+        }
         await saveState({ ...state, activeSessionId: null, activeSession: null });
         await broadcastToTabs({ type: "SESSION_ENDED" });
-        const payload: FinalizeResponse = res;
+        const payload: FinalizeResponse = { documentId: null };
         return { ok: true, payload };
       }
       case "OPEN_APP": {

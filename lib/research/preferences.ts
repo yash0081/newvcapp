@@ -17,6 +17,13 @@ type PreferenceEvent = {
   task?: string;
 };
 
+export type UserSitePreference = {
+  domain: string;
+  preference_score: number;
+  category: string;
+  usage_count: number;
+};
+
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -198,5 +205,42 @@ export async function recordResearchPreferenceEvents(args: {
       });
     }
   }
+}
+
+export async function getUserSitePreferences(args: {
+  admin: AdminClient;
+  userId: string;
+  limit?: number;
+}): Promise<{
+  preferred: UserSitePreference[];
+  disliked: UserSitePreference[];
+}> {
+  const lim = Math.max(10, Math.min(200, args.limit ?? 80));
+  const res = await args.admin
+    .schema("deal_intel")
+    .from("user_research_site_preference")
+    .select("domain, preference_score, category, usage_count")
+    .eq("user_id", args.userId)
+    .order("preference_score", { ascending: false })
+    .limit(lim);
+  if (res.error) return { preferred: [], disliked: [] };
+  const rows = (res.data ?? []) as Array<{
+    domain: string | null;
+    preference_score: number | null;
+    category: string | null;
+    usage_count: number | null;
+  }>;
+  const normalized = rows
+    .map((r) => ({
+      domain: typeof r.domain === "string" ? asDomain(r.domain) : "",
+      preference_score: Number(r.preference_score ?? 0),
+      category: typeof r.category === "string" ? r.category : "general",
+      usage_count: Number(r.usage_count ?? 0),
+    }))
+    .filter((r) => !!r.domain);
+  return {
+    preferred: normalized.filter((r) => r.preference_score >= 0.05).slice(0, 40),
+    disliked: normalized.filter((r) => r.preference_score <= -0.05).slice(0, 40),
+  };
 }
 

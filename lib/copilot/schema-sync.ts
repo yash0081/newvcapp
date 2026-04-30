@@ -1,4 +1,3 @@
-import "server-only";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { extractDealIntelSchemaFactsFromText } from "@/lib/deal-intel/extract-schema-facts";

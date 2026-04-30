@@ -8,10 +8,12 @@ import type { Extracted, Suggestion, SuggestionKind } from "@/lib/copilot/types"
 
 const ANALYZE_MODEL_ENV = "COPILOT_ANALYZE_MODEL";
 const MAX_RECENT_CLAIMS = 12;
-const MAX_SUGGESTIONS = 2;
+/** Session accepts can lag facts-schema sync; surface enough for contradiction checks. */
+const MAX_SESSION_ACCEPTED_SNIPPETS = 25;
+const MAX_SUGGESTIONS = 4;
 const MIN_CONFIDENCE = 0.55;
 const MAX_VISIBLE_TEXT_CHARS = 2400;
-const MAX_OUTBOUND_LINKS = 8;
+const MAX_OUTBOUND_LINKS = 36;
 
 function getCopilotAnalyzeModel(): string {
   const override = process.env[ANALYZE_MODEL_ENV]?.trim();
@@ -28,9 +30,13 @@ export type DealContext = {
   sessionAcceptedSnippets?: Array<{ text: string; source_label?: string | null; accepted_at?: string | null }>;
   /** Recently surfaced suggestions in this session, used to suppress repeats. */
   recentSuggestionKeys?: string[];
+  /** URLs already visited by auto-research in this session. */
+  visitedUrls?: string[];
+  preferredHostnames?: Array<{ domain: string; score: number; category?: string }>;
+  dislikedHostnames?: string[];
 };
 
-const ANALYZE_PROMPT = `You are the research copilot. Compare the on-screen extraction against what we already know about a deal/company and produce 0-2 high-quality actionable suggestions to log.
+const ANALYZE_PROMPT = `You are the research copilot. Compare the on-screen extraction against what we already know about a deal/company and produce 0-4 high-quality actionable suggestions to log.
 
 Return strict JSON:
 {
@@ -46,10 +52,11 @@ Return strict JSON:
 }
 
 Rules:
-- Return at most 2 highest-quality suggestions.
-- Prefer one strong suggestion over several weak suggestions.
+- Return at most 4 suggestions; prefer quality over quantity.
+- When "Outbound links visible on page" lists several URLs, include explore suggestions for distinct useful follow-ups (e.g. team, pricing, security, docs) when the current screen does not already answer the question—up to 2 explore items if justified, each with a different link_url.
+- Prefer one strong suggestion over several weak ones; do not pad with low-value items.
 - Resolve conflicts against this priority order:
-  1) Accepted snippets from the current session (newest source of truth)
+  1) Accepted snippets from the current session (newest source of truth) — if a fact appears here, it wins over "Known company metadata" and "Recent recorded claims" even when they disagree (session may be ahead of the CRM until background sync runs).
   2) Existing CRM/deal claims
   If a current-session accepted snippet already resolves a previous contradiction, do NOT raise it again.
 - Do not repeat substantially identical suggestions already surfaced in this session.
@@ -60,7 +67,11 @@ Rules:
 - For "contradicts", format summary like "Contradiction: <field>" and snippet as:
   "Current: ... | New: ... | Source: ..."
 - "explore"    => use only when current page lacks the answer but visible outbound links suggest where to verify.
-- For "explore", include link_url and make summary specific (e.g. "Explore team page for founder bios").
+- For "explore", include link_url and make summary specific (e.g. "Team page for founder bios").
+- For "explore", snippet must be a neutral fact about what that URL is for (e.g. "Corporate leadership page lists executives."); never use imperatives in snippet ("Explore…", "Visit…", "Verify…").
+- Do not propose explore suggestions that match URLs already visited in this session.
+- Prefer links from preferred hostnames; avoid disliked hostnames unless no alternative exists.
+- When "Auto steering note" is non-empty: treat it as the user's live priority for this session. Favor facts, aligns, and explore links that advance that focus; avoid unrelated tangents. When choosing explore targets, prefer outbound URLs on preferred hostnames whose category matches the steering topic (e.g. geography → maps / HQ / office pages).
 - Skip generic chrome / navigation / cookie banners.
 - Drop suggestions whose confidence < 0.55.
 - If nothing is worth surfacing, return { "suggestions": [] }.`;
@@ -93,7 +104,7 @@ export async function analyzeAgainstDeal(args: {
     value: c.value,
     source: c.source ?? null,
   }));
-  const sessionAccepted = (args.deal.sessionAcceptedSnippets ?? []).slice(0, MAX_RECENT_CLAIMS).map((s) => ({
+  const sessionAccepted = (args.deal.sessionAcceptedSnippets ?? []).slice(0, MAX_SESSION_ACCEPTED_SNIPPETS).map((s) => ({
     text: s.text,
     source_label: s.source_label ?? null,
     accepted_at: s.accepted_at ?? null,
@@ -111,7 +122,10 @@ export async function analyzeAgainstDeal(args: {
     { label: "On-screen extracted text", value: visibleText },
     { label: "On-screen extracted key-value claims", value: args.extracted.key_value_claims ?? [] },
     { label: "Outbound links visible on page", value: outboundLinks },
-    { label: "User instruction (optional)", value: args.userInstruction ?? "" },
+    { label: "Already visited URLs this session", value: (args.deal.visitedUrls ?? []).slice(0, 50) },
+    { label: "Preferred hostnames", value: (args.deal.preferredHostnames ?? []).slice(0, 40) },
+    { label: "Disliked hostnames", value: (args.deal.dislikedHostnames ?? []).slice(0, 40) },
+    { label: "Auto steering note (from user, optional)", value: args.userInstruction ?? "" },
     { label: "Source label", value: sourceLabel },
   ];
 

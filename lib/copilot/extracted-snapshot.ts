@@ -3,7 +3,7 @@ import type { Extracted, ExtractedKeyValue } from "@/lib/copilot/types";
 
 const MAX_VISIBLE_TEXT_CHARS = 5000;
 const MAX_KEY_VALUE_CLAIMS = 12;
-const MAX_OUTBOUND_LINKS = 10;
+const MAX_OUTBOUND_LINKS = 36;
 
 function normalizeKeyValueClaims(v: unknown): ExtractedKeyValue[] {
   if (!Array.isArray(v)) return [];

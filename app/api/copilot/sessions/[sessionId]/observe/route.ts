@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser } from "@/lib/research/db";
 import {
+  getAutoSteeringNote,
   getRecentDealClaims,
   getSessionForUser,
+  getVisitedUrls,
   insertCopilotEvent,
   insertCopilotEvents,
 } from "@/lib/copilot/db";
@@ -11,6 +13,7 @@ import { analyzeAgainstDeal } from "@/lib/copilot/analyze";
 import { normalizeExtractedSnapshot } from "@/lib/copilot/extracted-snapshot";
 import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
 import { suggestionRepeatKey } from "@/lib/copilot/repeat-key";
+import { getUserSitePreferences } from "@/lib/research/preferences";
 
 const MIN_TEXT_CHARS = 40;
 
@@ -92,7 +95,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     null;
 
   // Parallelize warm-up DB reads.
-  const [dealRes, claims, recentSuggestionsRes] = await Promise.all([
+  const [dealRes, claims, recentSuggestionsRes, sitePrefs] = await Promise.all([
     admin
       .schema("deal_intel")
       .from("deal")
@@ -109,6 +112,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       .eq("kind", "suggestion")
       .order("created_at", { ascending: false })
       .limit(40),
+    getUserSitePreferences({ admin, userId: user.id, limit: 80 }),
   ]);
   if (dealRes.error) {
     return withCopilotCors(req, NextResponse.json({ error: dealRes.error.message }, { status: 500 }));
@@ -116,7 +120,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
 
   const dealMeta = (dealRes.data?.metadata ?? {}) as Record<string, unknown>;
   const companyName = asCompanyName(dealMeta);
+  // Session metadata is the live source of truth for accepts (may be ahead of company_* until background sync).
   const sessionAcceptedSnippets = getSessionAcceptedSnippets(session.metadata);
+  const visitedUrls = getVisitedUrls(session.metadata);
+  const autoSteeringNote = getAutoSteeringNote(session.metadata);
   const recentSuggestionKeys = (recentSuggestionsRes.data ?? [])
     .map((r) => {
       const payload = (r.payload ?? {}) as Record<string, unknown>;
@@ -150,7 +157,17 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   const analyzePromise = analyzeAgainstDeal({
     extracted,
     hostname,
-    deal: { companyName, metadata: dealMeta, recentClaims: claims, sessionAcceptedSnippets, recentSuggestionKeys },
+    userInstruction: autoSteeringNote ?? undefined,
+    deal: {
+      companyName,
+      metadata: dealMeta,
+      recentClaims: claims,
+      sessionAcceptedSnippets,
+      recentSuggestionKeys,
+      visitedUrls,
+      preferredHostnames: sitePrefs.preferred.map((p) => ({ domain: p.domain, score: p.preference_score, category: p.category })),
+      dislikedHostnames: sitePrefs.disliked.map((d) => d.domain),
+    },
   });
 
   const [obsResult, analyzeResult] = await Promise.allSettled([observationPromise, analyzePromise]);

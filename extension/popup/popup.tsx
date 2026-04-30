@@ -93,11 +93,11 @@ function PopupApp() {
     }
   }, [selectedDealId]);
 
-  const finalize = useCallback(async () => {
-    setBusy("Finalizing…");
+  const endSession = useCallback(async () => {
+    setBusy("Ending session…");
     setError(null);
     try {
-      await send({ type: "FINALIZE" });
+      await send({ type: "END_SESSION" });
       setSession(null);
     } catch (e) {
       setError((e as Error).message);
@@ -198,8 +198,8 @@ function PopupApp() {
 
       <div className="actions">
         {session ? (
-          <button className="btn primary" onClick={finalize} disabled={!!busy}>
-            {busy ?? "Finalize current session"}
+          <button className="btn primary" onClick={endSession} disabled={!!busy}>
+            {busy ?? "End research session"}
           </button>
         ) : (
           <button

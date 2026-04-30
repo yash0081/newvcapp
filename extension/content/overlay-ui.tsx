@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActiveDealResponse,
+  AutoDraftResponse,
+  AutoDraftSnippet,
   ExtensionRequest,
-  FinalizeResponse,
   ObserveResponse,
+  PlanNextResponse,
   PromptResponse,
   SessionResponse,
 } from "@shared/messages";
@@ -14,14 +16,87 @@ import type {
   Suggestion,
 } from "@shared/types";
 import { extractDomSnapshot, fingerprintSnapshot, type SnapshotScope } from "@content/extractor";
+import { isNearDuplicateDraftSnippet } from "@shared/draft-dedupe";
 import { suggestionRepeatKey } from "@shared/repeat-key";
+import { AGENT_AUTO_ACCEPT_MIN_CONFIDENCE, AGENT_NAV_COUNTDOWN_MS } from "@shared/config";
+import { highlightAcceptedSnippet } from "@content/highlighter";
 
 const APP_HOSTNAME_RE = /^chrome-extension:|^moz-extension:/;
 const PREFS_KEY = "vcapp_overlay_prefs";
 const FINGERPRINT_SUPPRESSION_MS = 5000;
-const MAX_VISIBLE_SUGGESTIONS = 6;
+const MAX_VISIBLE_SUGGESTIONS = 8;
 const FIRST_ANALYZE_DEBOUNCE_MS = 800;
 const ANALYZE_DEBOUNCE_MS = 1500;
+/** End session if automated observe succeeded this long ago (ms) while snippets exist. */
+const OBSERVE_IDLE_END_MS = 30 * 60 * 1000;
+
+function truncateWords(s: string, maxLen: number): string {
+  const t = s.trim().replace(/\s+/g, " ");
+  if (!t) return "";
+  if (t.length <= maxLen) return t;
+  const slice = t.slice(0, maxLen);
+  const sp = slice.lastIndexOf(" ");
+  return (sp > 20 ? slice.slice(0, sp) : slice).trim() + "…";
+}
+
+/** Cheap topic hints from visible text / suggestions — drives friendly status lines only. */
+const RESEARCH_TOPIC_PATTERNS: ReadonlyArray<{ re: RegExp; phrase: string }> = [
+  {
+    re: /\b(stock price|share price|nasdaq|nyse|ticker|market cap|valuation|equity)\b|\bstock\b|\bshares?\b/i,
+    phrase: "stock price and market signals",
+  },
+  { re: /\b(ceo|cfo|cto|coo|chief executive|founder|co-founder|leadership|management team|executives?|board of directors)\b/i, phrase: "leadership and executives" },
+  { re: /\b(revenue|arr|mrr|annual recurring|booking|pipeline)\b/i, phrase: "revenue and growth metrics" },
+  { re: /\b(funding|raised|series [a-e]|seed round|venture|investors?)\b/i, phrase: "funding and investors" },
+  { re: /\b(customer|customers|logo|enterprise clients?|case stud)\b/i, phrase: "customers and traction" },
+  { re: /\b(product|platform|solution|features?|technology stack)\b/i, phrase: "product and technology" },
+  { re: /\b(headquartered|headquarters|hq\b|office|location|geograph|countries|regions?)\b/i, phrase: "geography and offices" },
+  { re: /\b(employees?|headcount|team size|hiring)\b/i, phrase: "team size and hiring" },
+  { re: /\b(competitor|competitive|landscape|versus|vs\.)\b/i, phrase: "competition" },
+  { re: /\b(patents?|intellectual property)\b|\bip\b/i, phrase: "intellectual property" },
+  { re: /\b(acquisition|m&a|merger|bought)\b/i, phrase: "M&A activity" },
+];
+
+function researchTopicPhrase(blob: string): string | null {
+  const sample = blob.slice(0, 16000);
+  for (const { re, phrase } of RESEARCH_TOPIC_PATTERNS) {
+    if (re.test(sample)) return phrase;
+  }
+  return null;
+}
+
+function analyzingActivitySentence(
+  snapshot: { visible_text: string; page_title: string },
+  steeringNote: string,
+): string {
+  const blob = `${snapshot.page_title}\n${snapshot.visible_text}`;
+  const topic = researchTopicPhrase(blob);
+  const steer = steeringNote.trim();
+  let core: string;
+  if (topic) core = `Analyzing ${topic} on this page`;
+  else core = `Analyzing “${truncateWords(snapshot.page_title, 44)}” for deal-relevant details`;
+  if (steer) core += ` — prioritizing ${truncateWords(steer, 72)}`;
+  return `${core}…`;
+}
+
+function suggestionPickSentence(s: Suggestion): string {
+  const blob = `${s.summary}\n${s.snippet}`;
+  const topic = researchTopicPhrase(blob);
+  if (topic) return `Saving a note about ${topic}…`;
+  const hint = truncateWords(s.summary || s.snippet, 64);
+  if (hint) return `Pulling out “${hint}”…`;
+  return "Saving a useful fact from this page…";
+}
+
+function observeFollowUpSentence(suggestions: Suggestion[]): string {
+  const pick = suggestions.find((s) => s.kind !== "explore");
+  if (!pick) return "Scan complete — planning the next move…";
+  const blob = `${pick.summary}\n${pick.snippet}`;
+  const topic = researchTopicPhrase(blob);
+  if (topic) return `Digging into ${topic} from what we found…`;
+  const hint = truncateWords(pick.summary || pick.snippet, 56);
+  return hint ? `Reviewing “${hint}” from the model…` : "Reviewing highlights from this page…";
+}
 
 function isAppContext(): boolean {
   return APP_HOSTNAME_RE.test(location.protocol);
@@ -29,6 +104,17 @@ function isAppContext(): boolean {
 
 function suggestionKey(s: Pick<Suggestion, "summary" | "snippet">): string {
   return suggestionRepeatKey(s.summary ?? "", s.snippet ?? "");
+}
+
+/** 0–1 how far down the document the user has scrolled (for plan-next page-yield). */
+function scrollDepthRatio(): number {
+  const doc = document.documentElement;
+  const body = document.body;
+  const scrollTop = window.scrollY ?? doc.scrollTop ?? body.scrollTop ?? 0;
+  const view = window.innerHeight;
+  const total = Math.max(doc.scrollHeight, body.scrollHeight) - view;
+  if (total <= 12) return 1;
+  return Math.min(1, Math.max(0, scrollTop / total));
 }
 
 function send<T = unknown>(req: ExtensionRequest): Promise<T> {
@@ -51,7 +137,9 @@ function send<T = unknown>(req: ExtensionRequest): Promise<T> {
   });
 }
 
-type Tab = "suggestions" | "saved" | "ask";
+type Tab = "suggestions" | "ask";
+type CopilotMode = "manual" | "auto";
+type DraftReview = Record<string, { checked: boolean; text: string }>;
 
 type Props = {
   activeDeal: ActiveDealHint | null;
@@ -70,13 +158,58 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [paused, setPausedState] = useState(false);
+  const [mode, setModeState] = useState<CopilotMode>("manual");
   const [scope, setScopeState] = useState<SnapshotScope>("viewport");
   const [pos, setPos] = useState<{ top: number; right: number }>({ top: 16, right: 16 });
   const [promptText, setPromptText] = useState("");
+  const [pendingNav, setPendingNav] = useState<{ url: string; rationale?: string; at: number } | null>(null);
+  const [autoDraft, setAutoDraft] = useState<AutoDraftSnippet[]>([]);
+  const [showReview, setShowReview] = useState(false);
+  const [reviewState, setReviewState] = useState<DraftReview>({});
+  /** Short sentence shown in Auto mode so long steps feel responsive (aria-live). */
+  const [researchActivity, setResearchActivity] = useState("Watching this page — updates will show here.");
+  /** Re-runs auto planner after agent scroll (observe alone often doesn’t bump React deps). */
+  const [postScrollPlannerKick, setPostScrollPlannerKick] = useState(0);
   const lastSnapshotRef = useRef<{ fingerprint: string; at: number } | null>(null);
   const analyzeAbortRef = useRef<AbortController | null>(null);
+  const scrollKickTimerRef = useRef<number | null>(null);
+  /** Count consecutive PLAN_NEXT scroll actions to avoid infinite scroll loops. */
+  const agentScrollStreakRef = useRef(0);
+  /** Last time /observe returned OK (drives idle auto-end). */
+  const lastObserveSuccessAtRef = useRef<number>(Date.now());
 
   const sessionId = session?.id ?? null;
+  const effectiveScope: SnapshotScope = mode === "auto" ? "full" : scope;
+
+  useEffect(() => {
+    setPostScrollPlannerKick(0);
+    agentScrollStreakRef.current = 0;
+    if (scrollKickTimerRef.current != null) {
+      window.clearTimeout(scrollKickTimerRef.current);
+      scrollKickTimerRef.current = null;
+    }
+  }, [sessionId]);
+
+  const sessionMeta = session?.metadata as Record<string, unknown> | undefined;
+  const lastSyncedAt =
+    sessionMeta && typeof sessionMeta.last_synced_at === "string" ? sessionMeta.last_synced_at : null;
+
+  const serverAutoSteering = useMemo(() => {
+    const v = sessionMeta?.auto_steering_note;
+    return typeof v === "string" ? v : "";
+  }, [session?.id, sessionMeta?.auto_steering_note]);
+
+  const [autoSteeringDraft, setAutoSteeringDraft] = useState("");
+  const [autoSteeringDirty, setAutoSteeringDirty] = useState(false);
+
+  useEffect(() => {
+    if (!session?.id) {
+      setAutoSteeringDraft("");
+      setAutoSteeringDirty(false);
+      return;
+    }
+    if (!autoSteeringDirty) setAutoSteeringDraft(serverAutoSteering);
+  }, [session?.id, serverAutoSteering, autoSteeringDirty]);
 
   // Hydrate persisted preferences (autoMode) once on mount.
   useEffect(() => {
@@ -91,6 +224,9 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           if ((raw as { scope?: unknown }).scope === "viewport" || (raw as { scope?: unknown }).scope === "full") {
             setScopeState((raw as { scope: SnapshotScope }).scope);
           }
+          if ((raw as { mode?: unknown }).mode === "manual" || (raw as { mode?: unknown }).mode === "auto") {
+            setModeState((raw as { mode: CopilotMode }).mode);
+          }
         }
       });
     } catch {
@@ -98,9 +234,9 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     }
   }, []);
 
-  const persistPrefs = useCallback((nextPaused: boolean, nextScope: SnapshotScope) => {
+  const persistPrefs = useCallback((nextPaused: boolean, nextScope: SnapshotScope, nextMode: CopilotMode) => {
     try {
-      chrome.storage?.local?.set({ [PREFS_KEY]: { paused: nextPaused, scope: nextScope } });
+      chrome.storage?.local?.set({ [PREFS_KEY]: { paused: nextPaused, scope: nextScope, mode: nextMode } });
     } catch {
       // best-effort; UI still flips
     }
@@ -109,15 +245,20 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const setPaused = useCallback((next: boolean | ((prev: boolean) => boolean)) => {
     setPausedState((prev) => {
       const value = typeof next === "function" ? (next as (p: boolean) => boolean)(prev) : next;
-      persistPrefs(value, scope);
+      persistPrefs(value, scope, mode);
       return value;
     });
-  }, [persistPrefs, scope]);
+  }, [persistPrefs, scope, mode]);
 
   const setScope = useCallback((next: SnapshotScope) => {
     setScopeState(next);
-    persistPrefs(paused, next);
-  }, [persistPrefs, paused]);
+    persistPrefs(paused, next, mode);
+  }, [persistPrefs, paused, mode]);
+
+  const setMode = useCallback((next: CopilotMode) => {
+    setModeState(next);
+    persistPrefs(paused, scope, next);
+  }, [persistPrefs, paused, scope]);
 
   // Listen for SESSION_STARTED broadcasts from popup → service worker → tabs.
   useEffect(() => {
@@ -127,14 +268,25 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       if (m.type === "SESSION_STARTED" && m.session) {
         setSession(m.session);
         setSnippets((m.session.metadata?.acceptedSnippets ?? []) as AcceptedSnippet[]);
+        const d = (m.session.metadata as Record<string, unknown> | null)?.auto_draft as
+          | { snippets?: AutoDraftSnippet[] }
+          | undefined;
+        setAutoDraft(Array.isArray(d?.snippets) ? d!.snippets! : []);
         setSuggestions([]);
         setError(null);
+        setAutoSteeringDirty(false);
+        lastObserveSuccessAtRef.current = Date.now();
+        setResearchActivity("Getting oriented on this page…");
         setInfo("Session started — watching this page.");
       }
       if (m.type === "SESSION_ENDED") {
         setSession(null);
         setSuggestions([]);
         setSnippets([]);
+        setAutoDraft([]);
+        setShowReview(false);
+        setReviewState({});
+        setResearchActivity("Watching this page — updates will show here.");
         setInfo("Session ended.");
       }
     };
@@ -148,6 +300,10 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       if (res.session) {
         setSession(res.session);
         setSnippets((res.session.metadata?.acceptedSnippets ?? []) as AcceptedSnippet[]);
+        const d = (res.session.metadata as Record<string, unknown> | null)?.auto_draft as
+          | { snippets?: AutoDraftSnippet[] }
+          | undefined;
+        setAutoDraft(Array.isArray(d?.snippets) ? d!.snippets! : []);
       } else {
         setSession(null);
       }
@@ -155,6 +311,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       setError((e as Error).message);
     }
   }, []);
+
+  /** After navigation, reload session from server so auto_draft survives tab reloads. */
+  useEffect(() => {
+    void refreshSession();
+  }, [refreshSession]);
 
   const startSessionForActiveDeal = useCallback(async () => {
     if (!activeDeal) {
@@ -172,7 +333,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       if (res.session) {
         setSession(res.session);
         setSnippets((res.session.metadata?.acceptedSnippets ?? []) as AcceptedSnippet[]);
+        const d = (res.session.metadata as Record<string, unknown> | null)?.auto_draft as
+          | { snippets?: AutoDraftSnippet[] }
+          | undefined;
+        setAutoDraft(Array.isArray(d?.snippets) ? d!.snippets! : []);
         setSuggestions([]);
+        lastObserveSuccessAtRef.current = Date.now();
       }
     } catch (e) {
       setError((e as Error).message);
@@ -183,9 +349,9 @@ export function Overlay({ activeDeal, initialSession }: Props) {
 
   const analyzePage = useCallback(async () => {
     if (!sessionId) return;
-    const snapshot = extractDomSnapshot({ scope });
+    const snapshot = extractDomSnapshot({ scope: effectiveScope });
     if (snapshot.visible_text.length < 80) return;
-    const fp = fingerprintSnapshot(snapshot, scope);
+    const fp = fingerprintSnapshot(snapshot, effectiveScope);
     const prev = lastSnapshotRef.current;
     if (prev && prev.fingerprint === fp && Date.now() - prev.at < FINGERPRINT_SUPPRESSION_MS) {
       return;
@@ -196,12 +362,14 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     analyzeAbortRef.current?.abort();
     const controller = new AbortController();
     analyzeAbortRef.current = controller;
+    setResearchActivity(analyzingActivitySentence(snapshot, serverAutoSteering));
     setBusy("Analyzing…");
     setError(null);
     try {
       const res = await send<ObserveResponse>({ type: "OBSERVE", snapshot });
       if (controller.signal.aborted) return;
       lastSnapshotRef.current = { fingerprint: fp, at: Date.now() };
+      setResearchActivity(observeFollowUpSentence(res.suggestions ?? []));
       setSuggestions((prev) => {
         const seenIds = new Set(prev.map((s) => s.event_id ?? s.client_id));
         const seenKeys = new Set(prev.map((s) => suggestionKey(s)));
@@ -215,10 +383,13 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         });
         return [...fresh, ...prev].slice(0, MAX_VISIBLE_SUGGESTIONS);
       });
+      lastObserveSuccessAtRef.current = Date.now();
     } catch (e) {
       if (controller.signal.aborted) return;
       const msg = (e as Error)?.message || "";
       if (/abort/i.test(msg)) return;
+      // Service worker rate-limits observes; not user-error.
+      if (/slow down/i.test(msg)) return;
       setError(msg);
     } finally {
       if (analyzeAbortRef.current === controller) {
@@ -226,7 +397,16 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         setBusy(null);
       }
     }
-  }, [sessionId, scope]);
+  }, [sessionId, effectiveScope, serverAutoSteering]);
+
+  useEffect(() => {
+    if (mode !== "auto" || !session) return;
+    if (paused) {
+      setResearchActivity("Paused — resume when you're ready to continue.");
+      return;
+    }
+    setResearchActivity((prev) => (/^Paused\b/i.test(prev) ? "Resuming on this page…" : prev));
+  }, [mode, session?.id, paused]);
 
   // Auto-mode: run analyze on URL changes + significant DOM mutations.
   useEffect(() => {
@@ -246,6 +426,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         // New page: clear stale cards, drop fingerprint so first analyze fires fast.
         setSuggestions([]);
         lastSnapshotRef.current = null;
+        setResearchActivity("Loading a new page — will analyze shortly…");
         debounced();
       }
     };
@@ -272,47 +453,79 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     };
   }, [paused, sessionId, analyzePage]);
 
-  const decide = useCallback(
-    async (suggestion: Suggestion, action: "accept" | "reject") => {
-      if (!sessionId || !suggestion.event_id) return;
-      setBusy(action === "accept" ? "Saving…" : "Skipping…");
-      setError(null);
-      try {
-        await send({
-          type: "DECISION",
-          suggestionEventId: suggestion.event_id,
-          action,
-        });
-        setSuggestions((prev) => prev.filter((s) => s.event_id !== suggestion.event_id));
-        if (action === "accept") {
-          setSnippets((prev) => [
-            ...prev,
-            {
-              text: suggestion.snippet,
-              source_label: suggestion.source_label,
-              hostname: suggestion.hostname ?? null,
-              source_url: location.href,
-              accepted_at: new Date().toISOString(),
-              suggestion_event_id: suggestion.event_id,
-            },
-          ]);
-        }
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setBusy(null);
+  // Poll session metadata (e.g. last_synced_at) while researching.
+  useEffect(() => {
+    if (!sessionId) return;
+    const t = window.setInterval(() => void refreshSession(), 90_000);
+    return () => window.clearInterval(t);
+  }, [sessionId, refreshSession]);
+
+  // Auto-end session after long idle (no successful observe) while snippets exist.
+  useEffect(() => {
+    if (!sessionId || paused) return;
+    const t = window.setInterval(() => {
+      if (snippets.length === 0) return;
+      if (Date.now() - lastObserveSuccessAtRef.current < OBSERVE_IDLE_END_MS) return;
+      void send({ type: "END_SESSION" }).catch(() => {});
+    }, 60_000);
+    return () => window.clearInterval(t);
+  }, [sessionId, paused, snippets.length]);
+
+  const decide = useCallback(async (
+    suggestion: Suggestion,
+    action: "accept" | "reject",
+    opts?: { silent?: boolean; auto?: boolean },
+  ) => {
+    if (!sessionId || !suggestion.event_id) return;
+    const sid = suggestion.event_id;
+    setError(null);
+    setSuggestions((prev) => prev.filter((s) => s.event_id !== sid));
+    if (action === "accept") {
+      if (opts?.auto) highlightAcceptedSnippet(suggestion.snippet);
+      setSnippets((prev) => [
+        ...prev,
+        {
+          text: suggestion.snippet,
+          source_label: suggestion.source_label,
+          hostname: suggestion.hostname ?? null,
+          source_url: location.href,
+          accepted_at: new Date().toISOString(),
+          suggestion_event_id: sid,
+        },
+      ]);
+    }
+    try {
+      await send({
+        type: "DECISION",
+        suggestionEventId: sid,
+        action,
+      });
+      void refreshSession();
+      if (!opts?.silent) {
+        setInfo(action === "accept" ? "Saved to deal." : null);
       }
-    },
-    [sessionId],
-  );
+    } catch (e) {
+      setSuggestions((prev) => (prev.some((s) => s.event_id === sid) ? prev : [...prev, suggestion]));
+      if (action === "accept") {
+        setSnippets((prev) => prev.filter((sn) => sn.suggestion_event_id !== sid));
+      }
+      setError((e as Error).message);
+    }
+  }, [sessionId, refreshSession]);
+
+  const autoDraftOp = useCallback(async (payload: ExtensionRequest & { type: "AUTO_DRAFT_OP" }) => {
+    const res = await send<AutoDraftResponse>(payload);
+    setAutoDraft(res.draft?.snippets ?? []);
+    return res.draft?.snippets ?? [];
+  }, []);
 
   const submitPrompt = useCallback(async () => {
-    if (!sessionId || !promptText.trim()) return;
+    if (!sessionId || !promptText.trim() || mode === "auto") return;
     const text = promptText.trim();
     setBusy("Asking…");
     setError(null);
     try {
-      const snapshot = extractDomSnapshot({ scope });
+      const snapshot = extractDomSnapshot({ scope: effectiveScope });
       const res = await send<PromptResponse>({ type: "PROMPT", text, snapshot });
       setSuggestions((prev) => {
         const seenIds = new Set(prev.map((s) => s.event_id ?? s.client_id));
@@ -335,28 +548,208 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     } finally {
       setBusy(null);
     }
-  }, [sessionId, promptText, scope]);
+  }, [sessionId, promptText, effectiveScope, mode]);
 
-  const finalize = useCallback(async () => {
+  const applyAutoSteering = useCallback(async () => {
     if (!sessionId) return;
-    setBusy("Saving research…");
+    setResearchActivity("Saving your research focus…");
+    setBusy("Saving focus…");
     setError(null);
     try {
-      const res = await send<FinalizeResponse>({ type: "FINALIZE" });
-      setSession(null);
-      setSuggestions([]);
-      setSnippets([]);
-      setInfo(
-        res.documentId
-          ? `Saved ${snippets.length} snippet(s) to deal — facts updated; embeddings queued.`
-          : "Session ended without saving (no accepted snippets).",
-      );
+      const res = await send<SessionResponse>({ type: "SET_AUTO_STEERING", note: autoSteeringDraft.trim() });
+      setAutoSteeringDirty(false);
+      if (res.session) setSession(res.session);
+      setInfo("Focus saved — analysis and link choices follow this.");
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(null);
     }
-  }, [sessionId, snippets.length]);
+  }, [sessionId, autoSteeringDraft]);
+
+  const clearAutoSteering = useCallback(async () => {
+    if (!sessionId) return;
+    setResearchActivity("Clearing saved focus…");
+    setBusy("Clearing focus…");
+    setError(null);
+    try {
+      const res = await send<SessionResponse>({ type: "SET_AUTO_STEERING", note: "" });
+      setAutoSteeringDraft("");
+      setAutoSteeringDirty(false);
+      if (res.session) setSession(res.session);
+      setInfo("Steering cleared.");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || paused || mode !== "auto" || busy) return;
+    if (pendingNav) return;
+    const run = async () => {
+      // Auto UI hides suggestion cards — resolve contradictions without asking (defer CRM truth; unblocks planner).
+      const contradictRows = suggestions.filter((s) => s.kind === "contradicts" && s.event_id);
+      if (contradictRows.length) {
+        setResearchActivity("Untangling conflicting facts the model flagged…");
+        for (const s of contradictRows) {
+          await decide(s, "reject", { silent: true });
+        }
+        return;
+      }
+      const autoAccept = suggestions.filter(
+        (s) =>
+          !!s.event_id &&
+          s.kind !== "contradicts" &&
+          s.kind !== "explore" &&
+          (s.confidence ?? 0) >= AGENT_AUTO_ACCEPT_MIN_CONFIDENCE,
+      );
+      const draftKeys = new Set(autoDraft.map((sn) => suggestionKey({ summary: "", snippet: sn.text })));
+      const textsForDedupe = [...autoDraft.map((sn) => sn.text), ...snippets.map((sn) => sn.text)];
+      for (const s of autoAccept) {
+        const key = suggestionKey(s);
+        if (draftKeys.has(key)) continue;
+        if (isNearDuplicateDraftSnippet(s.snippet, textsForDedupe)) continue;
+        draftKeys.add(key);
+        textsForDedupe.push(s.snippet);
+        setResearchActivity(suggestionPickSentence(s));
+        highlightAcceptedSnippet(s.snippet);
+        await autoDraftOp({
+          type: "AUTO_DRAFT_OP",
+          op: "append",
+          snippet: {
+            id: s.event_id ?? s.client_id,
+            text: s.snippet,
+            source_label: s.source_label,
+            hostname: s.hostname ?? null,
+            source_url: location.href,
+            accepted_at: new Date().toISOString(),
+            suggestion_event_id: s.event_id ?? null,
+            confidence: s.confidence ?? null,
+            kind: s.kind,
+            from_suggestion_event_id: s.event_id ?? null,
+          },
+        });
+        setSuggestions((prev) => prev.filter((x) => (x.event_id ?? x.client_id) !== (s.event_id ?? s.client_id)));
+      }
+      const snapshot = extractDomSnapshot({ scope: effectiveScope });
+      const copilotExploreLinks = suggestions
+        .filter((s) => s.kind === "explore" && typeof s.link_url === "string" && s.link_url.trim())
+        .map((s) => ({
+          url: s.link_url!.trim(),
+          text: (s.summary || s.snippet || "Explore").trim().slice(0, 160),
+        }))
+        .slice(0, 10);
+      const href = location.href;
+      const pendingSuggestionsCount = suggestions.filter(
+        (s) => !!s.event_id && s.kind !== "explore" && s.kind !== "contradicts",
+      ).length;
+      const draftItemsThisUrl = autoDraft.filter((sn) => (sn.source_url || "") === href).length;
+      const plan_page_context = {
+        visible_text_chars: snapshot.visible_text.length,
+        scroll_depth_ratio: scrollDepthRatio(),
+        draft_items_this_url: draftItemsThisUrl,
+        pending_suggestions_count: pendingSuggestionsCount,
+        /** Lets server stop deferring navigate after repeated scroll-without-yield (e.g. Wikipedia citations). */
+        consecutive_plan_scrolls: agentScrollStreakRef.current,
+      };
+      setResearchActivity("Thinking about what page to visit next…");
+      const res = await send<PlanNextResponse>({
+        type: "PLAN_NEXT",
+        snapshot,
+        currentUrl: href,
+        plan_page_context,
+        ...(copilotExploreLinks.length ? { copilotExploreLinks } : {}),
+      });
+      if (res.next.action === "scroll") {
+        agentScrollStreakRef.current += 1;
+        if (agentScrollStreakRef.current > 8) {
+          agentScrollStreakRef.current = 0;
+          lastSnapshotRef.current = null;
+          setResearchActivity("Pausing auto-scroll — waiting for new content or your steering note.");
+          window.setTimeout(() => setPostScrollPlannerKick((k) => k + 1), 400);
+          return;
+        }
+        if (scrollKickTimerRef.current != null) {
+          window.clearTimeout(scrollKickTimerRef.current);
+          scrollKickTimerRef.current = null;
+        }
+        setResearchActivity("Scrolling to read more of this page…");
+        lastSnapshotRef.current = null;
+        window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: "smooth" });
+        scrollKickTimerRef.current = window.setTimeout(() => {
+          scrollKickTimerRef.current = null;
+          setResearchActivity("Re-reading the page after scrolling…");
+          void analyzePage();
+          setPostScrollPlannerKick((k) => k + 1);
+        }, 1700);
+        return;
+      }
+      agentScrollStreakRef.current = 0;
+      if (res.next.action === "stop") {
+        // Use the server's rationale — it explains real reasons (defer/wait, no candidates,
+        // model asked for steering). A generic "wait for magic" line misleads users when
+        // there is nothing to scroll or navigate to.
+        const why = res.next.rationale?.trim();
+        setResearchActivity(
+          why
+            ? truncateWords(why, 140)
+            : "Stopped — nothing to scroll or open from here. Try a steering note or another source.",
+        );
+        setInfo(
+          why
+            ? `Auto: ${truncateWords(why, 180)}`
+            : "Auto: open a page with useful links, accept explore suggestions, or add steering — idle waiting won't surface new options.",
+        );
+        return;
+      }
+      if (res.next.action === "navigate" && res.next.url) {
+        const rationale = res.next.rationale?.trim();
+        let host = "the next page";
+        try {
+          host = new URL(res.next.url).hostname || host;
+        } catch {
+          /* ignore */
+        }
+        setResearchActivity(
+          rationale
+            ? `Preparing to follow a link: ${truncateWords(rationale, 96)}`
+            : `Preparing to open ${truncateWords(host, 48)}…`,
+        );
+        setPendingNav({ url: res.next.url, rationale: res.next.rationale, at: Date.now() });
+      }
+    };
+    void run().catch((e) => {
+      setResearchActivity("Hit a snag while planning the next step — will retry when things update.");
+      setError((e as Error).message);
+    });
+  }, [
+    sessionId,
+    paused,
+    mode,
+    busy,
+    pendingNav,
+    suggestions,
+    autoDraft,
+    autoDraftOp,
+    effectiveScope,
+    decide,
+    analyzePage,
+    postScrollPlannerKick,
+  ]);
+
+  useEffect(() => {
+    if (!pendingNav || mode !== "auto" || paused) return;
+    const t = window.setTimeout(() => {
+      window.location.assign(pendingNav.url);
+    }, AGENT_NAV_COUNTDOWN_MS);
+    return () => window.clearTimeout(t);
+  }, [pendingNav, mode, paused]);
+
+  useEffect(() => {
+    if (!session || mode !== "auto") setPendingNav(null);
+  }, [session, mode]);
 
   const headerLabel = useMemo(() => {
     if (session && activeDeal) return `${activeDeal.name} • watching`;
@@ -367,7 +760,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   // Drag the header.
   const dragRef = useRef<{ startX: number; startY: number; startTop: number; startRight: number } | null>(null);
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.target instanceof HTMLElement && e.target.closest(".icon-btn")) return;
+    if (e.target instanceof HTMLElement && e.target.closest("button")) return;
     (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
     dragRef.current = {
       startX: e.clientX,
@@ -390,10 +783,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     dragRef.current = null;
   };
 
-  const showStartCta = !session;
   const showSnippetsBuffer = (snippets ?? []).length > 0;
 
-  if (isAppContext()) return null;
+  // Keep listeners/hooks active, but do not render any overlay chrome unless a
+  // copilot session is actually active.
+  if (isAppContext() || !session) return null;
 
   return (
     <div
@@ -411,7 +805,18 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           <span className={`dot${session ? " active" : ""}`} aria-hidden="true" />
           <span>{headerLabel}</span>
         </div>
-        <div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button className={`mode-btn${mode === "manual" ? " active" : ""}`} onClick={() => setMode("manual")}>
+            Manual
+          </button>
+          <button
+            className={`mode-btn${mode === "auto" ? " active" : ""}`}
+            onClick={() => setMode("auto")}
+            disabled={!session}
+            title={!session ? "Start a session first" : "Auto research this page and follow links"}
+          >
+            Auto
+          </button>
           <button
             className="icon-btn"
             title={collapsed ? "Expand" : "Collapse"}
@@ -427,91 +832,152 @@ export function Overlay({ activeDeal, initialSession }: Props) {
 
       {!collapsed ? (
         <>
-          <div className="tabs">
-            <button
-              className={`tab${tab === "suggestions" ? " active" : ""}`}
-              onClick={() => setTab("suggestions")}
-            >
-              Suggestions ({suggestions.length})
-            </button>
-            <button
-              className={`tab${tab === "saved" ? " active" : ""}`}
-              onClick={() => setTab("saved")}
-            >
-              Saved ({snippets.length})
-            </button>
-            <button className={`tab${tab === "ask" ? " active" : ""}`} onClick={() => setTab("ask")}>
-              Ask
-            </button>
-          </div>
+          {mode !== "auto" ? (
+            <div className="tabs">
+              <button
+                className={`tab${tab === "suggestions" ? " active" : ""}`}
+                onClick={() => setTab("suggestions")}
+              >
+                Suggestions ({suggestions.length}
+                {showSnippetsBuffer ? ` · ${snippets.length} accepted` : ""})
+              </button>
+              <button className={`tab${tab === "ask" ? " active" : ""}`} onClick={() => setTab("ask")}>
+                Ask
+              </button>
+            </div>
+          ) : null}
 
           <div className="body">
-            {showStartCta ? (
-              <div className="card">
-                <div className="summary">No active session</div>
-                <div className="snippet">
-                  {activeDeal ? (
-                    <>
-                      Start a session for <strong>{activeDeal.name}</strong>.
-                    </>
+            {mode === "auto" && session ? (
+              <>
+                <div className="agent-banner">
+                  Auto mode — runs until you pause. No accept/reject prompts; use Manual for that.
+                </div>
+                <div className="agent-banner subtle">Full-page snapshot scope while auto runs.</div>
+                <div className="agent-banner agent-activity" role="status" aria-live="polite" aria-atomic="true">
+                  {researchActivity}
+                </div>
+                <div className="card" style={{ marginBottom: 10 }}>
+                  <div className="label" style={{ marginTop: 0 }}>
+                    Steer auto research
+                  </div>
+                  <div className="deal-line" style={{ margin: "0 0 8px" }}>
+                    Short note on what to prioritize (e.g. company geography, HQ, funding). Applies after you save.
+                    Site preferences with a matching category are favored when choosing links.
+                  </div>
+                  <textarea
+                    className="prompt-input"
+                    rows={2}
+                    placeholder="e.g. Focus on where they’re based and office locations"
+                    value={autoSteeringDraft}
+                    onChange={(e) => {
+                      setAutoSteeringDraft(e.target.value);
+                      setAutoSteeringDirty(true);
+                    }}
+                  />
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <button
+                      className="btn primary"
+                      type="button"
+                      onClick={() => void applyAutoSteering()}
+                      disabled={
+                        !!busy ||
+                        (!autoSteeringDirty && autoSteeringDraft.trim() === serverAutoSteering.trim())
+                      }
+                    >
+                      Apply focus
+                    </button>
+                    <button
+                      className="btn"
+                      type="button"
+                      onClick={() => void clearAutoSteering()}
+                      disabled={!!busy || (!serverAutoSteering && !autoSteeringDraft.trim())}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                {pendingNav ? (
+                  <div className="agent-banner warning">
+                    <div>Opening {new URL(pendingNav.url).hostname} shortly…</div>
+                    <div style={{ fontSize: 11, opacity: 0.85 }}>{pendingNav.rationale ?? "Following source link"}</div>
+                    <div className="deal-line" style={{ marginTop: 6 }}>
+                      Pause cancels this navigation.
+                    </div>
+                  </div>
+                ) : null}
+                <div className="card">
+                  <div className="summary">Live Auto Draft ({autoDraft.length})</div>
+                  {autoDraft.length === 0 ? (
+                    <div className="notice">Facts the agent saves from each page show up here.</div>
                   ) : (
-                    <>Open a deal in the VCApp tab, then click below.</>
+                    autoDraft
+                      .slice()
+                      .reverse()
+                      .map((sn) => (
+                        <div className="snippet-row" key={sn.id}>
+                          <div className="meta">
+                            <span>{sn.source_label || sn.hostname || "snippet"}</span>
+                            <span>•</span>
+                            <span>{new Date(sn.accepted_at).toLocaleTimeString()}</span>
+                          </div>
+                          <div>{sn.text}</div>
+                        </div>
+                      ))
                   )}
                 </div>
-                <div className="row">
-                  <button
-                    className="btn primary"
-                    onClick={startSessionForActiveDeal}
-                    disabled={!activeDeal || !!busy}
-                  >
-                    {busy ?? "Start session here"}
-                  </button>
-                  <button className="btn ghost" onClick={refreshSession}>
-                    Refresh
-                  </button>
-                </div>
-                <div className="deal-line" style={{ marginTop: 6 }}>
-                  Sharing this page's text with VCApp copilot. Pause anytime.
-                </div>
-              </div>
+              </>
             ) : null}
 
-            {tab === "suggestions" && session ? (
-              suggestions.length === 0 ? (
-                <div className="notice">
-                  Watching this page; suggestions will appear here.
-                </div>
-              ) : (
-                suggestions.map((s) => (
-                  <SuggestionCard key={s.event_id ?? s.client_id} suggestion={s} onDecide={decide} onOpenLink={(sg) => {
-                    if (sg.link_url) window.open(sg.link_url, "_blank", "noopener,noreferrer");
-                    setSuggestions((prev) => prev.filter((x) => (x.event_id ?? x.client_id) !== (sg.event_id ?? sg.client_id)));
-                  }} disabled={!!busy} />
-                ))
-              )
-            ) : null}
-
-            {tab === "saved" && session ? (
-              showSnippetsBuffer ? (
-                snippets
-                  .slice()
-                  .reverse()
-                  .map((sn, i) => (
-                    <div className="snippet-row" key={`${sn.suggestion_event_id ?? i}`}>
-                      <div className="meta">
-                        <span>{sn.source_label || sn.hostname || "snippet"}</span>
-                        <span>•</span>
-                        <span>{new Date(sn.accepted_at).toLocaleTimeString()}</span>
-                      </div>
-                      <div>{sn.text}</div>
-                    </div>
+            {mode !== "auto" && tab === "suggestions" && session ? (
+              <>
+                {suggestions.length === 0 ? (
+                  <div className="notice">
+                    Watching this page; suggestions will appear here.
+                  </div>
+                ) : (
+                  suggestions.map((s) => (
+                    <SuggestionCard
+                      key={s.event_id ?? s.client_id}
+                      suggestion={s}
+                      onDecide={decide}
+                      onOpenLink={(sg) => {
+                        if (sg.link_url) window.open(sg.link_url, "_blank", "noopener,noreferrer");
+                        setSuggestions((prev) => prev.filter((x) => (x.event_id ?? x.client_id) !== (sg.event_id ?? sg.client_id)));
+                      }}
+                      disabled={busy === "Asking…"}
+                    />
                   ))
-              ) : (
-                <div className="notice">No snippets saved yet.</div>
-              )
+                )}
+                {showSnippetsBuffer ? (
+                  <div style={{ marginTop: suggestions.length > 0 ? 12 : 0 }}>
+                    <p className="label" style={{ margin: "0 0 6px" }}>
+                      Accepted this session
+                    </p>
+                    {snippets
+                      .slice()
+                      .reverse()
+                      .map((sn, i) => (
+                        <div className="snippet-row" key={`${sn.suggestion_event_id ?? i}`}>
+                          <div className="meta">
+                            <span>{sn.source_label || sn.hostname || "snippet"}</span>
+                            <span>•</span>
+                            <span>{new Date(sn.accepted_at).toLocaleTimeString()}</span>
+                          </div>
+                          <div>{sn.text}</div>
+                        </div>
+                      ))}
+                    <div className="deal-line" style={{ marginTop: 8 }}>
+                      {lastSyncedAt
+                        ? `Auto-saved · last sync ${new Date(lastSyncedAt).toLocaleString()}`
+                        : "Accepted items sync to the deal in the background."}
+                    </div>
+                  </div>
+                ) : null}
+              </>
             ) : null}
 
-            {tab === "ask" && session ? (
+            {mode !== "auto" && tab === "ask" && session ? (
               <div>
                 <label className="label" htmlFor="prompt">
                   Ask the copilot
@@ -531,19 +997,114 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                 </div>
               </div>
             ) : null}
+
+            {showReview ? (
+              <div className="review-panel">
+                <div className="label" style={{ marginTop: 0 }}>
+                  Review auto draft before ending
+                </div>
+                {autoDraft.map((sn) => (
+                  <div key={sn.id} style={{ marginBottom: 8 }}>
+                    <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={reviewState[sn.id]?.checked ?? true}
+                        onChange={(e) =>
+                          setReviewState((prev) => ({
+                            ...prev,
+                            [sn.id]: { checked: e.target.checked, text: prev[sn.id]?.text ?? sn.text },
+                          }))
+                        }
+                      />
+                      <span style={{ fontSize: 11 }}>{sn.source_label || sn.hostname || "snippet"}</span>
+                    </label>
+                    <textarea
+                      className="prompt-input"
+                      rows={2}
+                      value={reviewState[sn.id]?.text ?? sn.text}
+                      onChange={(e) =>
+                        setReviewState((prev) => ({
+                          ...prev,
+                          [sn.id]: { checked: prev[sn.id]?.checked ?? true, text: e.target.value },
+                        }))
+                      }
+                    />
+                  </div>
+                ))}
+                <div className="review-panel-actions">
+                  <div className="row">
+                    <button
+                      className="btn primary"
+                      onClick={async () => {
+                        for (const sn of autoDraft) {
+                          const edited = reviewState[sn.id];
+                          if (!edited) continue;
+                          if (!edited.checked) {
+                            await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "remove", id: sn.id });
+                            continue;
+                          }
+                          if (edited.text.trim() && edited.text.trim() !== sn.text) {
+                            await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "edit", id: sn.id, text: edited.text.trim() });
+                          }
+                        }
+                        await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "approve" });
+                        await send({ type: "END_SESSION" });
+                        setShowReview(false);
+                        setMode("manual");
+                        setInfo("Approved auto draft and ended session.");
+                      }}
+                    >
+                      Approve & End
+                    </button>
+                    <button
+                      className="btn ghost"
+                      onClick={async () => {
+                        await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "discard" });
+                        await send({ type: "END_SESSION" });
+                        setShowReview(false);
+                        setMode("manual");
+                        setInfo("Discarded auto draft and ended session.");
+                      }}
+                    >
+                      Discard & End
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {session ? (
             <div className="toolbar">
-              <button className="btn" onClick={() => setPaused((v) => !v)} disabled={!!busy}>
+              <button
+                className="btn"
+                onClick={() => {
+                  if (!paused) setPendingNav(null);
+                  setPaused((v) => !v);
+                }}
+                disabled={!!busy}
+              >
                 {paused ? "Resume" : "Pause"}
               </button>
-              <button className="btn" onClick={() => setScope(scope === "viewport" ? "full" : "viewport")} disabled={!!busy}>
-                Scope: {scope}
-              </button>
-              <button className="btn danger" onClick={finalize} disabled={!!busy}>
-                Save research to deal
-              </button>
+              {mode !== "auto" ? (
+                <button className="btn" onClick={() => setScope(scope === "viewport" ? "full" : "viewport")} disabled={!!busy}>
+                  Scope: {scope}
+                </button>
+              ) : null}
+              {mode === "auto" ? (
+                <button
+                  className="btn"
+                  onClick={() => {
+                    const next: DraftReview = {};
+                    for (const sn of autoDraft) next[sn.id] = { checked: true, text: sn.text };
+                    setReviewState(next);
+                    setShowReview(true);
+                  }}
+                  disabled={!!busy}
+                >
+                  End & Review
+                </button>
+              ) : null}
             </div>
           ) : null}
         </>
@@ -564,11 +1125,29 @@ function SuggestionCard({
   disabled: boolean;
 }) {
   const kindClass = `kind-pill kind-${suggestion.kind}`;
+  const exploreUrl = suggestion.kind === "explore" && suggestion.link_url ? suggestion.link_url : null;
+  const exploreUrlLabel = exploreUrl
+    ? (() => {
+        const disp = exploreUrl.replace(/^https?:\/\//i, "");
+        return disp.length > 72 ? `${disp.slice(0, 72)}…` : disp;
+      })()
+    : null;
   return (
     <div className="card">
       <div className={kindClass}>{suggestion.kind}</div>
       <div className="summary">{suggestion.summary}</div>
       <div className="snippet">{suggestion.snippet}</div>
+      {exploreUrl && exploreUrlLabel ? (
+        <a
+          className="link-hint"
+          href={exploreUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {exploreUrlLabel}
+        </a>
+      ) : null}
       {suggestion.kind === "contradicts" ? (
         <div className="notice" style={{ marginTop: 8 }}>
           Contradiction detected. Which value should we keep?

@@ -72,17 +72,19 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       accepted_at: new Date().toISOString(),
       suggestion_event_id: suggestion.id,
     };
-    await appendAcceptedSnippet({ admin, session, snippet: acceptedSnippet });
-    await insertCopilotEvent({
-      admin,
-      event: {
-        session_id: sessionId,
-        kind: "accepted",
-        hostname,
-        parent_event_id: suggestion.id,
-        payload: { summary, snippet, source_label: sourceLabel },
-      },
-    });
+    await Promise.all([
+      appendAcceptedSnippet({ admin, session, snippet: acceptedSnippet, bumpAcceptCounters: true }),
+      insertCopilotEvent({
+        admin,
+        event: {
+          session_id: sessionId,
+          kind: "accepted",
+          hostname,
+          parent_event_id: suggestion.id,
+          payload: { summary, snippet, source_label: sourceLabel },
+        },
+      }),
+    ]);
   } else {
     await insertCopilotEvent({
       admin,
@@ -96,27 +98,23 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     });
   }
 
-  // Preference learning: nudge research site preference for the source domain.
+  // Preference learning (non-blocking — keep POST latency low).
   if (hostname) {
-    try {
-      await recordResearchPreferenceEvents({
-        admin,
-        userId: user.id,
-        dealId: session.deal_id,
-        events: [
-          {
-            domain: hostname,
-            category: "general",
-            deltaPreferenceScore: action === "accept" ? ACCEPT_DELTA : REJECT_DELTA,
-            deltaUsageCount: action === "accept" ? 1 : 0,
-            reason: action === "accept" ? "Copilot snippet accepted by user." : "Copilot snippet rejected by user.",
-            task: summary,
-          },
-        ],
-      });
-    } catch {
-      // best-effort
-    }
+    void recordResearchPreferenceEvents({
+      admin,
+      userId: user.id,
+      dealId: session.deal_id,
+      events: [
+        {
+          domain: hostname,
+          category: "general",
+          deltaPreferenceScore: action === "accept" ? ACCEPT_DELTA : REJECT_DELTA,
+          deltaUsageCount: action === "accept" ? 1 : 0,
+          reason: action === "accept" ? "Copilot snippet accepted by user." : "Copilot snippet rejected by user.",
+          task: summary,
+        },
+      ],
+    }).catch(() => {});
   }
 
   return withCopilotCors(req, NextResponse.json({ ok: true, action }));
