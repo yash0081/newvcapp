@@ -120,20 +120,20 @@ export function InvestmentCriteriaUpload() {
     : { problem: 0, solution: 0, founder: 0 };
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white/70 p-4 shadow-sm space-y-4">
+    <div className="space-y-4">
       <div className="space-y-1">
         <div className="flex items-start justify-between gap-3">
-          <h2 className="text-sm font-semibold text-gray-800">Investment criteria documents</h2>
+          <h2 className="text-sm font-semibold text-zinc-950">Investment criteria documents</h2>
           <button
             type="button"
             onClick={() => void load()}
             disabled={listLoading}
-            className="text-xs text-gray-600 underline-offset-2 hover:underline disabled:opacity-50"
+            className="text-xs font-medium text-zinc-600 underline-offset-2 hover:underline disabled:opacity-50"
           >
             {listLoading ? "Loading…" : "Refresh list"}
           </button>
         </div>
-        <p className="text-xs text-gray-500 leading-relaxed">
+        <p className="text-xs text-zinc-500 leading-relaxed">
           PDFs you add here are parsed into rules and applied in the deal pipeline (problem, solution,
           and founder steps).
         </p>
@@ -141,7 +141,7 @@ export function InvestmentCriteriaUpload() {
 
       <form onSubmit={handleSubmit} className="space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <label className="inline-flex min-h-[40px] max-w-full items-center rounded-lg border border-dashed border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:border-gray-400 cursor-pointer transition-colors">
+          <label className="inline-flex h-9 max-w-full cursor-pointer items-center rounded-xl border border-dashed border-zinc-300 bg-white px-3 text-sm text-zinc-700 transition-colors hover:border-zinc-400">
             <span className="truncate">{file ? file.name : "Choose PDF…"}</span>
             <input
               ref={inputRef}
@@ -154,7 +154,7 @@ export function InvestmentCriteriaUpload() {
           <button
             type="submit"
             disabled={loading || !file}
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed"
+            className="crm-button"
           >
             {loading && <Loader2 className="h-4 w-4 animate-spin" />}
             {loading ? "Processing…" : "Upload and extract"}
@@ -164,8 +164,8 @@ export function InvestmentCriteriaUpload() {
         {feedback && (
           <p
             className={cn(
-              "text-xs",
-              feedback.type === "ok" ? "text-gray-700" : "text-red-700"
+              "rounded-xl border px-3 py-2 text-xs",
+              feedback.type === "ok" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"
             )}
             role="status"
           >
@@ -174,43 +174,48 @@ export function InvestmentCriteriaUpload() {
         )}
       </form>
 
-      <div className="border-t border-gray-200 pt-3 space-y-1 text-xs text-gray-600">
+      <div className="grid gap-2 border-t border-zinc-200 pt-3 text-xs text-zinc-600 md:grid-cols-3">
         <p>
-          Rules in use — Problem: {counts.problem}, Solution: {counts.solution}, Founder:{" "}
-          {counts.founder}
+          Problem rules: <span className="font-semibold text-zinc-900">{counts.problem}</span>
+        </p>
+        <p>
+          Solution rules: <span className="font-semibold text-zinc-900">{counts.solution}</span>
+        </p>
+        <p>
+          Founder rules: <span className="font-semibold text-zinc-900">{counts.founder}</span>
         </p>
         {contextUpdatedAt && (
-          <p className="text-gray-500">
+          <p className="text-zinc-500 md:col-span-3">
             Context last updated: {new Date(contextUpdatedAt).toLocaleString()}
           </p>
         )}
       </div>
 
-      {loadError && <p className="text-xs text-red-700">{loadError}</p>}
+      {loadError && <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{loadError}</p>}
 
       <div>
-        <p className="text-xs font-medium text-gray-700 mb-2">Uploaded documents</p>
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Uploaded documents</p>
         {listLoading ? (
-          <p className="text-xs text-gray-500 py-2">Loading…</p>
+          <p className="py-2 text-xs text-zinc-500">Loading…</p>
         ) : !docs.length ? (
-          <p className="text-xs text-gray-500">None yet.</p>
+          <p className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-3 py-4 text-center text-xs text-zinc-500">None yet.</p>
         ) : (
-          <ul className="divide-y divide-gray-100 border border-gray-100 rounded-lg overflow-hidden bg-white">
+          <ul className="overflow-hidden rounded-xl border border-zinc-200 bg-white">
             {docs.map((d) => (
-              <li key={d.id} className="px-3 py-2.5 text-sm">
+              <li key={d.id} className="border-b border-zinc-100 px-3 py-2.5 text-sm last:border-b-0">
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-gray-900 truncate max-w-[min(100%,16rem)]">
+                  <span className="max-w-[min(100%,16rem)] truncate text-zinc-950">
                     {d.original_filename || d.id.slice(0, 8) + "…"}
                   </span>
-                  <span className="text-xs text-gray-500 capitalize">{d.status}</span>
+                  <span className="rounded-xl border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[11px] capitalize text-zinc-600">{d.status}</span>
                 </div>
                 {d.created_at && (
-                  <p className="text-xs text-gray-400 mt-0.5">
+                  <p className="mt-0.5 text-xs text-zinc-400">
                     {new Date(d.created_at).toLocaleString()}
                   </p>
                 )}
                 {d.error_message && (
-                  <p className="text-xs text-red-700 mt-1">{d.error_message}</p>
+                  <p className="mt-1 text-xs text-rose-700">{d.error_message}</p>
                 )}
               </li>
             ))}

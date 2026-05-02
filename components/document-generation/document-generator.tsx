@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, FileText, Loader2, Plus, Search, UploadCloud } from "lucide-react";
+import { SelectBox } from "@/components/ui/select-box";
 
 type DealOption = { id: string; name: string };
 
@@ -49,12 +51,20 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return json;
 }
 
+function formatOutputFormat(format?: DocType["output_format"] | null): string {
+  if (format === "docx") return "Word document";
+  if (format === "pdf") return "PDF";
+  if (format === "text") return "Plain text";
+  if (format === "markdown") return "Plain text";
+  return "-";
+}
+
 export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[]; initialDealId?: string }) {
   const [types, setTypes] = useState<DocType[]>([]);
   const [selectedTypeId, setSelectedTypeId] = useState("");
   const [selectedDealId, setSelectedDealId] = useState(initialDealId || deals[0]?.id || "");
   const [newTypeName, setNewTypeName] = useState("");
-  const [newTypeFormat, setNewTypeFormat] = useState<DocType["output_format"]>("markdown");
+  const [newTypeFormat, setNewTypeFormat] = useState<DocType["output_format"]>("text");
   const [newTypeDescription, setNewTypeDescription] = useState("");
   const [newTypeInstructions, setNewTypeInstructions] = useState("");
   const [refKind, setRefKind] = useState("description");
@@ -112,7 +122,7 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
       setTypes((prev) => [data.type, ...prev]);
       setSelectedTypeId(data.type.id);
       setNewTypeName("");
-      setNewTypeFormat("markdown");
+      setNewTypeFormat("text");
       setNewTypeDescription("");
       setNewTypeInstructions("");
       setMessage("Document type saved.");
@@ -226,164 +236,204 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
-      <aside className="space-y-4">
-        <section className="rounded-lg border border-zinc-200 bg-white p-4 space-y-3">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Step 1</p>
-            <h2 className="text-sm font-semibold text-zinc-900">Choose a reusable document type</h2>
-            <p className="text-xs text-zinc-500">A type is the saved recipe: output format, structure, tone, examples, and learned preferences.</p>
-          </div>
-          <select className="crm-input" value={selectedTypeId} onChange={(e) => setSelectedTypeId(e.target.value)}>
-            <option value="">Choose a type</option>
-            {types.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name} ({t.output_format.toUpperCase()})
-              </option>
-            ))}
-          </select>
-          {selectedType ? (
-            <div className="rounded-md bg-zinc-50 p-3 text-xs text-zinc-600 space-y-2">
-              <p className="font-medium text-zinc-800">{selectedType.name} - {selectedType.output_format.toUpperCase()}</p>
-              <p>{selectedType.description || "No description yet."}</p>
-              {selectedType.learned_preferences ? <p className="whitespace-pre-wrap">{selectedType.learned_preferences}</p> : null}
+    <div className="space-y-5">
+      <div className="crm-panel overflow-hidden">
+        <div className="flex flex-col gap-3 border-b border-zinc-200 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50">
+              <FileText className="h-4 w-4 text-zinc-700" />
             </div>
-          ) : null}
-        </section>
-
-        <section className="rounded-lg border border-zinc-200 bg-white p-4 space-y-3">
-          <div>
-            <h2 className="text-sm font-semibold text-zinc-900">Create a new type</h2>
-            <p className="text-xs text-zinc-500">Use this when you want to make the same kind of document again later.</p>
-          </div>
-          <input className="crm-input" value={newTypeName} onChange={(e) => setNewTypeName(e.target.value)} placeholder="Type name, e.g. IC memo" />
-          <select className="crm-input" value={newTypeFormat} onChange={(e) => setNewTypeFormat(e.target.value as DocType["output_format"])}>
-            <option value="markdown">Markdown</option>
-            <option value="docx">Word document</option>
-            <option value="pdf">PDF</option>
-            <option value="text">Plain text</option>
-          </select>
-          <textarea className="crm-input min-h-20" value={newTypeDescription} onChange={(e) => setNewTypeDescription(e.target.value)} placeholder="When should this type be used?" />
-          <textarea className="crm-input min-h-24" value={newTypeInstructions} onChange={(e) => setNewTypeInstructions(e.target.value)} placeholder="Reusable rules: sections, tone, length, formatting, must-have content" />
-          <button className="crm-button w-full" type="button" disabled={busy === "type" || !newTypeName.trim()} onClick={createType}>
-            {busy === "type" ? "Saving..." : "Save document type"}
-          </button>
-        </section>
-
-        <section className="rounded-lg border border-zinc-200 bg-white p-4 space-y-3">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Step 2</p>
-            <h2 className="text-sm font-semibold text-zinc-900">Add references to this type</h2>
-            <p className="text-xs text-zinc-500">These are reusable examples or instructions for the selected type, not one-off context for a single generated document.</p>
-          </div>
-          <select className="crm-input" value={refKind} onChange={(e) => setRefKind(e.target.value)}>
-            <option value="description">Description</option>
-            <option value="template">Template</option>
-            <option value="sample">Sample</option>
-            <option value="notes">Notes</option>
-          </select>
-          <textarea className="crm-input min-h-24" value={refText} onChange={(e) => setRefText(e.target.value)} placeholder="Paste reusable type guidance, a template, or an example" />
-          <input className="text-xs" type="file" accept=".pdf,.txt,.md,.csv,.json,.html,application/pdf,text/plain,text/markdown,text/csv,application/json,text/html" onChange={(e) => setRefFile(e.target.files?.[0] ?? null)} />
-          <button className="crm-button-secondary w-full" type="button" disabled={busy === "reference" || !selectedTypeId || (!refText.trim() && !refFile)} onClick={addReference}>
-            Add reference
-          </button>
-          <div className="space-y-2 max-h-48 overflow-auto">
-            {references.map((r) => (
-              <div key={r.id} className="rounded-md border border-zinc-200 p-2 text-xs">
-                <p className="font-medium text-zinc-700">{r.kind}{r.filename ? ` - ${r.filename}` : ""}</p>
-                <p className="text-zinc-500 whitespace-pre-wrap max-h-10 overflow-hidden">{r.content}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-      </aside>
-
-      <main className="space-y-4">
-        <section className="rounded-lg border border-zinc-200 bg-white p-4 space-y-3">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Step 3</p>
-            <h1 className="text-lg font-semibold text-zinc-900">Generate one document</h1>
-            <p className="text-xs text-zinc-500">
-              This prompt is for the specific document you need now. The selected type supplies the reusable format and reference examples.
-            </p>
-          </div>
-          {selectedType ? (
-            <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600">
-              Using type: <span className="font-medium text-zinc-900">{selectedType.name}</span> - Output:{" "}
-              <span className="font-medium text-zinc-900">{selectedType.output_format.toUpperCase()}</span>
+            <div>
+              <h1 className="text-lg font-semibold tracking-tight text-zinc-950">Documents</h1>
+              <p className="text-sm text-zinc-500">Reusable document types, references, and generation workflow.</p>
             </div>
-          ) : (
-            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-              Choose or create a document type first.
-            </div>
-          )}
-          <select className="crm-input" value={selectedDealId} onChange={(e) => setSelectedDealId(e.target.value)}>
-            <option value="">No company selected</option>
-            {deals.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
-          <textarea className="crm-input min-h-28" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Specific request for this document, e.g. Draft the memo for Acme focused on enterprise traction and founder-market fit." />
-          <div className="flex flex-wrap gap-2">
-            <button className="crm-button-secondary" type="button" disabled={!selectedTypeId || !prompt.trim() || busy === "preflight"} onClick={runPreflight}>
-              Check info and suggest research
-            </button>
-            <button className="crm-button" type="button" disabled={!selectedTypeId || !prompt.trim() || busy === "generate"} onClick={() => generate(false)}>
-              {busy === "generate" ? "Generating..." : "Generate"}
-            </button>
           </div>
-          {message ? <p className="text-sm text-emerald-700">{message}</p> : null}
-          {error ? <p className="text-sm text-rose-700">{error}</p> : null}
-        </section>
+          <div className="grid grid-cols-3 gap-2 sm:w-[420px]">
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">Types</p>
+              <p className="text-sm font-semibold text-zinc-950">{types.length}</p>
+            </div>
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">References</p>
+              <p className="text-sm font-semibold text-zinc-950">{references.length}</p>
+            </div>
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">Output</p>
+              <p className="text-sm font-semibold text-zinc-950">{formatOutputFormat(selectedType?.output_format)}</p>
+            </div>
+          </div>
+        </div>
+      </div>
 
-        {preflight && !preflight.enoughInfo ? (
-          <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-amber-950">Research recommended</h2>
-            <p className="text-sm text-amber-900">{preflight.rationale}</p>
-            {preflight.missingInfo.length ? (
-              <div className="grid gap-2 md:grid-cols-2">
-                {preflight.missingInfo.map((m, i) => (
-                  <div key={`${m.field}_${i}`} className="rounded-md border border-amber-200 bg-white/70 p-2 text-xs">
-                    <p className="font-medium text-zinc-800">{m.field} ({m.importance})</p>
-                    <p className="text-zinc-500">{m.reason}</p>
-                  </div>
-                ))}
+      <div className="grid gap-5 lg:grid-cols-[360px_1fr]">
+        <aside className="space-y-4">
+          <section className="crm-panel p-4">
+            <p className="crm-kicker">Document type</p>
+            <h2 className="mt-1 text-sm font-semibold text-zinc-950">Saved recipe</h2>
+            <SelectBox wrapperClassName="mt-3" value={selectedTypeId} onChange={(e) => setSelectedTypeId(e.target.value)}>
+              <option value="">Choose a type</option>
+              {types.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name} ({formatOutputFormat(t.output_format)})
+                </option>
+              ))}
+            </SelectBox>
+            {selectedType ? (
+              <div className="mt-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600">
+                <p className="font-semibold text-zinc-900">{selectedType.name}</p>
+                <p className="mt-1">{selectedType.description || "No description yet."}</p>
+                {selectedType.learned_preferences ? <p className="mt-2 whitespace-pre-wrap border-t border-zinc-200 pt-2">{selectedType.learned_preferences}</p> : null}
               </div>
             ) : null}
-            <div className="grid gap-2 md:grid-cols-2">
-              {preflight.researchSteps.map((s, i) => (
-                <div key={`${s.task}_${i}`} className="rounded-md border border-amber-200 bg-white/70 p-2 text-xs">
-                  <p className="font-medium text-zinc-800">{s.task}</p>
-                  <p className="text-zinc-500">{s.sourceHint} - {s.reason}</p>
-                </div>
-              ))}
-            </div>
-            <button className="crm-button-secondary" type="button" onClick={() => generate(true)}>
-              Generate anyway
-            </button>
           </section>
-        ) : null}
 
-        {draft ? (
-          <section className="rounded-lg border border-zinc-200 bg-white p-4 space-y-3">
-            <div>
-              <h2 className="text-base font-semibold text-zinc-900">{draft.title}</h2>
-              {selectedType ? <p className="text-xs text-zinc-500">Preview for {selectedType.output_format.toUpperCase()} output.</p> : null}
-            </div>
-            <div className="rounded-md border border-zinc-200 bg-zinc-50 p-4 text-sm whitespace-pre-wrap font-mono leading-relaxed max-h-[640px] overflow-auto">
-              {draft.content}
-            </div>
-            <div className="grid gap-2">
-              <textarea className="crm-input min-h-20" value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="Ask for changes. Reusable style/structure feedback may be saved to this document type." />
-              <button className="crm-button-secondary w-fit" type="button" disabled={!revision.trim() || busy === "revision"} onClick={revise}>
-                {busy === "revision" ? "Revising..." : "Revise draft"}
+          <section className="crm-panel p-4">
+            <p className="crm-kicker">Create type</p>
+            <div className="mt-3 space-y-2">
+              <input className="crm-input" value={newTypeName} onChange={(e) => setNewTypeName(e.target.value)} placeholder="Type name, e.g. IC memo" />
+              <SelectBox value={newTypeFormat} onChange={(e) => setNewTypeFormat(e.target.value as DocType["output_format"])}>
+                <option value="docx">Word document</option>
+                <option value="pdf">PDF</option>
+                <option value="text">Plain text</option>
+              </SelectBox>
+              <textarea className="crm-input min-h-20" value={newTypeDescription} onChange={(e) => setNewTypeDescription(e.target.value)} placeholder="When should this type be used?" />
+              <textarea className="crm-input min-h-24" value={newTypeInstructions} onChange={(e) => setNewTypeInstructions(e.target.value)} placeholder="Reusable rules: sections, tone, length, formatting" />
+              <button className="crm-button w-full" type="button" disabled={busy === "type" || !newTypeName.trim()} onClick={createType}>
+                {busy === "type" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Save type
               </button>
             </div>
           </section>
-        ) : null}
-      </main>
+
+          <section className="crm-panel p-4">
+            <p className="crm-kicker">References</p>
+            <p className="mt-1 text-xs text-zinc-500">Reusable examples or instructions for the selected type.</p>
+            <div className="mt-3 space-y-2">
+              <SelectBox value={refKind} onChange={(e) => setRefKind(e.target.value)}>
+                <option value="description">Description</option>
+                <option value="template">Template</option>
+                <option value="sample">Sample</option>
+                <option value="notes">Notes</option>
+              </SelectBox>
+              <textarea className="crm-input min-h-24" value={refText} onChange={(e) => setRefText(e.target.value)} placeholder="Paste reusable type guidance, a template, or an example" />
+              <label className="crm-button-secondary w-full cursor-pointer">
+                <UploadCloud className="h-4 w-4" />
+                <span className="truncate">{refFile ? refFile.name : "Upload reference"}</span>
+                <input className="hidden" type="file" accept=".pdf,.txt,.md,.csv,.json,.html,application/pdf,text/plain,text/markdown,text/csv,application/json,text/html" onChange={(e) => setRefFile(e.target.files?.[0] ?? null)} />
+              </label>
+              <button className="crm-button-secondary w-full" type="button" disabled={busy === "reference" || !selectedTypeId || (!refText.trim() && !refFile)} onClick={addReference}>
+                Add reference
+              </button>
+            </div>
+            <div className="mt-3 max-h-48 space-y-2 overflow-auto">
+              {references.map((r) => (
+                <div key={r.id} className="rounded-xl border border-zinc-200 bg-white p-2 text-xs">
+                  <p className="font-medium text-zinc-800">{r.kind}{r.filename ? ` / ${r.filename}` : ""}</p>
+                  <p className="mt-1 max-h-10 overflow-hidden whitespace-pre-wrap text-zinc-500">{r.content}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        </aside>
+
+        <main className="space-y-4">
+          <section className="crm-panel p-5">
+            <div className="flex flex-col gap-3 border-b border-zinc-100 pb-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="crm-kicker">Generate</p>
+                <h2 className="mt-1 text-base font-semibold text-zinc-950">One document</h2>
+                <p className="mt-1 text-sm text-zinc-500">The type controls format and structure; the prompt is for this specific deliverable.</p>
+              </div>
+              {selectedType ? (
+                <span className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs font-medium text-zinc-700">
+                  {selectedType.name} / {formatOutputFormat(selectedType.output_format)}
+                </span>
+              ) : null}
+            </div>
+            <div className="mt-4 space-y-3">
+              <SelectBox value={selectedDealId} onChange={(e) => setSelectedDealId(e.target.value)}>
+                <option value="">No company selected</option>
+                {deals.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </SelectBox>
+              <textarea className="crm-input min-h-32" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Specific request, e.g. Draft the memo for Acme focused on enterprise traction and founder-market fit." />
+              <div className="flex flex-wrap gap-2">
+                <button className="crm-button-secondary" type="button" disabled={!selectedTypeId || !prompt.trim() || busy === "preflight"} onClick={runPreflight}>
+                  {busy === "preflight" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                  Check info
+                </button>
+                <button className="crm-button" type="button" disabled={!selectedTypeId || !prompt.trim() || busy === "generate"} onClick={() => generate(false)}>
+                  {busy === "generate" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+                  Generate
+                </button>
+              </div>
+              {message ? <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{message}</p> : null}
+              {error ? <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
+            </div>
+          </section>
+
+          {preflight && !preflight.enoughInfo ? (
+            <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <div className="flex items-center gap-2">
+                <Search className="h-4 w-4 text-amber-800" />
+                <h2 className="text-sm font-semibold text-amber-950">Research recommended</h2>
+              </div>
+              <p className="mt-2 text-sm text-amber-900">{preflight.rationale}</p>
+              {preflight.missingInfo.length ? (
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {preflight.missingInfo.map((m, i) => (
+                    <div key={`${m.field}_${i}`} className="rounded-xl border border-amber-200 bg-white/80 p-2 text-xs">
+                      <p className="font-medium text-zinc-800">{m.field} ({m.importance})</p>
+                      <p className="mt-1 text-zinc-500">{m.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {preflight.researchSteps.map((s, i) => (
+                  <div key={`${s.task}_${i}`} className="rounded-xl border border-amber-200 bg-white/80 p-2 text-xs">
+                    <p className="font-medium text-zinc-800">{s.task}</p>
+                    <p className="mt-1 text-zinc-500">{s.sourceHint} / {s.reason}</p>
+                  </div>
+                ))}
+              </div>
+              <button className="crm-button-secondary mt-3" type="button" onClick={() => generate(true)}>
+                Generate anyway
+              </button>
+            </section>
+          ) : null}
+
+          {draft ? (
+            <section className="crm-panel p-5">
+              <div className="flex flex-col gap-3 border-b border-zinc-100 pb-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                    <h2 className="text-base font-semibold text-zinc-950">{draft.title}</h2>
+                  </div>
+                  {selectedType ? <p className="mt-1 text-xs text-zinc-500">Preview for {formatOutputFormat(selectedType.output_format)} output.</p> : null}
+                </div>
+                <a className="crm-button-secondary" href={`/home/generated-documents/${draft.id}`} target="_blank" rel="noreferrer">
+                  Open document
+                </a>
+              </div>
+              <div className="mt-4 max-h-[640px] overflow-auto rounded-xl border border-zinc-200 bg-zinc-50 p-4 font-mono text-sm leading-relaxed text-zinc-900 whitespace-pre-wrap">
+                {draft.content}
+              </div>
+              <div className="mt-3 grid gap-2">
+                <textarea className="crm-input min-h-20" value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="Ask for changes. Reusable feedback can be saved to this document type." />
+                <button className="crm-button-secondary w-fit" type="button" disabled={!revision.trim() || busy === "revision"} onClick={revise}>
+                  {busy === "revision" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  Revise draft
+                </button>
+              </div>
+            </section>
+          ) : null}
+        </main>
+      </div>
     </div>
   );
 }

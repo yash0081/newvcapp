@@ -36,14 +36,14 @@ export function NewCompanyForm() {
 
   return (
     <div className="space-y-2">
-      <form onSubmit={onSubmit} className="flex flex-col md:flex-row gap-2 md:items-end">
+      <form onSubmit={onSubmit} className="flex flex-col gap-2 md:flex-row md:items-end">
         <div className="flex-1 min-w-0">
           <label className="block text-xs text-zinc-600 mb-1">Name</label>
-          <input name="company_name" required className="crm-input" placeholder="Acme AI" />
+          <input name="company_name" required className="crm-input h-9" placeholder="Acme AI" />
         </div>
         <div className="flex-1 min-w-0">
           <label className="block text-xs text-zinc-600 mb-1">Website (optional)</label>
-          <input name="website" className="crm-input" placeholder="https://acme.com" />
+          <input name="website" className="crm-input h-9" placeholder="https://acme.com" />
         </div>
         <div className="w-full md:w-44">
           <label className="block text-xs text-zinc-600 mb-1">Stage</label>
@@ -57,4 +57,3 @@ export function NewCompanyForm() {
     </div>
   );
 }
-

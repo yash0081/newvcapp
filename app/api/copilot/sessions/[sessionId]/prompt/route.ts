@@ -151,8 +151,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       NextResponse.json({
         ok: true,
         suggestions: [],
-        reason: "no_screen_context",
-        message: "I don't have a recent screen capture. Start watching a tab and try again.",
+        reason: "no_page_context",
+        message: "I don't have a recent page snapshot. Open the copilot extension on the page and try again.",
       }),
     );
   }

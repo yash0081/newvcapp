@@ -348,7 +348,7 @@ export async function DealContentsDebug({
   }
 
   return (
-    <details className="rounded-md border border-zinc-200 bg-white">
+    <details className="rounded-xl border border-zinc-200 bg-white">
       <summary className="cursor-pointer select-none px-3 py-2 text-sm text-zinc-700">
         Inspect deal contents (facts view)
       </summary>

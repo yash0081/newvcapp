@@ -701,7 +701,7 @@ function MemoFormattedCardBody(props: { body: string }) {
         }
         if (seg.kind === "followup") {
           return (
-            <div key={idx} className="rounded-lg border border-amber-100 bg-amber-50/60 px-3 py-2">
+            <div key={idx} className="rounded-2xl border border-amber-100 bg-amber-50/60 px-3 py-2">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-950/80">Follow-up</p>
               <p className="mt-1 text-[13px] text-zinc-900 leading-snug">{seg.text}</p>
             </div>
@@ -1011,7 +1011,7 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
                   </div>
                 ) : null}
                 {autoSummary && !summaryDupedInBody ? (
-                  <div className="mt-2 rounded-lg border border-zinc-100 bg-white px-3 py-2">
+                  <div className="mt-2 rounded-2xl border border-zinc-100 bg-white px-3 py-2">
                     <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Deal check</p>
                     <p className="mt-1 font-sans text-[13px] leading-snug text-zinc-700">{formatAssistantPipeLists(autoSummary)}</p>
                   </div>

@@ -19,7 +19,7 @@ export function SignOutButton({ className }: { className?: string }) {
       onClick={signOut}
       className={
         className ??
-        "mt-4 px-6 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-colors"
+        "mt-4 px-6 py-2 rounded-2xl border border-gray-300 hover:bg-gray-50 transition-colors"
       }
     >
       Sign out

@@ -5,6 +5,11 @@ import { retrieveContextNodesForQuery, type ContextChunk } from "@/lib/retrieval
 import { vectorParam } from "@/lib/data-layer/shared/vector";
 import { embedText } from "@/lib/vertex-embeddings";
 import { vertexRunWithText } from "@/lib/vertex";
+import { fetchSimilarDealsFromDealId } from "@/lib/similar-deals/fetch-from-deal";
+import { fetchSimilarDealsHybrid } from "@/lib/similar-deals/fetch-hybrid";
+import type { SimilarPeerForPrompt } from "@/lib/similar-deals/types";
+import { loadAggregatedRulesForUser } from "@/lib/investment-rules";
+import { listCustomWorkflowDefinitions, type CustomWorkflowDefinition } from "@/lib/custom-workflows";
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -51,6 +56,15 @@ export type ChatAction =
       updates: PlannedUpdate[];
     }
   | {
+      type: "propose_custom_workflow";
+      label: string;
+      workflowId: string;
+      workflowName: string;
+      dealId: string | null;
+      dealName: string | null;
+      input: string;
+    }
+  | {
       type: "record_update";
       label: string;
       detail: string;
@@ -60,6 +74,26 @@ export type ChatCitation = {
   label: string;
   href?: string;
   snippet: string;
+};
+
+export type ChatToolPermissions = {
+  generateDocuments: boolean;
+  runResearch: boolean;
+  editRecords: boolean;
+  createCompanies: boolean;
+  useSimilarCompanySearch: boolean;
+  useCriteriaAnalysis: boolean;
+  runWorkflows: boolean;
+};
+
+export const DEFAULT_CHAT_TOOL_PERMISSIONS: ChatToolPermissions = {
+  generateDocuments: true,
+  runResearch: true,
+  editRecords: true,
+  createCompanies: true,
+  useSimilarCompanySearch: true,
+  useCriteriaAnalysis: true,
+  runWorkflows: true,
 };
 
 type DealRow = {
@@ -105,18 +139,40 @@ export type PlannedUpdate = {
   value: string;
 };
 
-type ChatIntentPlan = {
-  intent: "answer" | "open_document" | "update_records" | "mixed";
+type ChatRoutePlan = {
+  chatTask: "similar_deal" | "filtering" | "deep_reasoning" | "why" | "questions";
+  scope: "focused_company" | "workspace" | "cross_company";
+  answerPersonal: boolean;
+  targetDealIds: string[];
+  openDocumentQuery: string | null;
+  createCompany: {
+    company_name: string;
+    website: string | null;
+    crm_stage: "screened" | "in_process" | "invested" | "passed";
+  } | null;
   updates: PlannedUpdate[];
-  document_query: string | null;
-};
-
-type ToolProposalPlan = {
-  wantsDocument: boolean;
-  wantsResearch: boolean;
-  documentPrompt: string;
-  documentTypeHint: string | null;
-  researchFocus: string;
+  generateDocument: {
+    enabled: boolean;
+    prompt: string;
+    typeHint: string | null;
+  };
+  runResearch: {
+    enabled: boolean;
+    focus: string;
+    when: "now" | "if_missing_info";
+  };
+  customWorkflow: {
+    enabled: boolean;
+    workflowId: string | null;
+    input: string;
+  };
+  quickLookup: {
+    enabled: boolean;
+    query: string;
+  };
+  useSimilarCompanies: boolean;
+  useCriteria: boolean;
+  missingInfoBehavior: "answer_unknown" | "research" | "ask_clarifying";
 };
 
 const UPDATE_TARGETS: UpdateTarget[] = [
@@ -148,6 +204,78 @@ function companyName(deal: DealRow): string {
 
 function normalizeText(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function cleanAssistantResponse(text: string): string {
+  return text
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/__([^_\n]+)__/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*•]\s+/gm, "")
+    .replace(/\s+\*\s+/g, " ")
+    .trim();
+}
+
+function titleCaseName(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function extractUserNameFromText(text: string): string | null {
+  const candidates = [
+    /\bmy name is\s+([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\b/i,
+    /\byou can call me\s+([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\b/i,
+    /\bi am\s+([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\b/i,
+    /\bi'm\s+([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\b/i,
+  ];
+  const blocked = new Set([
+    "asking",
+    "curious",
+    "looking",
+    "not",
+    "trying",
+    "the",
+    "working",
+  ]);
+  for (const pattern of candidates) {
+    const match = text.match(pattern);
+    const raw = match?.[1]?.trim();
+    if (!raw) continue;
+    const normalized = normalizeText(raw);
+    if (!normalized || blocked.has(normalized.split(" ")[0])) continue;
+    return titleCaseName(raw);
+  }
+  return null;
+}
+
+function inferUserNameFromHistory(history: ChatMessage[]): string | null {
+  for (const item of [...history].reverse()) {
+    if (item.role !== "user") continue;
+    const name = extractUserNameFromText(item.content);
+    if (name) return name;
+  }
+  return null;
+}
+
+function answerPersonalUserQuestion(message: string, history: ChatMessage[]): string | null {
+  const q = normalizeText(message);
+  const asksName =
+    q.includes("what is my name") ||
+    q.includes("whats my name") ||
+    q.includes("what s my name") ||
+    q.includes("do you know my name") ||
+    q.includes("remember my name");
+  const asksIdentity = q === "who am i" || q.includes("who am i ") || q.includes("what do you know about me");
+  if (!asksName && !asksIdentity) return null;
+
+  const name = inferUserNameFromHistory(history);
+  if (name && asksName) return `You told me your name is ${name}.`;
+  if (name) return `You are ${name}, the person using this VC workspace.`;
+  return "I don't know your name yet. I can see your workspace data, but I should not infer your identity from people mentioned inside company records.";
 }
 
 function hrefForDocument(documentId: string, sourceKind?: string | null): string {
@@ -357,191 +485,259 @@ async function loadDealSnapshot(admin: SupabaseClient, dealId: string | null): P
   };
 }
 
-async function planChatIntent(message: string): Promise<ChatIntentPlan> {
-  const prompt = `Classify the user's workspace chat request and extract safe tool actions.
-
-Return strict JSON only:
-{
-  "intent": "answer" | "open_document" | "update_records" | "mixed",
-  "document_query": string | null,
-  "updates": [
-    { "target": ${UPDATE_TARGETS.map((x) => `"${x}"`).join(" | ")}, "value": string }
-  ]
+function parseRouteUpdates(raw: unknown): PlannedUpdate[] {
+  if (!Array.isArray(raw)) return [];
+  const updates: PlannedUpdate[] = [];
+  for (const u of raw) {
+    const o = u && typeof u === "object" ? (u as Record<string, unknown>) : {};
+    const target = String(o.target ?? "") as UpdateTarget;
+    const value = typeof o.value === "string" ? o.value.trim() : "";
+    if (!UPDATE_TARGETS.includes(target) || !value) continue;
+    if (target === "deal.crm_stage" && !STAGES.has(value)) continue;
+    updates.push({ target, value: value.slice(0, 1200) });
+    if (updates.length >= 8) break;
+  }
+  return updates;
 }
 
-Rules:
-- Extract updates only when the user explicitly asks to update/set/change/add/save a record or says new info should be recorded.
-- Do not infer updates from ordinary questions.
-- For crm_stage, value must be one of screened, in_process, invested, passed.
-- If the user asks to open/show/view a document, set document_query to the title/description they gave.
-- If no tool is needed, intent is "answer" and updates is [].
+function asRouteTask(value: unknown): ChatRoutePlan["chatTask"] {
+  const v = typeof value === "string" ? value : "";
+  return v === "similar_deal" || v === "filtering" || v === "deep_reasoning" || v === "why" || v === "questions"
+    ? v
+    : "deep_reasoning";
+}
 
-User message:
-${message.slice(0, 4000)}`;
-  try {
-    const raw = await vertexRunWithText(process.env.GEMINI_MODEL_FLASH_LITE || "gemini-2.5-flash-lite", prompt, false);
-    const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw))) as Record<string, unknown> | null;
-    const intentRaw = String(parsed?.intent ?? "answer");
-    const intent = ["answer", "open_document", "update_records", "mixed"].includes(intentRaw)
-      ? (intentRaw as ChatIntentPlan["intent"])
-      : "answer";
-    const updatesRaw = Array.isArray(parsed?.updates) ? parsed.updates : [];
-    const updates: PlannedUpdate[] = [];
-    for (const u of updatesRaw) {
-      const o = u && typeof u === "object" ? (u as Record<string, unknown>) : {};
-      const target = String(o.target ?? "") as UpdateTarget;
-      const value = typeof o.value === "string" ? o.value.trim() : "";
-      if (!UPDATE_TARGETS.includes(target) || !value) continue;
-      if (target === "deal.crm_stage" && !STAGES.has(value)) continue;
-      updates.push({ target, value: value.slice(0, 1200) });
-      if (updates.length >= 5) break;
+function targetDealsFromPlan(
+  allDeals: Array<{ id: string; name: string }>,
+  focusDeal: DealRow | null,
+  rawIds: unknown,
+): string[] {
+  const allowed = new Set(allDeals.map((d) => d.id));
+  const out = new Set<string>();
+  if (Array.isArray(rawIds)) {
+    for (const id of rawIds) {
+      if (typeof id === "string" && allowed.has(id)) out.add(id);
     }
-    return {
-      intent,
-      updates,
-      document_query: typeof parsed?.document_query === "string" && parsed.document_query.trim()
-        ? parsed.document_query.trim().slice(0, 300)
-        : null,
-    };
-  } catch {
-    const lower = message.toLowerCase();
-    const wantsDoc = /\b(open|show|view)\b.*\b(doc|deck|pdf|document|file)\b/.test(lower);
-    return { intent: wantsDoc ? "open_document" : "answer", updates: [], document_query: wantsDoc ? message : null };
   }
+  if (!out.size && focusDeal?.id) out.add(focusDeal.id);
+  return [...out].slice(0, 8);
 }
 
-async function planToolProposals(message: string): Promise<ToolProposalPlan> {
-  const prompt = `Classify whether the user is asking the workspace chat assistant to prepare a document generation run or a research planning run.
-
-Return strict JSON only:
-{
-  "wantsDocument": boolean,
-  "wantsResearch": boolean,
-  "documentPrompt": string,
-  "documentTypeHint": string | null,
-  "researchFocus": string
-}
-
-Rules:
-- wantsDocument is true only if the user wants to create, draft, write, generate, or make a report, memo, document, brief, analysis, profile, or similar deliverable.
-- documentPrompt should be the user's requested document, preserving important details.
-- documentTypeHint is a short phrase for the desired reusable document type when one is implied, such as "competitor analysis report" or "investment memo"; otherwise null.
-- wantsResearch is true when the user asks to research, investigate, look into, find, verify, or gather information.
-- researchFocus should be a concise description of what research should focus on. If the user asks for a document and research is only incidental, wantsResearch should be false.
-- Do not classify ordinary questions as tool requests.
-
-User message:
-${message.slice(0, 4000)}`;
-  try {
-    const raw = await vertexRunWithText(process.env.GEMINI_MODEL_FLASH_LITE || "gemini-2.5-flash-lite", prompt, false);
-    const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw))) as Record<string, unknown> | null;
-    return {
-      wantsDocument: parsed?.wantsDocument === true,
-      wantsResearch: parsed?.wantsResearch === true,
-      documentPrompt:
-        typeof parsed?.documentPrompt === "string" && parsed.documentPrompt.trim()
-          ? parsed.documentPrompt.trim().slice(0, 2000)
-          : message,
-      documentTypeHint:
-        typeof parsed?.documentTypeHint === "string" && parsed.documentTypeHint.trim()
-          ? parsed.documentTypeHint.trim().slice(0, 160)
-          : null,
-      researchFocus:
-        typeof parsed?.researchFocus === "string" && parsed.researchFocus.trim()
-          ? parsed.researchFocus.trim().slice(0, 600)
-          : message.slice(0, 600),
-    };
-  } catch {
-    const lower = message.toLowerCase();
-    const wantsDocument =
-      /\b(make|create|draft|generate|write|prepare)\b/.test(lower) &&
-      /\b(report|memo|document|doc|brief|analysis|profile|writeup)\b/.test(lower);
-    const wantsResearch = /\b(research|investigate|look into|find out|verify|gather)\b/.test(lower);
-    return {
-      wantsDocument,
-      wantsResearch: wantsResearch && !wantsDocument,
-      documentPrompt: message.slice(0, 2000),
-      documentTypeHint: wantsDocument ? message.slice(0, 160) : null,
-      researchFocus: message.slice(0, 600),
-    };
-  }
-}
-
-function buildToolActions(args: {
+function fallbackRoutePlan(args: {
   message: string;
-  toolPlan: ToolProposalPlan;
   focusDeal: DealRow | null;
-  requestedDealId: string | null;
+  allDeals: Array<{ id: string; name: string }>;
+  chatTask: ChatRoutePlan["chatTask"];
+}): ChatRoutePlan {
+  const matchedDeals = matchDealsFromMessage(args.allDeals, args.message);
+  const targetDealIds = args.focusDeal?.id
+    ? [args.focusDeal.id]
+    : matchedDeals.map((d) => d.id).slice(0, 4);
+  return {
+    chatTask: args.chatTask,
+    scope: args.focusDeal ? "focused_company" : targetDealIds.length > 1 ? "cross_company" : "workspace",
+    answerPersonal: false,
+    targetDealIds,
+    openDocumentQuery: null,
+    createCompany: null,
+    updates: [],
+    generateDocument: { enabled: false, prompt: args.message, typeHint: null },
+    runResearch: { enabled: false, focus: args.message, when: "now" },
+    customWorkflow: { enabled: false, workflowId: null, input: args.message },
+    quickLookup: { enabled: false, query: args.message },
+    useSimilarCompanies: args.chatTask === "similar_deal",
+    useCriteria: false,
+    missingInfoBehavior: "answer_unknown",
+  };
+}
+
+async function planSmartChatRoute(args: {
+  message: string;
+  history: ChatMessage[];
+  focusDeal: DealRow | null;
   allDeals: Array<{ id: string; name: string }>;
   docTypes: DocumentTypeSummary[];
-}): { actions: ChatAction[]; notes: string[]; inferredDealId: string | null } {
-  const actions: ChatAction[] = [];
-  const notes: string[] = [];
-  const matchedDeals = matchDealsFromMessage(args.allDeals, args.message);
-  const selectedDeal = args.focusDeal
-    ? { id: args.focusDeal.id, name: companyName(args.focusDeal) }
-    : args.requestedDealId
-      ? args.allDeals.find((d) => d.id === args.requestedDealId) ?? null
+  customWorkflows: CustomWorkflowDefinition[];
+  permissions: ChatToolPermissions;
+  fallbackTask: ChatRoutePlan["chatTask"];
+}): Promise<ChatRoutePlan> {
+  const focusName = args.focusDeal ? companyName(args.focusDeal) : null;
+  const prompt = `You are the tool router for a VC workspace chat assistant.
+
+Return strict JSON only:
+{
+  "chatTask": "filtering" | "similar_deal" | "deep_reasoning" | "why" | "questions",
+  "scope": "focused_company" | "workspace" | "cross_company",
+  "answerPersonal": boolean,
+  "targetDealIds": string[],
+  "openDocumentQuery": string | null,
+  "createCompany": { "company_name": string, "website": string | null, "crm_stage": "screened" | "in_process" | "invested" | "passed" } | null,
+  "updates": [{ "target": ${UPDATE_TARGETS.map((x) => `"${x}"`).join(" | ")}, "value": string }],
+  "generateDocument": { "enabled": boolean, "prompt": string, "typeHint": string | null },
+  "runResearch": { "enabled": boolean, "focus": string, "when": "now" | "if_missing_info" },
+  "customWorkflow": { "enabled": boolean, "workflowId": string | null, "input": string },
+  "quickLookup": { "enabled": boolean, "query": string },
+  "useSimilarCompanies": boolean,
+  "useCriteria": boolean,
+  "missingInfoBehavior": "answer_unknown" | "research" | "ask_clarifying"
+}
+
+Reasoning rules:
+- Prefer the focused company when one is selected. Use cross_company only when the user explicitly asks for comps, competitors, comparisons, benchmarks, portfolio-wide views, or multiple named companies.
+- If the user asks about "my name", "me", or who they are, set answerPersonal true and do not use company context.
+- Use targetDealIds only from the provided deal list. If a selected company exists and the request does not clearly name another company or ask cross-company work, include only that selected deal id.
+- Use openDocumentQuery when the user asks to open, show, view, or find saved documents/files/decks.
+- Use updates only when the user explicitly asks to save, update, edit, record, change, or add facts to a company record.
+- Use createCompany only when the user explicitly asks to add/create/save a new company and gives a concrete company name.
+- Use generateDocument when the user wants a memo, report, brief, analysis document, email, or other generated deliverable.
+- Use quickLookup for one-off factual/current-public-web questions that likely need only one search, such as current CEO, latest funding round, headquarters, recent news, a single metric, or a simple verification. quickLookup answers directly; it does not create a research workflow.
+- Use runResearch for broader or multi-step diligence, such as building a research plan, funding history, competitor landscape, customer evidence, founder background, market sizing, or any task that needs several searches/sources/subquestions. Use when="if_missing_info" only when the saved focused-company context may be insufficient and a fuller workflow is the right next step.
+- Use customWorkflow when the user asks to run a saved/reusable workflow, playbook, process, or their request clearly matches a workflow trigger/description. Choose exactly one workflow id from Available workflows. This workflow will run automatically.
+- Do not set both quickLookup and runResearch unless the user asks for a direct answer now plus deeper follow-up research.
+- Do not set customWorkflow together with generateDocument or runResearch unless the workflow itself is not a fit and the user separately asks for another tool.
+- Use useSimilarCompanies for similar companies, comps, peers, comparables, or competitor benchmarking.
+- Use useCriteria for thesis fit, uploaded criteria, investment evaluation, scoring, pass/invest reasoning, or criteria-based analysis.
+- Respect disabled permissions by setting the related tool field false/null.
+- If no tool is needed, leave tools disabled and answer from context.
+
+Permissions:
+${JSON.stringify(args.permissions)}
+
+Focused company:
+${focusName ? `${focusName} (${args.focusDeal!.id})` : "(none)"}
+
+Available deals:
+${args.allDeals.map((d) => `- ${d.name} (${d.id})`).join("\n").slice(0, 6000) || "(none)"}
+
+Document types:
+${args.docTypes.map((d) => `- ${d.name} (${d.id}) format=${d.output_format ?? "unknown"} description=${d.description ?? ""}`).join("\n").slice(0, 4000) || "(none)"}
+
+Available workflows:
+${args.customWorkflows.map((w) => {
+  const steps = w.steps.map((s, i) => `${i + 1}. ${s.type}: ${s.title}`).join("; ");
+  return `- ${w.name} (${w.id}) description=${w.description || ""} trigger=${w.trigger_hint || ""} steps=${steps}`;
+}).join("\n").slice(0, 5000) || "(none)"}
+
+Recent chat:
+${args.history.slice(-6).map((m) => `${m.role}: ${m.content.slice(0, 500)}`).join("\n") || "(none)"}
+
+User message:
+${args.message.slice(0, 4000)}`;
+
+  try {
+    const raw = await vertexRunWithText(process.env.GEMINI_MODEL_FLASH_LITE || "gemini-2.5-flash-lite", prompt, false);
+    const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw))) as Record<string, unknown> | null;
+    const scopeRaw = typeof parsed?.scope === "string" ? parsed.scope : "";
+    const scope: ChatRoutePlan["scope"] =
+      scopeRaw === "focused_company" || scopeRaw === "workspace" || scopeRaw === "cross_company"
+        ? scopeRaw
+        : args.focusDeal
+          ? "focused_company"
+          : "workspace";
+    const createRaw = parsed?.createCompany && typeof parsed.createCompany === "object"
+      ? parsed.createCompany as Record<string, unknown>
       : null;
-  const targetDeals = selectedDeal ? [selectedDeal] : matchedDeals;
-  const inferredDealId = selectedDeal?.id ?? (matchedDeals.length === 1 ? matchedDeals[0]?.id ?? null : null);
-
-  if (args.toolPlan.wantsDocument) {
-    const pickedType = pickDocumentType(args.docTypes, args.message, args.toolPlan.documentTypeHint);
-    if (!pickedType) {
-      notes.push(
-        args.docTypes.length
-          ? "I can generate this, but I am not confident which saved document type to use. Pick one or tell me to make whatever."
-          : "I do not see a saved document type yet. You can open the generator to add a template, or tell me to make whatever and create a reusable type first.",
-      );
-      actions.push({
-        type: "open_link",
-        label: "Open document generator",
-        href: inferredDealId ? `/home/document-generator?dealId=${inferredDealId}` : "/home/document-generator",
-        detail: "Set up or choose the document type before generation.",
-      });
-    } else if (!inferredDealId && documentLikelyNeedsCompany(pickedType, args.message)) {
-      notes.push(`I found the "${pickedType.name}" document type, but I need to know which company to use before generating it.`);
-    } else {
-      const docPrompt = targetDeals[0]?.name
-        ? `Draft a ${pickedType.name} for ${targetDeals[0].name}.\n\nUser request: ${args.message}`
-        : args.message;
-      actions.push({
-        type: "propose_generate_document",
-        label: `Generate ${pickedType.name}`,
-        prompt: docPrompt,
-        dealId: inferredDealId,
-        dealName: targetDeals[0]?.name ?? null,
-        typeId: pickedType.id,
-        typeName: pickedType.name,
-        outputFormat: pickedType.output_format || "markdown",
-      });
-      notes.push(
-        `I found a likely document type: ${pickedType.name}${targetDeals[0]?.name ? ` for ${targetDeals[0].name}` : ""}.`,
-      );
-    }
+    const companyNameRaw = typeof createRaw?.company_name === "string" ? createRaw.company_name.trim().slice(0, 160) : "";
+    const stageRaw = typeof createRaw?.crm_stage === "string" ? createRaw.crm_stage : "screened";
+    const crmStage = STAGES.has(stageRaw) ? stageRaw as "screened" | "in_process" | "invested" | "passed" : "screened";
+    const generateRaw = parsed?.generateDocument && typeof parsed.generateDocument === "object"
+      ? parsed.generateDocument as Record<string, unknown>
+      : {};
+    const researchRaw = parsed?.runResearch && typeof parsed.runResearch === "object"
+      ? parsed.runResearch as Record<string, unknown>
+      : {};
+    const workflowRaw = parsed?.customWorkflow && typeof parsed.customWorkflow === "object"
+      ? parsed.customWorkflow as Record<string, unknown>
+      : {};
+    const lookupRaw = parsed?.quickLookup && typeof parsed.quickLookup === "object"
+      ? parsed.quickLookup as Record<string, unknown>
+      : {};
+    const missingRaw = typeof parsed?.missingInfoBehavior === "string" ? parsed.missingInfoBehavior : "";
+    const whenRaw = typeof researchRaw.when === "string" ? researchRaw.when : "now";
+    const workflowIdRaw = typeof workflowRaw.workflowId === "string" ? workflowRaw.workflowId : "";
+    const workflowId = args.customWorkflows.some((w) => w.id === workflowIdRaw) ? workflowIdRaw : null;
+    return {
+      chatTask: asRouteTask(parsed?.chatTask ?? args.fallbackTask),
+      scope,
+      answerPersonal: parsed?.answerPersonal === true,
+      targetDealIds: targetDealsFromPlan(args.allDeals, args.focusDeal, parsed?.targetDealIds),
+      openDocumentQuery:
+        typeof parsed?.openDocumentQuery === "string" && parsed.openDocumentQuery.trim()
+          ? parsed.openDocumentQuery.trim().slice(0, 300)
+          : null,
+      createCompany: companyNameRaw
+        ? {
+            company_name: companyNameRaw,
+            website: typeof createRaw?.website === "string" && createRaw.website.trim() ? createRaw.website.trim().slice(0, 300) : null,
+            crm_stage: crmStage,
+          }
+        : null,
+      updates: parseRouteUpdates(parsed?.updates),
+      generateDocument: {
+        enabled: generateRaw.enabled === true && args.permissions.generateDocuments,
+        prompt: typeof generateRaw.prompt === "string" && generateRaw.prompt.trim() ? generateRaw.prompt.trim().slice(0, 2000) : args.message,
+        typeHint:
+          typeof generateRaw.typeHint === "string" && generateRaw.typeHint.trim()
+            ? generateRaw.typeHint.trim().slice(0, 160)
+            : null,
+      },
+      runResearch: {
+        enabled: researchRaw.enabled === true && args.permissions.runResearch,
+        focus: typeof researchRaw.focus === "string" && researchRaw.focus.trim() ? researchRaw.focus.trim().slice(0, 600) : args.message,
+        when: whenRaw === "if_missing_info" ? "if_missing_info" : "now",
+      },
+      customWorkflow: {
+        enabled: workflowRaw.enabled === true && Boolean(workflowId) && args.permissions.runWorkflows,
+        workflowId,
+        input: typeof workflowRaw.input === "string" && workflowRaw.input.trim() ? workflowRaw.input.trim().slice(0, 2000) : args.message,
+      },
+      quickLookup: {
+        enabled: lookupRaw.enabled === true && args.permissions.runResearch,
+        query: typeof lookupRaw.query === "string" && lookupRaw.query.trim() ? lookupRaw.query.trim().slice(0, 600) : args.message,
+      },
+      useSimilarCompanies: parsed?.useSimilarCompanies === true && args.permissions.useSimilarCompanySearch,
+      useCriteria: parsed?.useCriteria === true && args.permissions.useCriteriaAnalysis,
+      missingInfoBehavior: missingRaw === "research" || missingRaw === "ask_clarifying" ? missingRaw : "answer_unknown",
+    };
+  } catch {
+    return fallbackRoutePlan({
+      message: args.message,
+      focusDeal: args.focusDeal,
+      allDeals: args.allDeals,
+      chatTask: args.fallbackTask,
+    });
   }
+}
 
-  if (args.toolPlan.wantsResearch) {
-    if (!targetDeals.length) {
-      notes.push("I can prepare the research plan, but I need to know which company or companies it should be for.");
-    } else {
-      actions.push({
-        type: "propose_research",
-        label: targetDeals.length === 1 ? `Run research plan for ${targetDeals[0]!.name}` : `Run research plans for ${targetDeals.length} companies`,
-        focus: args.toolPlan.researchFocus || args.message,
-        dealIds: targetDeals.map((d) => d.id),
-        dealNames: targetDeals.map((d) => d.name),
-      });
-      notes.push(
-        targetDeals.length === 1
-          ? `I can generate a focused research workflow for ${targetDeals[0]!.name}.`
-          : `I can generate focused research workflows for ${targetDeals.map((d) => d.name).join(", ")}.`,
-      );
-    }
-  }
+async function createCompanyFromChat(
+  admin: SupabaseClient,
+  args: {
+    userId: string;
+    companyName: string;
+    website: string | null;
+    crmStage: "screened" | "in_process" | "invested" | "passed";
+  },
+): Promise<{ id: string; name: string; created: boolean }> {
+  const existing = await listChatDeals(admin, args.userId);
+  const match = existing.find((d) => normalizeText(d.name) === normalizeText(args.companyName));
+  if (match) return { id: match.id, name: match.name, created: false };
 
-  return { actions, notes, inferredDealId };
+  const res = await admin
+    .schema("deal_intel")
+    .from("deal")
+    .insert({
+      user_id: args.userId,
+      metadata: {
+        company_name: args.companyName,
+        website: args.website,
+        crm_stage: args.crmStage,
+        source: "chat",
+      },
+    })
+    .select("id")
+    .single();
+  if (res.error) throw res.error;
+  return { id: String(res.data.id), name: args.companyName, created: true };
 }
 
 export async function applyWorkspaceRecordUpdates(
@@ -644,6 +840,76 @@ function citationsFromContext(
   return out;
 }
 
+function formatSimilarPeers(peers: SimilarPeerForPrompt[]): string {
+  if (!peers.length) return "";
+  return peers
+    .slice(0, 8)
+    .map((p, i) => {
+      const confidence = Number.isFinite(p.similarity_confidence)
+        ? `${Math.round(p.similarity_confidence * 100)}%`
+        : "n/a";
+      return [
+        `${i + 1}. ${p.company_name} (${confidence} similarity)`,
+        p.problem_one_liner ? `Problem: ${p.problem_one_liner}` : "",
+        p.solution_one_liner ? `Solution: ${p.solution_one_liner}` : "",
+        p.decision ? `Prior decision: ${p.decision}` : "",
+        p.pass_reason ? `Pass reason: ${p.pass_reason}` : "",
+      ].filter(Boolean).join("\n");
+    })
+    .join("\n\n");
+}
+
+async function loadCriteriaContext(admin: SupabaseClient, userId: string): Promise<string> {
+  const [rules, thesis] = await Promise.all([
+    loadAggregatedRulesForUser(admin, userId).catch(() => null),
+    admin.from("fund_thesis").select("thesis_text, updated_at").eq("user_id", userId).maybeSingle(),
+  ]);
+  const sections: string[] = [];
+  const thesisText = typeof thesis.data?.thesis_text === "string" ? thesis.data.thesis_text.trim() : "";
+  if (thesisText) sections.push(`Fund thesis:\n${thesisText.slice(0, 3000)}`);
+  if (rules) {
+    const ruleLines = [
+      ...rules.problem.map((r) => `Problem: ${r.rule} when ${r.condition}`),
+      ...rules.solution.map((r) => `Solution: ${r.rule} when ${r.condition}`),
+      ...rules.founder.map((r) => `Founder: ${r.rule} when ${r.condition}`),
+    ];
+    if (ruleLines.length) sections.push(`Uploaded criteria rules:\n${ruleLines.slice(0, 40).join("\n")}`);
+  }
+  return sections.join("\n\n");
+}
+
+async function runQuickLookup(args: {
+  query: string;
+  message: string;
+  focusCompanyName: string | null;
+  savedContext: string;
+}): Promise<string> {
+  const prompt = `Answer one quick public-web lookup for a VC workspace chat.
+
+Use Google Search grounding. Keep the answer short and direct.
+
+Rules:
+- This is a quick lookup, not a full research plan.
+- Answer only the user's specific question.
+- If a focused company is provided, keep the lookup about that company unless the user explicitly asked otherwise.
+- Prefer current, reliable sources.
+- Include source names or URLs briefly when available.
+- If the web evidence is unclear or conflicting, say so plainly.
+
+Focused company:
+${args.focusCompanyName ?? "(none)"}
+
+Saved context, if any:
+${args.savedContext || "(none)"}
+
+Lookup query:
+${args.query}
+
+Original user message:
+${args.message}`;
+  return vertexRunWithText(chatModelForTask("why"), prompt, true).catch(() => "");
+}
+
 function actionSummary(action: ChatAction): string {
   if (action.type === "open_document" || action.type === "open_link") return action.href;
   if (action.type === "record_update") return action.detail;
@@ -654,6 +920,9 @@ function actionSummary(action: ChatAction): string {
   if (action.type === "propose_record_update") {
     return `proposal: ${action.dealName}; ${action.updates.map((u) => `${u.target}=${u.value}`).join("; ")}`;
   }
+  if (action.type === "propose_custom_workflow") {
+    return `proposal: workflow=${action.workflowName}, deal=${action.dealName ?? "none"}, input=${action.input}`;
+  }
   return "";
 }
 
@@ -662,6 +931,7 @@ function confirmationMessage(actions: ChatAction[], notes: string[]): string | n
     (a) =>
       a.type === "propose_generate_document" ||
       a.type === "propose_research" ||
+      a.type === "propose_custom_workflow" ||
       a.type === "propose_record_update",
   );
   if (!hasToolProposal) return null;
@@ -670,7 +940,7 @@ function confirmationMessage(actions: ChatAction[], notes: string[]): string | n
   if (doc) {
     return [
       `I found the "${doc.typeName}" doc type${doc.dealName ? ` for ${doc.dealName}` : ""}.`,
-      "Click the button below when you want me to generate it.",
+      "I am starting the document generation now.",
     ].join("\n\n");
   }
 
@@ -678,10 +948,14 @@ function confirmationMessage(actions: ChatAction[], notes: string[]): string | n
   if (research) {
     return [
       research.dealNames.length === 1
-        ? `I can generate a research plan for ${research.dealNames[0]}.`
-        : `I can generate research plans for ${research.dealNames.join(", ")}.`,
-      "Click the button below to create the plan.",
+        ? `I am creating a research plan for ${research.dealNames[0]}.`
+        : `I am creating research plans for ${research.dealNames.join(", ")}.`,
     ].join("\n\n");
+  }
+
+  const workflow = actions.find((a): a is Extract<ChatAction, { type: "propose_custom_workflow" }> => a.type === "propose_custom_workflow");
+  if (workflow) {
+    return `I found the "${workflow.workflowName}" workflow${workflow.dealName ? ` for ${workflow.dealName}` : ""}. I am running it now.`;
   }
 
   const update = actions.find((a): a is Extract<ChatAction, { type: "propose_record_update" }> => a.type === "propose_record_update");
@@ -709,44 +983,122 @@ export async function runWorkspaceChat(args: {
   message: string;
   dealId?: string | null;
   history?: ChatMessage[];
+  permissions?: Partial<ChatToolPermissions>;
 }): Promise<{ message: string; actions: ChatAction[]; citations: ChatCitation[]; dealId: string | null }> {
   const message = args.message.trim();
   if (!message) return { message: "What would you like to look into?", actions: [], citations: [], dealId: args.dealId ?? null };
+  const permissions = { ...DEFAULT_CHAT_TOOL_PERMISSIONS, ...(args.permissions ?? {}) };
+  const history = args.history ?? [];
 
-  const [deal, plan, task, allDeals, docTypes, toolPlan] = await Promise.all([
+  const [deal, fallbackTask, allDeals, docTypes, customWorkflows] = await Promise.all([
     resolveDeal(args.admin, args.userId, args.dealId ?? null, message),
-    planChatIntent(message),
     classifyChatTaskWithGemma(message),
     listChatDeals(args.admin, args.userId),
     loadDocumentTypes(args.admin, args.userId),
-    planToolProposals(message),
+    listCustomWorkflowDefinitions(args.admin, args.userId),
   ]);
-  const toolPrep = buildToolActions({
+  const routePlan = await planSmartChatRoute({
     message,
-    toolPlan,
+    history,
     focusDeal: deal,
-    requestedDealId: args.dealId ?? null,
     allDeals,
     docTypes,
+    customWorkflows,
+    permissions,
+    fallbackTask,
   });
-  const focusDealId = deal?.id ?? toolPrep.inferredDealId ?? args.dealId ?? null;
+  const task = routePlan.chatTask;
 
-  const [docs, snapshot, factChunks, docChunks] = await Promise.all([
+  if (routePlan.answerPersonal) {
+    return {
+      message: answerPersonalUserQuestion(message, history) ?? "I don't know that from this workspace yet.",
+      actions: [],
+      citations: [],
+      dealId: args.dealId ?? null,
+    };
+  }
+
+  let routeTargetDealIds = [...routePlan.targetDealIds];
+  let primaryDealId = routeTargetDealIds[0] ?? deal?.id ?? args.dealId ?? null;
+  let primaryDeal =
+    primaryDealId && deal?.id === primaryDealId
+      ? deal
+      : primaryDealId
+        ? await loadDealForUser(args.admin, args.userId, primaryDealId)
+        : deal;
+  let actions: ChatAction[] = [];
+  const toolNotes: string[] = [];
+
+  if (routePlan.createCompany) {
+    if (!permissions.createCompanies) {
+      actions.push({ type: "record_update", label: "Company creation skipped", detail: "Company creation is turned off in chat tool settings." });
+    } else {
+      const company = await createCompanyFromChat(args.admin, {
+        userId: args.userId,
+        companyName: routePlan.createCompany.company_name,
+        website: routePlan.createCompany.website,
+        crmStage: routePlan.createCompany.crm_stage,
+      });
+      actions.push({
+        type: "open_link",
+        label: `Open ${company.name}`,
+        href: `/home/deal-intel/${company.id}`,
+        detail: company.created ? "Created from chat" : "Already existed",
+      });
+      primaryDealId = company.id;
+      primaryDeal = await loadDealForUser(args.admin, args.userId, company.id);
+      routeTargetDealIds = [company.id];
+      toolNotes.push(company.created ? `Created ${company.name}.` : `${company.name} was already in the pipeline.`);
+    }
+  }
+
+  const targetDealMap = new Map(allDeals.map((d) => [d.id, d]));
+  const targetDeals = routeTargetDealIds
+    .map((id) => targetDealMap.get(id))
+    .filter((d): d is { id: string; name: string } => Boolean(d));
+  const focusDealId =
+    routePlan.scope === "cross_company" && routeTargetDealIds.length !== 1
+      ? null
+      : primaryDealId;
+  const crossCompanyContextAllowed = routePlan.scope === "cross_company" || routePlan.useSimilarCompanies;
+  const retrievalLimit = retrieveLimitForTask(task);
+  const customWorkflowSelected = routePlan.customWorkflow.enabled && Boolean(routePlan.customWorkflow.workflowId);
+
+  if (customWorkflowSelected && routePlan.customWorkflow.workflowId) {
+    const workflow = customWorkflows.find((w) => w.id === routePlan.customWorkflow.workflowId);
+    if (workflow) {
+      const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
+      actions.push({
+        type: "propose_custom_workflow",
+        label: `Run ${workflow.name}`,
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        dealId: focusDealId,
+        dealName: targetName,
+        input: routePlan.customWorkflow.input || message,
+      });
+      toolNotes.push(`Selected workflow: ${workflow.name}.`);
+    }
+  }
+
+  const [docs, snapshot, rawFactChunks, docChunks] = await Promise.all([
     loadDocuments(args.admin, args.userId, focusDealId),
     loadDealSnapshot(args.admin, focusDealId),
     retrieveContextNodesForQuery(args.admin, {
       userId: args.userId,
       queryText: message,
       chatTask: task,
-      limit: retrieveLimitForTask(task),
+      limit: focusDealId && !crossCompanyContextAllowed ? Math.max(retrievalLimit * 3, 24) : retrievalLimit,
       focusDealId,
     }).catch(() => []),
     retrieveDocumentChunks(args.admin, { userId: args.userId, queryText: message, dealId: focusDealId, limit: 8 }),
   ]);
+  const factChunks = focusDealId && !crossCompanyContextAllowed
+    ? rawFactChunks.filter((chunk) => chunk.deal_id === focusDealId).slice(0, retrievalLimit)
+    : rawFactChunks;
 
-  let actions: ChatAction[] = [...toolPrep.actions];
-  if ((plan.intent === "open_document" || plan.intent === "mixed") && docs.length) {
-    const picked = pickDocuments(docs, plan.document_query || message, 5);
+  if (routePlan.openDocumentQuery && docs.length) {
+    const picked = pickDocuments(docs, routePlan.openDocumentQuery || message, 5);
     actions = actions.concat(
       picked.map((d) => ({
         type: "open_document" as const,
@@ -758,21 +1110,69 @@ export async function runWorkspaceChat(args: {
     );
   }
 
-  if ((plan.intent === "update_records" || plan.intent === "mixed") && plan.updates.length) {
-    if (!deal) {
+  if (routePlan.updates.length) {
+    if (!permissions.editRecords) {
+      actions.push({ type: "record_update", label: "Record update skipped", detail: "Record editing is turned off in chat tool settings." });
+    } else if (!primaryDeal) {
       actions.push({ type: "record_update", label: "Record update skipped", detail: "Pick a company before updating records." });
     } else {
-      actions.push({
-        type: "propose_record_update",
-        label: `Apply ${plan.updates.length} record update${plan.updates.length === 1 ? "" : "s"}`,
-        dealId: deal.id,
-        dealName: companyName(deal),
-        updates: plan.updates,
-      });
+      const applied = await applyWorkspaceRecordUpdates(args.admin, { userId: args.userId, deal: primaryDeal, updates: routePlan.updates });
+      actions = actions.concat(applied);
     }
   }
 
-  const preparedMessage = confirmationMessage(actions, toolPrep.notes);
+  if (routePlan.generateDocument.enabled && !customWorkflowSelected) {
+    const pickedType = pickDocumentType(docTypes, message, routePlan.generateDocument.typeHint);
+    if (!pickedType) {
+      actions.push({
+        type: "open_link",
+        label: "Open document generator",
+        href: focusDealId ? `/home/document-generator?dealId=${focusDealId}` : "/home/document-generator",
+        detail: docTypes.length ? "Choose a saved document type." : "Add a document type or template.",
+      });
+      toolNotes.push("I could not confidently choose a saved document type.");
+    } else if (!focusDealId && documentLikelyNeedsCompany(pickedType, message)) {
+      toolNotes.push(`I found the "${pickedType.name}" document type, but I need to know which company to use.`);
+    } else {
+      const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
+      actions.push({
+        type: "propose_generate_document",
+        label: `Generate ${pickedType.name}`,
+        prompt: targetName
+          ? `Draft a ${pickedType.name} for ${targetName}.\n\nUser request: ${routePlan.generateDocument.prompt}`
+          : routePlan.generateDocument.prompt,
+        dealId: focusDealId,
+        dealName: targetName,
+        typeId: pickedType.id,
+        typeName: pickedType.name,
+        outputFormat: pickedType.output_format || "text",
+      });
+      toolNotes.push(`Selected document type: ${pickedType.name}.`);
+    }
+  }
+
+  if (routePlan.runResearch.enabled && routePlan.runResearch.when === "now" && !customWorkflowSelected) {
+    if (!targetDeals.length && !primaryDeal) {
+      toolNotes.push("I need to know which company to research.");
+    } else {
+      const researchTargets = targetDeals.length
+        ? targetDeals
+        : primaryDealId && primaryDeal
+          ? [{ id: primaryDealId, name: companyName(primaryDeal) }]
+          : [];
+      if (researchTargets.length) {
+        actions.push({
+          type: "propose_research",
+          label: researchTargets.length === 1 ? `Research ${researchTargets[0]!.name}` : `Research ${researchTargets.length} companies`,
+          focus: routePlan.runResearch.focus || message,
+          dealIds: researchTargets.map((d) => d.id),
+          dealNames: researchTargets.map((d) => d.name),
+        });
+      }
+    }
+  }
+
+  const preparedMessage = confirmationMessage(actions, toolNotes);
   if (preparedMessage) {
     return {
       message: preparedMessage,
@@ -781,30 +1181,90 @@ export async function runWorkspaceChat(args: {
       dealId: focusDealId,
     };
   }
-  if (toolPlan.wantsDocument || toolPlan.wantsResearch) {
+  if (routePlan.generateDocument.enabled || (routePlan.runResearch.enabled && routePlan.runResearch.when === "now")) {
     return {
-      message: toolPrep.notes.length ? toolPrep.notes.join("\n\n") : "I need a bit more direction before I can prepare that tool action.",
+      message: toolNotes.length ? toolNotes.join("\n\n") : "I need a bit more direction before I can use that tool.",
       actions,
       citations: [],
       dealId: focusDealId,
     };
   }
 
+  if (
+    focusDealId &&
+    !crossCompanyContextAllowed &&
+    routePlan.runResearch.enabled &&
+    routePlan.runResearch.when === "if_missing_info" &&
+    factChunks.length === 0 &&
+    docChunks.length === 0 &&
+    permissions.runResearch &&
+    primaryDeal
+  ) {
+    actions.push({
+      type: "propose_research",
+      label: `Research ${companyName(primaryDeal)}`,
+      focus: routePlan.runResearch.focus || message,
+      dealIds: [focusDealId],
+      dealNames: [companyName(primaryDeal)],
+    });
+  }
+
+  const savedLookupContext = [
+    JSON.stringify(snapshot, null, 2).slice(0, 2500),
+    formatChunks(factChunks.slice(0, 3)),
+    formatDocChunks(docChunks.slice(0, 2), docs),
+  ].filter(Boolean).join("\n\n");
+  const [similarPeers, criteriaContext, quickLookupResult] = await Promise.all([
+    routePlan.useSimilarCompanies
+      ? focusDealId
+        ? fetchSimilarDealsFromDealId(args.admin, focusDealId, 8).catch(() => [])
+        : embedText(message.slice(0, 8000))
+            .then((queryEmbedding) =>
+              fetchSimilarDealsHybrid(args.admin, {
+                userId: args.userId,
+                queryEmbedding,
+                queryText: message,
+                finalLimit: 8,
+              }),
+            )
+            .catch(() => [])
+      : Promise.resolve([]),
+    routePlan.useCriteria ? loadCriteriaContext(args.admin, args.userId).catch(() => "") : Promise.resolve(""),
+    routePlan.quickLookup.enabled
+      ? runQuickLookup({
+          query: routePlan.quickLookup.query || message,
+          message,
+          focusCompanyName: primaryDeal ? companyName(primaryDeal) : null,
+          savedContext: savedLookupContext,
+        })
+      : Promise.resolve(""),
+  ]);
+
   const recentHistory = (args.history ?? [])
     .slice(-8)
     .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, 1200)}`)
     .join("\n");
-  const dealLine = deal ? `Focused company: ${companyName(deal)} (${deal.id})` : "Focused company: none / workspace-wide";
+  const dealLine = primaryDeal && focusDealId ? `Focused company: ${companyName(primaryDeal)} (${focusDealId})` : "Focused company: none / workspace-wide";
   const prompt = `You are the user's VC workspace chat assistant.
+
+The user is the investor/operator using this workspace. Company founders, executives, employees, and other people mentioned in CRM facts are not the user unless the user explicitly says so.
 
 Capabilities available in this turn:
 - Answer using retrieved CRM facts and document snippets.
 - Surface links to saved documents when relevant.
-- Prepare document generation, research planning, and record-update actions for user confirmation.
-- Do not say a tool has run unless the action label says it already completed. Most tool actions are proposals that the user still needs to confirm.
+- Prepare document generation, research, saved workflow, and record-update actions when the router selected a tool. The UI will run enabled tool actions automatically.
+- Do not say a tool has finished until the completed action result is present. You may say you are starting selected tool actions now.
+- Write like a normal chat assistant in plain conversational text. Do not use Markdown styling, headings, bold text, star bullets, or numbered lists unless the user explicitly asks for a list or structured format.
+- Only use retrieved company/person context when it actually answers the user's question. For questions about the user, do not infer identity from company records.
+- If a focused company is set, answer about that company by default. Do not answer with another company's facts unless the user explicitly asks for comparisons, competitors, peers, benchmarks, similar companies, portfolio-wide analysis, or all-company context.
+- If the focused company's context does not contain the requested fact, say you do not know from the saved context. Do not fill the gap using another company's context. If research has been prepared, mention that you started it.
+- If a quick web lookup result is present, use it to answer the simple lookup directly. Do not describe it as a research plan.
 
 ${dealLine}
+Cross-company context allowed: ${crossCompanyContextAllowed ? "yes" : "no"}
 Task route: ${task}
+Route plan:
+${JSON.stringify(routePlan, null, 2).slice(0, 5000)}
 
 Recent chat:
 ${recentHistory || "(none)"}
@@ -818,20 +1278,29 @@ ${formatChunks(factChunks) || "(none)"}
 Retrieved document context:
 ${formatDocChunks(docChunks, docs) || "(none)"}
 
+Similar company tool results:
+${formatSimilarPeers(similarPeers) || "(not requested or none found)"}
+
+Investment criteria and thesis context:
+${criteriaContext || "(not requested or no uploaded criteria found)"}
+
+Quick web lookup result:
+${quickLookupResult || "(not requested or no quick lookup result)"}
+
 Actions already taken or prepared:
 ${actions.length ? actions.map((a) => `- ${a.label}: ${actionSummary(a)}`).join("\n") : "(none)"}
 
 Tool preparation notes:
-${toolPrep.notes.length ? toolPrep.notes.map((n) => `- ${n}`).join("\n") : "(none)"}
+${toolNotes.length ? toolNotes.map((n) => `- ${n}`).join("\n") : "(none)"}
 
 User message:
 ${message}
 
-Respond conversationally and directly. If you used context, mention the basis briefly. If a generated document, research workflow, or record update is prepared, clearly say it is ready for confirmation rather than already done. If you found documents, tell the user which links are available. Do not invent facts.`;
+Respond conversationally and directly. If you used context, mention the basis briefly. If a quick lookup answered the question, just answer it. If a generated document, saved workflow, or research workflow is prepared, say you are starting it now. If record updates were applied, say they were applied. If you found documents, tell the user which links are available. Do not invent facts.`;
 
   const response = await vertexRunWithText(chatModelForTask(task), prompt, false);
   return {
-    message: response || "I could not produce a response.",
+    message: cleanAssistantResponse(response || "I could not produce a response."),
     actions,
     citations: citationsFromContext(factChunks, docChunks, docs),
     dealId: focusDealId,

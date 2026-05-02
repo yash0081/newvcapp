@@ -59,7 +59,7 @@ export function StageMenu(props: {
           <button
             type="button"
             disabled={busy}
-            className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 shadow-sm hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 disabled:opacity-60"
+            className="inline-flex h-8 items-center gap-2 rounded-xl border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-800 shadow-sm hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 disabled:opacity-60"
           >
             <span className={`h-2 w-2 rounded-full ${stageDotClass(val)}`} />
             <span>{stageLabel(val)}</span>
@@ -87,4 +87,3 @@ export function StageMenu(props: {
     </div>
   );
 }
-

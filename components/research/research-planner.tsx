@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Check, GripVertical, Loader2, Play, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 
 type Workflow = {
   id: string;
@@ -390,53 +391,65 @@ export function ResearchPlanner(props: {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-2xl border border-zinc-200 bg-white p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-lg font-semibold text-zinc-900">{props.companyName} research planner</h2>
-            <p className="text-xs text-zinc-500">Generate, drag, edit, and execute web research steps.</p>
+    <div className="space-y-5">
+      <div className="crm-panel overflow-hidden">
+        <div className="flex flex-col gap-4 border-b border-zinc-200 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50">
+              <Search className="h-4 w-4 text-zinc-700" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold tracking-tight text-zinc-950">{props.companyName} research</h2>
+              <p className="text-sm text-zinc-500">Plan, edit, and execute web research steps.</p>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
             <button className="crm-button-secondary" onClick={generate} disabled={busy} type="button">
-              {busy ? "Working…" : "Generate plan"}
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Generate plan
             </button>
             <button className="crm-button-secondary" onClick={addStep} disabled={busy || !workflow} type="button">
+              <Plus className="h-4 w-4" />
               Add step
             </button>
             <button className="crm-button-secondary" onClick={saveSteps} disabled={busy || !workflow} type="button">
+              <Check className="h-4 w-4" />
               {dirty ? "Save edits" : "Saved"}
             </button>
             <button className="crm-button" onClick={runAll} disabled={busy || !workflow || !steps.length} type="button">
-              Run ready steps
+              <Play className="h-4 w-4" />
+              Run ready
             </button>
           </div>
         </div>
-        <div className="grid gap-1">
-          <label htmlFor="research-focus" className="text-xs font-medium text-zinc-600">
-            Focus
+        <div className="grid gap-4 px-5 py-4 lg:grid-cols-[1fr_220px]">
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-zinc-600">Research focus</span>
+            <textarea
+              id="research-focus"
+              className="crm-input min-h-20 resize-y"
+              value={focus}
+              onChange={(e) => setFocus(e.target.value)}
+              placeholder="Verify enterprise traction, founder background, competitor positioning..."
+              disabled={busy}
+            />
           </label>
-          <textarea
-            id="research-focus"
-            className="crm-input min-h-16 resize-y"
-            value={focus}
-            onChange={(e) => setFocus(e.target.value)}
-            placeholder="Example: verify enterprise traction, dig into founder background, or compare competitors"
-            disabled={busy}
-          />
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-1">
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">Workflow</p>
+              <p className="mt-1 text-sm font-semibold text-zinc-950">{workflow?.status ?? "Not generated"}</p>
+            </div>
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">Steps</p>
+              <p className="mt-1 text-sm font-semibold text-zinc-950">{steps.length}</p>
+            </div>
+          </div>
         </div>
-        {workflow ? (
-          <p className="text-xs text-zinc-500">
-            Status: {workflow.status} · Version: {workflow.version}
-          </p>
-        ) : (
-          <p className="text-sm text-zinc-500">No workflow yet. Click Generate plan.</p>
-        )}
-        {message ? <p className="text-sm text-emerald-700">{message}</p> : null}
-        {error ? <p className="text-sm text-rose-700">{error}</p> : null}
+        {message ? <p className="mx-5 mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{message}</p> : null}
+        {error ? <p className="mx-5 mb-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
+      <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
           {steps.length ? (
             steps.map((step) => (
@@ -446,41 +459,33 @@ export function ResearchPlanner(props: {
                 onDragStart={() => setDragId(step.id)}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => onDrop(step.id)}
-                className="rounded-2xl border border-zinc-200 bg-white p-4 space-y-2"
+                className="crm-panel p-4"
               >
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div className="flex items-center gap-2">
-                    <p className="text-xs text-zinc-500">Step {step.position + 1}</p>
-                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusClass(step.status)}`}>
+                    <GripVertical className="h-4 w-4 text-zinc-300" />
+                    <p className="text-xs font-medium text-zinc-500">Step {step.position + 1}</p>
+                    <span className={`inline-flex items-center rounded-xl px-2 py-0.5 text-[11px] font-medium ${statusClass(step.status)}`}>
                       {step.status}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
-                    {step.status === "failed" ? (
-                      <button
-                        className="crm-button-secondary"
-                        onClick={() => runStep(step.id)}
-                        disabled={busy || !workflow}
-                        type="button"
-                      >
-                        Retry
-                      </button>
-                    ) : (
-                      <button
-                        className="crm-button-secondary"
-                        onClick={() => runStep(step.id)}
-                        disabled={busy || !workflow || step.status === "running"}
-                        type="button"
-                      >
-                        {step.status === "running" ? "Running…" : "Run"}
-                      </button>
-                    )}
+                    <button
+                      className="crm-button-secondary"
+                      onClick={() => runStep(step.id)}
+                      disabled={busy || !workflow || step.status === "running"}
+                      type="button"
+                    >
+                      <Play className="h-4 w-4" />
+                      {step.status === "failed" ? "Retry" : step.status === "running" ? "Running" : "Run"}
+                    </button>
                     <button className="crm-button-secondary" onClick={() => removeStep(step.id)} disabled={busy} type="button">
+                      <Trash2 className="h-4 w-4" />
                       Delete
                     </button>
                   </div>
                 </div>
-                <div className="grid gap-2">
+                <div className="mt-3 grid gap-2">
                   <label className="grid gap-1">
                     <span className="text-xs font-medium text-zinc-500">Source hint</span>
                     <input
@@ -497,63 +502,43 @@ export function ResearchPlanner(props: {
                   />
                 </div>
                 {step.notes ? (
-                  <p className="text-xs text-zinc-600 whitespace-pre-wrap">{step.notes}</p>
+                  <p className="mt-3 whitespace-pre-wrap rounded-xl border border-zinc-200 bg-zinc-50 p-2 text-xs text-zinc-600">{step.notes}</p>
                 ) : null}
               </div>
             ))
           ) : (
-            <p className="text-sm text-zinc-500 rounded-2xl border border-dashed border-zinc-200 bg-white p-8 text-center">
-              No steps yet.
-            </p>
+            <div className="crm-panel border-dashed p-10 text-center text-sm text-zinc-500">
+              No steps yet. Generate a plan to start.
+            </div>
           )}
         </div>
 
         <div className="space-y-3">
-          <div className="rounded-2xl border border-zinc-200 bg-white p-4 space-y-2">
-            <p className="text-sm font-medium text-zinc-900">Suggested plan updates</p>
+          <div className="crm-panel p-4">
+            <p className="text-sm font-semibold text-zinc-950">Suggested plan updates</p>
             {!suggestions.length ? (
-              <p className="text-xs text-zinc-500">No suggestions yet. Run steps to get adaptive updates.</p>
+              <p className="mt-2 text-xs text-zinc-500">No suggestions yet. Run steps to get adaptive updates.</p>
             ) : (
-              <div className="space-y-2">
+              <div className="mt-3 space-y-2">
                 {suggestions.slice(0, 5).map((s, idx) => (
-                  <div key={`${s.website}_${idx}`} className="rounded-xl border border-zinc-200 p-2 bg-zinc-50">
+                  <div key={`${s.website}_${idx}`} className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">
                     <p className="text-xs text-zinc-700">{s.reason}</p>
-                    <p className="text-xs text-zinc-500 mt-1">{s.website} - {s.task}</p>
+                    <p className="mt-1 text-xs text-zinc-500">{s.website} / {s.task}</p>
                     <div className="mt-2 flex gap-2">
-                      <button
-                        className="crm-button-secondary"
-                        onClick={() => acceptSuggestions([s])}
-                        disabled={busy}
-                        type="button"
-                      >
+                      <button className="crm-button-secondary" onClick={() => acceptSuggestions([s])} disabled={busy} type="button">
                         Accept
                       </button>
-                      <button
-                        className="crm-button-secondary"
-                        onClick={() => rejectSuggestions([s])}
-                        disabled={busy}
-                        type="button"
-                      >
+                      <button className="crm-button-secondary" onClick={() => rejectSuggestions([s])} disabled={busy} type="button">
                         Reject
                       </button>
                     </div>
                   </div>
                 ))}
                 <div className="flex gap-2">
-                  <button
-                    className="crm-button-secondary"
-                    onClick={() => acceptSuggestions(suggestions.slice(0, 5))}
-                    disabled={busy}
-                    type="button"
-                  >
+                  <button className="crm-button-secondary" onClick={() => acceptSuggestions(suggestions.slice(0, 5))} disabled={busy} type="button">
                     Accept all
                   </button>
-                  <button
-                    className="crm-button-secondary"
-                    onClick={() => rejectSuggestions(suggestions.slice(0, 5))}
-                    disabled={busy}
-                    type="button"
-                  >
+                  <button className="crm-button-secondary" onClick={() => rejectSuggestions(suggestions.slice(0, 5))} disabled={busy} type="button">
                     Reject all
                   </button>
                 </div>
@@ -561,39 +546,31 @@ export function ResearchPlanner(props: {
             )}
           </div>
 
-          <div className="rounded-2xl border border-zinc-200 bg-white p-4 space-y-2">
-            <p className="text-sm font-medium text-zinc-900">Evidence</p>
+          <div className="crm-panel p-4">
+            <p className="text-sm font-semibold text-zinc-950">Evidence</p>
             {!runs.length ? (
-              <p className="text-xs text-zinc-500">No step runs yet.</p>
+              <p className="mt-2 text-xs text-zinc-500">No step runs yet.</p>
             ) : (
-              <div className="space-y-2 max-h-96 overflow-auto">
+              <div className="mt-3 max-h-96 space-y-2 overflow-auto">
                 {runs.map((r) => (
-                  <div key={r.id} className="rounded-xl border border-zinc-200 p-2">
+                  <div key={r.id} className="rounded-xl border border-zinc-200 bg-white p-3">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-[11px] text-zinc-500">{new Date(r.created_at).toLocaleString()}</p>
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${statusClass(r.run_status)}`}>
+                      <span className={`inline-flex items-center rounded-xl px-2 py-0.5 text-[10px] font-medium ${statusClass(r.run_status)}`}>
                         {r.run_status}
                       </span>
                     </div>
                     {r.run_status === "failed" ? (
-                      <p className="text-xs text-rose-700 whitespace-pre-wrap mt-1">
-                        {r.error_message || "Run failed without an error message."}
-                      </p>
+                      <p className="mt-2 whitespace-pre-wrap text-xs text-rose-700">{r.error_message || "Run failed without an error message."}</p>
                     ) : r.run_status === "running" ? (
-                      <p className="text-xs text-zinc-500 italic mt-1">Running…</p>
+                      <p className="mt-2 text-xs italic text-zinc-500">Running...</p>
                     ) : (
-                      <p className="text-xs text-zinc-700 whitespace-pre-wrap mt-1">{r.output_notes || "No notes"}</p>
+                      <p className="mt-2 whitespace-pre-wrap text-xs text-zinc-700">{r.output_notes || "No notes"}</p>
                     )}
                     {r.run_status !== "failed" && Array.isArray(r.sources) && r.sources.length ? (
                       <div className="mt-2 space-y-1">
                         {r.sources.slice(0, 4).map((s, i) => (
-                          <a
-                            key={`${r.id}_${i}`}
-                            href={s.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="block text-xs text-blue-700 underline break-all"
-                          >
+                          <a key={`${r.id}_${i}`} href={s.url} target="_blank" rel="noreferrer" className="block break-all text-xs text-blue-700 hover:underline">
                             {s.title || s.url}
                           </a>
                         ))}

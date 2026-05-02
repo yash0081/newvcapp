@@ -255,7 +255,7 @@ export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
           <div
             key={key}
             className={cn(
-              "rounded-lg border border-gray-200/80 bg-white transition-colors",
+              "rounded-2xl border border-gray-200/80 bg-white transition-colors",
               isOpen && "ring-1 ring-gray-200"
             )}
           >
@@ -272,11 +272,11 @@ export function AnalysisAccordion({ data }: { data: StructuredAnalysis }) {
               className={cn(
                 "flex w-full items-center gap-3 px-4 py-3.5 text-left",
                 "hover:bg-gray-50/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 focus-visible:ring-offset-2",
-                "rounded-lg transition-colors"
+                "rounded-2xl transition-colors"
               )}
               aria-expanded={isOpen}
             >
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-gray-100 text-gray-600">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-gray-600">
                 <Icon className="h-4 w-4" />
               </span>
               <span className="min-w-0 flex-1">

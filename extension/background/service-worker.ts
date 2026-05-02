@@ -14,6 +14,7 @@ import {
 } from "@shared/api";
 import type {
   ActiveDealResponse,
+  ExternalExtensionRequest,
   ExtensionRequest,
   ExtensionResponse,
   FinalizeResponse,
@@ -279,7 +280,30 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
   }
 }
 
+async function openCopilotUi(): Promise<ExtensionResponse> {
+  try {
+    if (typeof chrome.action.openPopup === "function") {
+      await chrome.action.openPopup();
+      return { ok: true };
+    }
+  } catch {
+    // Some Chrome versions only allow action.openPopup from specific user-gesture paths.
+  }
+
+  await chrome.tabs.create({ url: chrome.runtime.getURL("popup/popup.html") });
+  return { ok: true };
+}
+
 chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
   handle(req as ExtensionRequest).then(sendResponse);
   return true; // async response
+});
+
+chrome.runtime.onMessageExternal.addListener((req: ExternalExtensionRequest, _sender, sendResponse) => {
+  if (req?.type !== "OPEN_COPILOT_UI") {
+    sendResponse({ ok: false, error: "Unknown external request" } satisfies ExtensionResponse);
+    return false;
+  }
+  openCopilotUi().then(sendResponse);
+  return true;
 });

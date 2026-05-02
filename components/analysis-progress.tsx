@@ -16,7 +16,7 @@ export function AnalysisProgress({ steps }: { steps: AnalysisStep[] }) {
   if (!steps.length) return null;
 
   return (
-    <div className="mt-3 rounded-lg border border-gray-200 bg-white px-4 py-3">
+    <div className="mt-3 rounded-2xl border border-gray-200 bg-white px-4 py-3">
       <p className="text-xs font-medium text-gray-700 mb-2">
         Analysis pipeline
       </p>

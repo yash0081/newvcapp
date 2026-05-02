@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { runWorkspaceChat, type ChatMessage } from "@/lib/chat/workspace-chat";
+import { DEFAULT_CHAT_TOOL_PERMISSIONS, runWorkspaceChat, type ChatMessage, type ChatToolPermissions } from "@/lib/chat/workspace-chat";
+import { appendSavedChatMessage, ensureSavedChatThread } from "@/lib/chat/history";
 
 type ChatRequest = {
   message?: unknown;
   dealId?: unknown;
   history?: unknown;
+  threadId?: unknown;
+  permissions?: unknown;
 };
 
 function parseHistory(raw: unknown): ChatMessage[] {
@@ -23,6 +26,15 @@ function parseHistory(raw: unknown): ChatMessage[] {
   return out;
 }
 
+function parsePermissions(raw: unknown): Partial<ChatToolPermissions> {
+  const obj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const out: Partial<ChatToolPermissions> = {};
+  for (const key of Object.keys(DEFAULT_CHAT_TOOL_PERMISSIONS) as Array<keyof ChatToolPermissions>) {
+    if (typeof obj[key] === "boolean") out[key] = obj[key];
+  }
+  return out;
+}
+
 export async function POST(req: Request) {
   const supabase = await createClient();
   const {
@@ -33,18 +45,47 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as ChatRequest | null;
   const message = typeof body?.message === "string" ? body.message.trim() : "";
   const dealId = typeof body?.dealId === "string" && body.dealId.trim() ? body.dealId.trim() : null;
+  const requestedThreadId = typeof body?.threadId === "string" && body.threadId.trim() ? body.threadId.trim() : null;
   if (!message) return NextResponse.json({ error: "message is required" }, { status: 400 });
 
   try {
     const admin = createAdminClient();
+    const thread = await ensureSavedChatThread({
+      admin,
+      userId: user.id,
+      threadId: requestedThreadId,
+      firstMessage: message,
+    });
+    await appendSavedChatMessage({
+      admin,
+      userId: user.id,
+      threadId: thread.id,
+      role: "user",
+      content: message,
+      dealId,
+    });
+
     const result = await runWorkspaceChat({
       admin,
       userId: user.id,
       message,
       dealId,
       history: parseHistory(body?.history),
+      permissions: parsePermissions(body?.permissions),
     });
-    return NextResponse.json(result);
+
+    await appendSavedChatMessage({
+      admin,
+      userId: user.id,
+      threadId: thread.id,
+      role: "assistant",
+      content: result.message || "",
+      dealId: result.dealId ?? dealId,
+      actions: result.actions ?? [],
+      citations: result.citations ?? [],
+    });
+
+    return NextResponse.json({ ...result, threadId: thread.id });
   } catch (e) {
     console.error("[workspace-chat]", e);
     const msg = e instanceof Error ? e.message : "Chat failed";

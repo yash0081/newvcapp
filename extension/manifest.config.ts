@@ -21,6 +21,9 @@ export default defineManifest({
     default_popup: "popup/popup.html",
     default_title: "VCApp research copilot",
   },
+  externally_connectable: {
+    matches: [APP_HOST_MATCH],
+  },
   content_scripts: [
     {
       matches: ["<all_urls>"],

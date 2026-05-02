@@ -1,7 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { redirect, notFound } from "next/navigation";
-import Link from "next/link";
 import { ResearchPlanner } from "@/components/research/research-planner";
 
 type Workflow = {
@@ -119,14 +118,6 @@ export default async function DealResearchPage(props: { params: Promise<{ id: st
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end">
-        <Link
-          className="crm-button-secondary"
-          href={`/home/deal-intel/${dealId}/copilot`}
-        >
-          Open research copilot
-        </Link>
-      </div>
       <ResearchPlanner
         dealId={dealId}
         companyName={companyName}
@@ -137,4 +128,3 @@ export default async function DealResearchPage(props: { params: Promise<{ id: st
     </div>
   );
 }
-

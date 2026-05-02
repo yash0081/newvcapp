@@ -70,4 +70,3 @@ export function StageSelect(props: { name: string; defaultValue?: Stage; classNa
     </div>
   );
 }
-

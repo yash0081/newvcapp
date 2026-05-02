@@ -52,6 +52,8 @@ export type ExtensionRequest =
   | { type: "FINALIZE" }
   | { type: "OPEN_APP"; path?: string };
 
+export type ExternalExtensionRequest = { type: "OPEN_COPILOT_UI" };
+
 export type ExtensionResponse =
   | { ok: true; payload?: unknown }
   | { ok: false; error: string; status?: number };

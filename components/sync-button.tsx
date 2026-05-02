@@ -28,7 +28,7 @@ export function SyncButton() {
     <button
       onClick={handleSync}
       disabled={loading}
-      className="px-4 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-colors disabled:opacity-50"
+      className="px-4 py-2 rounded-2xl border border-gray-300 hover:bg-gray-50 transition-colors disabled:opacity-50"
     >
       {loading ? "Syncing…" : "Sync now"}
     </button>

@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser } from "@/lib/research/db";
 
 function asOutputFormat(v: unknown): "markdown" | "docx" | "pdf" | "text" {
-  return v === "docx" || v === "pdf" || v === "text" || v === "markdown" ? v : "markdown";
+  return v === "docx" || v === "pdf" || v === "text" ? v : "text";
 }
 
 export async function GET() {
