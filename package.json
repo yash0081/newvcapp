@@ -22,7 +22,8 @@
     "deal-intel:embed-facts": "tsx scripts/deal-intel-backfill-fact-embeddings.ts",
     "deal-intel:keywords": "tsx scripts/deal-intel-backfill-keywords.ts",
     "deal-intel:keywords:offline": "tsx scripts/deal-intel-reconcile-keywords-offline.ts",
-    "deal-intel:validate-parity": "tsx scripts/deal-intel-validate-parity.ts"
+    "deal-intel:validate-parity": "tsx scripts/deal-intel-validate-parity.ts",
+    "test:canonical-verifier": "tsx scripts/test-canonical-claim-verify.ts"
   },
   "dependencies": {
     "@deepgram/sdk": "^5.0.0",

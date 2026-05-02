@@ -62,7 +62,9 @@ export function extractQuestionSpansFromChunk(args: { text: string; tStartMs: nu
 }
 
 async function confirmSpanMapsToQuestion(span: string, questionText: string): Promise<boolean | null> {
-  const prompt = `Does the SPAN ask essentially the same question as the TRACKED_QUESTION? Return JSON only: {"same":true|false}
+  const prompt = `The SPAN is words someone actually said on a live VC diligence call. Decide whether they are asking THE SAME diligence question as TRACKED_QUESTION (same intent and answer shape). Related topics are NOT enough — reject if it is a different question or the host is answering rather than asking.
+
+Return JSON only: {"same":true|false}
 SPAN: ${span.slice(0, 400)}
 TRACKED_QUESTION: ${questionText.slice(0, 400)}`;
   try {
@@ -75,9 +77,83 @@ TRACKED_QUESTION: ${questionText.slice(0, 400)}`;
   return null;
 }
 
-export async function runMeetingQuestionSpanDetect(
+/** Canonical mode: one LLM call maps the whole host semantic chunk to tracked questions they asked. */
+export async function runMeetingHostQuestionSpanBatchCanonical(
   admin: SupabaseClient,
   args: { meetingId: string; chunkText: string; tStartMs: number; tEndMs: number },
+): Promise<void> {
+  const chunkText = args.chunkText.trim().slice(0, 4000);
+  if (!chunkText) return;
+
+  const qRes = await admin
+    .schema("deal_intel")
+    .from("meeting_tracked_question")
+    .select("id, text")
+    .eq("meeting_id", args.meetingId)
+    .limit(60);
+  const tracked = (qRes.data ?? []) as Array<{ id: string; text: string }>;
+  if (!tracked.length) return;
+
+  if (process.env.LIVE_ASSISTANT_Q_SPAN_LLM === "0") return;
+
+  const prompt = `HOST_CHUNK is verbatim transcript from a live VC diligence call.
+
+Which TRACKED_QUESTIONS (if any) is the host explicitly asking the founder about in this chunk?
+Only include real asks — not statements, hypotheticals spoken by the founder, or general chatter.
+
+Return JSON only:
+{ "asks": [ { "question_id": string, "verbatim_snippet": string } ] }
+
+TRACKED_QUESTIONS:
+${JSON.stringify(tracked.map((t) => ({ question_id: t.id, text: t.text.slice(0, 400) }))).slice(0, 24000)}
+
+HOST_CHUNK:
+${chunkText.slice(0, 3200)}`;
+
+  try {
+    const raw = await vertexRunWithText(FAST, prompt, false);
+    const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw))) as {
+      asks?: Array<{ question_id?: string; verbatim_snippet?: string }>;
+    } | null;
+    const asks = parsed?.asks ?? [];
+    const dur = Math.max(1, args.tEndMs - args.tStartMs);
+    for (let i = 0; i < asks.length; i++) {
+      const a = asks[i];
+      const qid = typeof a?.question_id === "string" ? a.question_id : "";
+      if (!qid) continue;
+      const snippet =
+        typeof a?.verbatim_snippet === "string" && a.verbatim_snippet.trim()
+          ? a.verbatim_snippet.trim().slice(0, 1500)
+          : chunkText.slice(0, 800);
+      const dk = `qh:${createHash("sha256").update(`${args.meetingId}:${args.tStartMs}:${qid}:${snippet.slice(0, 120)}`).digest("hex").slice(0, 20)}`;
+      const frac = asks.length > 1 ? i / asks.length : 0;
+      const t0 = args.tStartMs + Math.floor(dur * frac);
+      const t1 = args.tStartMs + Math.floor(dur * Math.min(1, frac + 0.35));
+
+      await admin.schema("deal_intel").from("meeting_question_span").upsert(
+        {
+          meeting_id: args.meetingId,
+          t_start_ms: t0,
+          t_end_ms: Math.max(t1, t0 + 1),
+          text: snippet,
+          is_question_score: 0.75,
+          intent_classifier_version: "v2-host-batch-canonical",
+          merged_from_span_ids: [],
+          linked_tracked_question_id: qid,
+          confirmed_by_llm: true,
+          dedupe_key: dk,
+        },
+        { onConflict: "meeting_id,dedupe_key" },
+      );
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function runMeetingQuestionSpanDetect(
+  admin: SupabaseClient,
+  args: { meetingId: string; chunkText: string; tStartMs: number; tEndMs: number; isHostChunk: boolean },
 ): Promise<void> {
   const spans = extractQuestionSpansFromChunk({
     text: args.chunkText,
@@ -104,7 +180,7 @@ export async function runMeetingQuestionSpanDetect(
     } catch {
       spanEmb = null;
     }
-    let best: { id: string; sim: number; text: string } | null = null;
+    const ranked: Array<{ id: string; sim: number; text: string }> = [];
     for (const tq of tracked) {
       let sim = 0;
       try {
@@ -113,13 +189,21 @@ export async function runMeetingQuestionSpanDetect(
       } catch {
         sim = 0;
       }
-      if (!best || sim > best.sim) best = { id: tq.id, sim, text: tq.text };
+      ranked.push({ id: tq.id, sim, text: tq.text });
     }
-    if (best && best.sim >= 0.78) {
-      linked = best.id;
-      const c = best.sim < 0.88 ? await confirmSpanMapsToQuestion(sp.text, best.text) : true;
-      confirmed = c === true;
-      if (c === false) linked = null;
+    ranked.sort((a, b) => b.sim - a.sim);
+    const top2 = ranked.slice(0, 2).filter((x) => x.sim >= 0.72);
+    // Only the host asking aloud counts as "they asked our tracked question". Guest questions are
+    // still persisted as spans for diagnostics but must not link (until payload sends is_host=true).
+    if (args.isHostChunk && top2.length) {
+      for (const cand of top2) {
+        const c = await confirmSpanMapsToQuestion(sp.text, cand.text);
+        if (c === true) {
+          linked = cand.id;
+          confirmed = true;
+          break;
+        }
+      }
     }
 
     await admin.schema("deal_intel").from("meeting_question_span").upsert(

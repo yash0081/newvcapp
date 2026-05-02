@@ -28,8 +28,10 @@ export type CrmNumericSnapshot = {
 
 /** Parse first plausible money/count/percent number from free text (incl. "9 million", "$9M"). */
 export function normalizeNumberFromText(s: string): { value: number; approx: boolean } | null {
-  const text = (s || "").toLowerCase();
+  let text = (s || "").toLowerCase();
   if (!text.trim()) return null;
+  // Strip thousand separators so "100,000,000,000" parses as one magnitude (not "100" first).
+  while (/\d,\d/.test(text)) text = text.replace(/(\d),(\d)/g, "$1$2");
 
   const approx = /\b(about|around|roughly|approximately|approx|~|nearly|close to)\b/.test(text);
 

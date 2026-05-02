@@ -314,23 +314,3 @@ export function extractFastSignals(text: string): FastSignal {
     missingPrompts,
   };
 }
-
-export function detectMetricConflicts(
-  current: NormalizedMetric[],
-  prior: Array<{ key: string | null; quote: string; value_number?: number | null }>,
-): Array<{ key: string; currentValue: number; priorQuote: string }> {
-  const out: Array<{ key: string; currentValue: number; priorQuote: string }> = [];
-  for (const c of current) {
-    const priors = prior.filter((p) => String(p.key || "").toLowerCase() === c.key.toLowerCase());
-    for (const p of priors) {
-      const pv = typeof p.value_number === "number" ? p.value_number : null;
-      if (pv == null) continue;
-      const ratio = pv === 0 ? Math.abs(c.normalizedValue - pv) : Math.abs(c.normalizedValue - pv) / Math.abs(pv);
-      if (ratio > 0.35) {
-        out.push({ key: c.key, currentValue: c.normalizedValue, priorQuote: p.quote });
-      }
-    }
-  }
-  return out;
-}
-

@@ -1,274 +1,328 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { createHash } from "node:crypto";
-import { embedText } from "@/lib/vertex-embeddings";
-import { cosineSimilarity, parseVector, vectorParam } from "@/lib/data-layer/shared/vector";
+import { vertexRunWithText } from "@/lib/vertex";
+import { parseJsonFromResponseOrNull, parseJsonFromResponseWithRepair } from "@/lib/gemini";
+import { getLiveAssistantModel } from "@/lib/live-assistant/model-env";
 import { embedMeetingQuestionText } from "@/lib/live-assistant/meeting-embeddings";
-import { upsertMeetingTrackedQuestion } from "@/lib/live-assistant/tracked-questions";
+import {
+  findNearDuplicateTrackedQuestion,
+  upsertMeetingTrackedQuestion,
+} from "@/lib/live-assistant/tracked-questions";
+import { loadLiveAssistantPreferenceSignals } from "@/lib/live-assistant/preferences";
 
-function metaStr(meta: unknown, key: string): string {
-  if (!meta || typeof meta !== "object") return "";
-  const v = (meta as Record<string, unknown>)[key];
-  return v == null ? "" : String(v).toLowerCase().trim();
+/**
+ * Per-meeting "peer-style" question generator.
+ *
+ * REPLACES the old `similar_deal_question_template` recycler, which copied every
+ * `meeting_assistant_event` (kind=suggested_question) into a templates table and re-served
+ * them via cosine match. With no quality signal in the seed, bot junk became future
+ * "peer questions" and produced cards like "What evidence would invalidate the external
+ * dependency behind: '...'".
+ *
+ * The new design uses ONLY positive user signals as a style prior:
+ *   - questions the host actually asked aloud in past meetings
+ *     (`meeting_question_span.confirmed_by_llm = true` AND `linked_tracked_question_id IS NOT NULL`)
+ *   - the host's preference signals (`loadLiveAssistantPreferenceSignals`)
+ *
+ * Then it makes a single grounded LLM call against the current meeting's recent claims and
+ * proposes 0-3 fresh questions. There is NO templates table; the LLM never sees other bot
+ * output.
+ */
+
+const MODEL = getLiveAssistantModel("fast");
+const HYDRATE_COOLDOWN_MS = 60_000;
+const MAX_NEW_QUESTIONS_PER_TICK = 3;
+
+const STOPWORDS: ReadonlySet<string> = new Set([
+  "the", "and", "for", "with", "that", "this", "have", "has", "had", "are", "was", "were",
+  "but", "from", "into", "about", "they", "them", "their", "our", "your", "you", "yours",
+  "ours", "its", "what", "which", "than", "then", "also", "just", "very", "much", "many",
+  "more", "most", "some", "any", "all", "we", "us", "be", "is", "of", "in", "on", "at",
+  "to", "by", "as", "or", "if", "so", "do", "did", "does", "done", "been", "will", "would",
+  "could", "should", "can", "got", "yes", "no", "not", "out", "up", "down", "off", "now",
+  "how", "why", "when", "where", "who", "whom", "whose",
+]);
+
+/**
+ * Bag of distinctive content tokens for grounding gates. Lowercased, punctuation stripped,
+ * stop-words and short words dropped. Used to require that the LLM's question shares at
+ * least one noun with one of the actual claims in the room.
+ */
+function topicTokens(text: string, max = 8): string[] {
+  const tokens = String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4 && !STOPWORDS.has(t));
+  if (!tokens.length) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of tokens) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
-function dealSimilarityFilter(
-  base: { stage: string; businessModel: string },
-  candMeta: unknown,
-): boolean {
-  const st = metaStr(candMeta, "stage") || metaStr(candMeta, "company_stage");
-  const bm = metaStr(candMeta, "business_model") || metaStr(candMeta, "businessModel");
-  if (!base.stage && !base.businessModel) return true;
-  let ok = true;
-  if (base.stage) {
-    ok = ok && (!st || st.includes(base.stage) || base.stage.includes(st));
+function shareToken(text: string, claimTokens: ReadonlySet<string>): boolean {
+  if (!claimTokens.size) return false;
+  const t = text.toLowerCase();
+  for (const tok of claimTokens) {
+    if (t.includes(tok)) return true;
   }
-  if (base.businessModel) {
-    ok = ok && (!bm || bm.includes(base.businessModel) || base.businessModel.includes(bm));
-  }
-  return ok;
+  return false;
 }
 
-function dedupeTemplatesByEmbedding(
-  items: Array<{ id: string; text: string; source_deal_id: string; section: string; distance: number; embedding?: unknown }>,
-  threshold: number,
-): typeof items {
-  const kept: typeof items = [];
-  const vecs: number[][] = [];
-  for (const it of items) {
-    const v = parseVector(it.embedding);
-    let dup = false;
-    if (v && v.length) {
-      for (let i = 0; i < kept.length; i++) {
-        const kv = vecs[i];
-        if (!kv?.length) continue;
-        if (cosineSimilarity(v, kv) >= threshold) {
-          dup = true;
-          break;
-        }
-      }
-    }
-    if (!dup) {
-      kept.push(it);
-      vecs.push(v && v.length ? v : []);
-    }
-  }
-  return kept;
-}
+type RecentClaim = { id: string; text: string; section: string };
+type StyleExample = { text: string };
 
-export async function seedSimilarDealQuestionTemplatesFromEvents(admin: SupabaseClient, dealId: string): Promise<void> {
-  const meetingsRes = await admin.schema("deal_intel").from("meeting_session").select("id").eq("deal_id", dealId).limit(80);
-  if (meetingsRes.error) return;
-  const mids = (meetingsRes.data ?? []).map((r) => r.id as string);
-  if (!mids.length) return;
-
-  const evRes = await admin
+async function loadRecentClaims(admin: SupabaseClient, meetingId: string): Promise<RecentClaim[]> {
+  const sinceMs = Date.now() - 6 * 60_000;
+  const res = await admin
     .schema("deal_intel")
-    .from("meeting_assistant_event")
-    .select("body, source_map")
-    .in("meeting_id", mids)
-    .eq("kind", "suggested_question")
-    .limit(300);
-  if (evRes.error) return;
-
-  const dealRow = await admin.schema("deal_intel").from("deal").select("metadata").eq("id", dealId).maybeSingle();
-  const meta = dealRow.data?.metadata;
-  const stageCap = metaStr(meta, "stage") || metaStr(meta, "company_stage");
-  const bmCap = metaStr(meta, "business_model") || metaStr(meta, "businessModel");
-
-  const model = process.env.VERTEX_EMBEDDING_MODEL || "text-embedding-004";
-  const rows: Array<Record<string, unknown>> = [];
-
-  for (const e of evRes.data ?? []) {
-    const text = String((e as { body?: string }).body ?? "").trim();
-    if (text.length < 12 || text.length > 1800) continue;
-    const sm = (e as { source_map?: unknown }).source_map;
-    const lane = sm && typeof sm === "object" ? String((sm as Record<string, unknown>).lane ?? "") : "";
-    const dk = `seed:${createHash("sha256").update(`${dealId}:${text.slice(0, 400)}`).digest("hex").slice(0, 20)}`;
-    let emb: string | null = null;
-    try {
-      emb = vectorParam(await embedMeetingQuestionText(text));
-    } catch {
-      emb = null;
-    }
-    rows.push({
-      source_deal_id: dealId,
-      text,
-      section: "other",
-      embedding: emb,
-      embedding_model: model,
-      importance_weight: 0.55,
-      is_meeting_question: lane !== "memo",
-      stage_at_capture: stageCap || null,
-      business_model_at_capture: bmCap || null,
-      dedupe_key: dk,
-    });
-  }
-
-  for (let i = 0; i < rows.length; i += 20) {
-    const batch = rows.slice(i, i + 20);
-    await admin.schema("deal_intel").from("similar_deal_question_template").upsert(batch, { onConflict: "source_deal_id,dedupe_key" });
-  }
+    .from("meeting_claim")
+    .select("id, text, section_labels, updated_at")
+    .eq("meeting_id", meetingId)
+    .gte("updated_at", new Date(sinceMs).toISOString())
+    .order("updated_at", { ascending: false })
+    .limit(15);
+  if (res.error || !res.data) return [];
+  return res.data
+    .map((r) => {
+      const labels = Array.isArray((r as { section_labels?: unknown }).section_labels)
+        ? ((r as { section_labels: string[] }).section_labels)
+        : [];
+      const section = labels.find((s) => s && s !== "other") || labels[0] || "other";
+      return {
+        id: String((r as { id: string }).id),
+        text: String((r as { text?: string }).text ?? "").trim(),
+        section,
+      };
+    })
+    .filter((r) => r.text.length >= 12);
 }
 
-export async function runSimilarDealQuestionHydrate(
+/**
+ * Pull verbatim spans the host actually said in past meetings that the system confirmed mapped
+ * to a tracked diligence question. These are the only "good question" examples we trust.
+ */
+async function loadAskedAloudExamples(
+  admin: SupabaseClient,
+  userId: string,
+  excludeMeetingId: string,
+): Promise<StyleExample[]> {
+  const meetingsRes = await admin
+    .schema("deal_intel")
+    .from("meeting_session")
+    .select("id")
+    .eq("host_user_id", userId)
+    .neq("id", excludeMeetingId)
+    .order("created_at", { ascending: false })
+    .limit(40);
+  if (meetingsRes.error || !meetingsRes.data?.length) return [];
+  const meetingIds = meetingsRes.data.map((r) => String((r as { id: string }).id));
+
+  const spansRes = await admin
+    .schema("deal_intel")
+    .from("meeting_question_span")
+    .select("text, confirmed_by_llm, linked_tracked_question_id, created_at")
+    .in("meeting_id", meetingIds)
+    .eq("confirmed_by_llm", true)
+    .not("linked_tracked_question_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (spansRes.error || !spansRes.data) return [];
+
+  const seen = new Set<string>();
+  const out: StyleExample[] = [];
+  for (const r of spansRes.data) {
+    const text = String((r as { text?: string }).text ?? "").trim();
+    if (text.length < 8 || text.length > 320) continue;
+    const key = text.toLowerCase().replace(/\s+/g, " ").slice(0, 120);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ text });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+const lastHydrateAt = new Map<string, number>();
+
+export async function runUserStyleQuestionHydrate(
   admin: SupabaseClient,
   args: { meetingId: string; userId: string; dealId: string },
 ): Promise<void> {
-  const { data: st } = await admin
+  const lastInMem = lastHydrateAt.get(args.meetingId) ?? 0;
+  if (lastInMem && Date.now() - lastInMem < HYDRATE_COOLDOWN_MS) return;
+
+  // Defense-in-depth: also respect the persisted last_similar_hydrate_at so a process
+  // restart doesn't burst the LLM.
+  const stRes = await admin
     .schema("deal_intel")
     .from("meeting_question_engine_state")
     .select("last_similar_hydrate_at")
     .eq("meeting_id", args.meetingId)
     .maybeSingle();
-  const lastMs = st?.last_similar_hydrate_at ? new Date(String(st.last_similar_hydrate_at)).getTime() : 0;
-  if (lastMs && Date.now() - lastMs < 5 * 60_000) return;
+  const lastDb = stRes.data?.last_similar_hydrate_at
+    ? new Date(String(stRes.data.last_similar_hydrate_at)).getTime()
+    : 0;
+  if (lastDb && Date.now() - lastDb < HYDRATE_COOLDOWN_MS) {
+    lastHydrateAt.set(args.meetingId, lastDb);
+    return;
+  }
+  lastHydrateAt.set(args.meetingId, Date.now());
 
-  const dealRes = await admin.schema("deal_intel").from("deal").select("metadata").eq("id", args.dealId).maybeSingle();
-  const meta = dealRes.data?.metadata;
-  const base = {
-    stage: metaStr(meta, "stage") || metaStr(meta, "company_stage"),
-    businessModel: metaStr(meta, "business_model") || metaStr(meta, "businessModel"),
-  };
+  const claims = await loadRecentClaims(admin, args.meetingId);
+  if (!claims.length) {
+    await touchHydrateState(admin, args.meetingId);
+    return;
+  }
 
-  const recent = await admin
-    .schema("deal_intel")
-    .from("meeting_claim")
-    .select("text")
-    .eq("meeting_id", args.meetingId)
-    .order("updated_at", { ascending: false })
-    .limit(12);
-  const qText = (recent.data ?? [])
-    .map((r) => String((r as { text?: string }).text ?? ""))
-    .join(" ")
-    .slice(0, 1200);
-  const queryText = qText || `${base.stage} ${base.businessModel} diligence questions`;
+  const [examples, prefs] = await Promise.all([
+    loadAskedAloudExamples(admin, args.userId, args.meetingId),
+    loadLiveAssistantPreferenceSignals(admin, args.userId).catch(() => null),
+  ]);
 
-  let qEmb: number[];
+  // Aggregate claim topic tokens once - the LLM gate later requires every proposed
+  // question to reference at least one of these.
+  const claimTokenSet = new Set<string>();
+  for (const c of claims) for (const t of topicTokens(c.text)) claimTokenSet.add(t);
+  if (!claimTokenSet.size) {
+    await touchHydrateState(admin, args.meetingId);
+    return;
+  }
+
+  const styleHint = examples.length
+    ? `USER_STYLE (verbatim questions this user has asked aloud in past meetings - mimic the brevity and specificity, do not paraphrase):
+${examples.map((e, i) => `${i + 1}. ${e.text}`).join("\n")}`
+    : `USER_STYLE: (no prior asked-aloud questions captured. Default to crisp, specific VC follow-up questions.)`;
+
+  const focusHints = prefs?.focusHints?.length ? `FOCUS_HINTS: ${prefs.focusHints.slice(0, 4).join(" | ")}` : "";
+  const sectionWeights = prefs?.sectionWeights
+    ? Object.entries(prefs.sectionWeights)
+        .filter(([, w]) => typeof w === "number" && (w as number) >= 1.05)
+        .map(([s]) => s)
+    : [];
+  const preferredSections = sectionWeights.length
+    ? `PREFERRED_SECTIONS: ${sectionWeights.join(", ")}`
+    : "";
+
+  const claimsBlock = claims
+    .map(
+      (c, i) =>
+        `${i + 1}. [id=${c.id}] [section=${c.section}] ${c.text.slice(0, 360)}`,
+    )
+    .join("\n");
+
+  const prompt = `You are a sharp VC partner suggesting follow-up questions during a live diligence call.
+
+Propose 0 to ${MAX_NEW_QUESTIONS_PER_TICK} questions a thoughtful investor would ask NEXT, grounded in the RECENT_CLAIMS below.
+
+Hard rules:
+- Each question MUST reference at least one specific noun, number, or entity that appears in one of the RECENT_CLAIMS. No generic, reusable, or template-ish questions.
+- Do NOT propose assumption-inversion questions ("what breaks if...", "what evidence would invalidate..."), do NOT propose contradiction restates. Those are handled by other systems.
+- Do NOT propose questions that are essentially restating a claim back as a question.
+- Each question must be a single sentence, <= 180 chars, ending in a question mark.
+- Output JSON only. Return {"questions": []} if there is nothing concrete and specific to ask.
+
+RECENT_CLAIMS:
+${claimsBlock}
+
+${styleHint}
+
+${preferredSections}
+${focusHints}
+
+Return JSON: {"questions": [{"text": "...", "section": "<one of: problem|solution|traction|gtm|market|team|financials|risks|other>", "grounded_in_claim_id": "<uuid from RECENT_CLAIMS>"}]}`;
+
+  let raw: string;
   try {
-    qEmb = await embedText(queryText);
-  } catch {
+    raw = await vertexRunWithText(MODEL, prompt, false);
+  } catch (e) {
+    console.error("runUserStyleQuestionHydrate LLM", e);
+    await touchHydrateState(admin, args.meetingId);
     return;
   }
 
-  const simRes = await admin.rpc("deal_intel_match_similar_deals_hybrid", {
-    p_user_id: args.userId,
-    p_query_embedding: vectorParam(qEmb),
-    p_query_text: queryText.slice(0, 500),
-    p_exclude_deal_id: args.dealId,
-    p_final_limit: 24,
-  });
-  if (simRes.error) {
-    console.error("runSimilarDealQuestionHydrate similar deals", simRes.error);
-    return;
-  }
+  const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw))) as {
+    questions?: unknown;
+  };
+  const arr = Array.isArray(parsed?.questions) ? parsed.questions : [];
 
-  const rawDeals = (simRes.data ?? []) as Array<{ deal_id: string }>;
-  let candidateIds = rawDeals.map((r) => r.deal_id).filter(Boolean);
-  if (!candidateIds.length) {
-    await seedSimilarDealQuestionTemplatesFromEvents(admin, args.dealId);
-    candidateIds = [args.dealId];
-  }
+  const claimIdSet = new Set(claims.map((c) => c.id));
+  const claimSectionById = new Map(claims.map((c) => [c.id, c.section]));
 
-  const dealMetaRes = await admin
-    .schema("deal_intel")
-    .from("deal")
-    .select("id, metadata")
-    .in("id", candidateIds.slice(0, 40));
-  const metas = new Map<string, unknown>();
-  for (const d of dealMetaRes.data ?? []) metas.set(String((d as { id: string }).id), (d as { metadata: unknown }).metadata);
+  let emitted = 0;
+  for (const item of arr) {
+    if (emitted >= MAX_NEW_QUESTIONS_PER_TICK) break;
+    const r = (item && typeof item === "object" ? (item as Record<string, unknown>) : {}) as Record<string, unknown>;
+    const text = String(r.text ?? "").trim();
+    const groundedClaimId = String(r.grounded_in_claim_id ?? "").trim();
+    if (!text) continue;
+    if (text.length > 220) continue;
+    if (!/\?\s*$/.test(text)) continue;
 
-  const filtered = candidateIds.filter((id) => id !== args.dealId && dealSimilarityFilter(base, metas.get(id)));
+    // The LLM has to point at a specific claim - if it invented an id we drop the question.
+    if (!claimIdSet.has(groundedClaimId)) continue;
 
-  const templateDeals = filtered.length ? filtered : candidateIds.filter((id) => id !== args.dealId).slice(0, 8);
-  for (const d of templateDeals.slice(0, 6)) {
-    await seedSimilarDealQuestionTemplatesFromEvents(admin, d);
-  }
+    // And the question text itself has to share at least one topic token with the active
+    // claims. This is the same gate `assumption-extract` uses to kill generic platitudes.
+    if (!shareToken(text, claimTokenSet)) continue;
 
-  const pool = templateDeals.length ? templateDeals : [args.dealId];
-  const tmplRes = await admin.rpc("deal_intel_match_similar_deal_question_templates", {
-    p_source_deal_ids: pool,
-    p_query_embedding: vectorParam(qEmb),
-    p_k: 20,
-  });
-  if (tmplRes.error) {
-    console.error("runSimilarDealQuestionHydrate templates", tmplRes.error);
-    return;
-  }
+    const sectionRaw = String(r.section ?? "").trim().toLowerCase();
+    const allowedSections = new Set([
+      "problem", "solution", "traction", "gtm", "market", "team", "financials", "risks", "other",
+    ]);
+    const section = allowedSections.has(sectionRaw)
+      ? sectionRaw
+      : claimSectionById.get(groundedClaimId) || "other";
 
-  const tmplRows = (tmplRes.data ?? []) as Array<{
-    id: string;
-    source_deal_id: string;
-    text: string;
-    section: string;
-    distance: number;
-  }>;
+    let embedding: number[] | null = null;
+    try {
+      embedding = await embedMeetingQuestionText(text);
+    } catch {
+      embedding = null;
+    }
+    if (embedding && embedding.length) {
+      const dup = await findNearDuplicateTrackedQuestion(admin, {
+        meetingId: args.meetingId,
+        embedding,
+      });
+      if (dup) continue;
+    }
 
-  if (!tmplRows.length) {
-    await admin
-      .schema("deal_intel")
-      .from("meeting_question_engine_state")
-      .upsert(
-        {
-          meeting_id: args.meetingId,
-          last_similar_hydrate_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "meeting_id" },
-      );
-    return;
-  }
-
-  const withEmb = await admin
-    .schema("deal_intel")
-    .from("similar_deal_question_template")
-    .select("id, text, source_deal_id, section, embedding")
-    .in(
-      "id",
-      tmplRows.map((t) => t.id),
-    );
-  const byId = new Map((withEmb.data ?? []).map((r) => [String((r as { id: string }).id), r as Record<string, unknown>]));
-
-  const merged = tmplRows.map((t) => {
-    const full = byId.get(t.id);
-    return {
-      id: t.id,
-      text: t.text,
-      source_deal_id: t.source_deal_id,
-      section: t.section,
-      distance: t.distance,
-      embedding: full?.embedding,
-    };
-  });
-
-  const deduped = dedupeTemplatesByEmbedding(merged, Number(process.env.LIVE_ASSISTANT_Q_TEMPLATE_DEDUPE_SIM ?? 0.92)).slice(0, 8);
-
-  for (const t of deduped) {
-    const relevance = Math.max(0, Math.min(1, 1 - Number(t.distance || 0)));
-    const importance = 0.5 + relevance * 0.4;
-    const score = 0.45 * relevance + 0.35 * importance + 0.2 * 1;
-    if (score < 0.35) continue;
     await upsertMeetingTrackedQuestion(admin, {
       meetingId: args.meetingId,
-      text: t.text,
-      section: t.section || "other",
-      importanceWeight: importance,
+      text,
+      section,
+      importanceWeight: 0.6,
       state: "unanswered",
-      provenance: "similar_company",
-      venue: "memo_prep",
-      similarDealId: t.source_deal_id,
-      templateId: t.id,
-      dedupeKey: `sim:${t.id}`,
-      metadata: { template_distance: t.distance, score },
-      syncEvent: { title: "Peer question", lane: "memo", severity: "low" },
+      provenance: "peer_style",
+      venue: "in_meeting",
+      similarDealId: null,
+      dedupeKey: `peer:${args.meetingId}:${groundedClaimId}:${text.slice(0, 80).toLowerCase().replace(/\s+/g, " ")}`,
+      metadata: {
+        grounded_in_claim_id: groundedClaimId,
+        style_examples_used: examples.length,
+      },
+      syncEvent: { title: "Peer-style question", lane: "memo", severity: "low" },
     });
+    emitted += 1;
   }
 
+  await touchHydrateState(admin, args.meetingId);
+}
+
+async function touchHydrateState(admin: SupabaseClient, meetingId: string): Promise<void> {
   await admin
     .schema("deal_intel")
     .from("meeting_question_engine_state")
     .upsert(
       {
-        meeting_id: args.meetingId,
+        meeting_id: meetingId,
         last_similar_hydrate_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       },

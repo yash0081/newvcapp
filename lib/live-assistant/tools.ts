@@ -8,7 +8,8 @@ export type MeetingEventKind =
   | "crm_fact"
   | "key_point"
   | "suggested_question"
-  | "action_prompt";
+  | "action_prompt"
+  | "claim_verification";
 
 export type MeetingEventSeverity = "low" | "med" | "high";
 
@@ -142,7 +143,6 @@ export async function matchClaimsHybrid(admin: SupabaseClient, opts: { userId: s
 export async function createMeetingAssistantEvent(admin: SupabaseClient, input: MeetingAssistantEventInput) {
   const severity: MeetingEventSeverity = input.severity ?? "low";
   const sourceMap = (input.source_map && typeof input.source_map === "object" ? input.source_map : {}) as Record<string, unknown>;
-  const fastLane = sourceMap.fast_lane === true;
   const dedupeKey =
     typeof sourceMap.dedupe_key === "string" && sourceMap.dedupe_key.trim()
       ? sourceMap.dedupe_key.trim()
@@ -151,29 +151,30 @@ export async function createMeetingAssistantEvent(admin: SupabaseClient, input: 
           .digest("hex")
           .slice(0, 24);
 
-  // Best-effort dedupe: avoid inserting the same card repeatedly.
-  // We only scan recent rows (cheap) and match on source_map.dedupe_key.
-  if (!fastLane) {
-    try {
-      const recent = await admin
-        .schema("deal_intel")
-        .from("meeting_assistant_event")
-        .select("id, source_map")
-        .eq("meeting_id", input.meeting_id)
-        .order("created_at", { ascending: false })
-        .limit(80);
-      if (!recent.error) {
-        for (const r of (recent.data ?? []) as Array<{ id: string; source_map: unknown }>) {
-          const sm = (r.source_map && typeof r.source_map === "object" ? (r.source_map as Record<string, unknown>) : {}) as Record<
-            string,
-            unknown
-          >;
-          if (String(sm.dedupe_key ?? "") === dedupeKey) return { data: { id: r.id }, error: null };
-        }
+  // Best-effort recent-rows dedupe. Used to be skipped for `fast_lane: true` callers under
+  // the assumption that they handle dedupe in-process via maps + the periodic sweep, but
+  // that left a window where two fast emits for the same fact slipped through before the
+  // sweep ran. Now every caller (fast/middle/slow/deep) participates in this check; the
+  // 80-row scan is cheap, and it kills cross-path races without needing the sweep at all.
+  try {
+    const recent = await admin
+      .schema("deal_intel")
+      .from("meeting_assistant_event")
+      .select("id, source_map")
+      .eq("meeting_id", input.meeting_id)
+      .order("created_at", { ascending: false })
+      .limit(80);
+    if (!recent.error) {
+      for (const r of (recent.data ?? []) as Array<{ id: string; source_map: unknown }>) {
+        const sm = (r.source_map && typeof r.source_map === "object" ? (r.source_map as Record<string, unknown>) : {}) as Record<
+          string,
+          unknown
+        >;
+        if (String(sm.dedupe_key ?? "") === dedupeKey) return { data: { id: r.id }, error: null };
       }
-    } catch {
-      // ignore dedupe read errors
     }
+  } catch {
+    // ignore dedupe read errors
   }
 
   const row = {

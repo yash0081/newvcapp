@@ -23,6 +23,14 @@ import { highlightAcceptedSnippet } from "@content/highlighter";
 
 const APP_HOSTNAME_RE = /^chrome-extension:|^moz-extension:/;
 const PREFS_KEY = "vcapp_overlay_prefs";
+/** Local echo of the steering textarea so an un-applied draft survives full page navigations. */
+const STEERING_LOCAL_KEY = "vcapp_overlay_steering_draft_v1";
+
+function steeringNoteFromSession(s: CopilotSession | null): string {
+  const meta = s?.metadata as Record<string, unknown> | undefined;
+  const v = meta?.auto_steering_note;
+  return typeof v === "string" ? v : "";
+}
 const FINGERPRINT_SUPPRESSION_MS = 5000;
 const MAX_VISIBLE_SUGGESTIONS = 8;
 const FIRST_ANALYZE_DEBOUNCE_MS = 800;
@@ -155,6 +163,8 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     (initialSession?.metadata?.acceptedSnippets ?? []) as AcceptedSnippet[],
   );
   const [busy, setBusy] = useState<null | string>(null);
+  /** Saving steering uses its own flag so Pause / navigation aren’t blocked by global `busy`. */
+  const [steeringSaving, setSteeringSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [paused, setPausedState] = useState(false);
@@ -177,6 +187,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const agentScrollStreakRef = useRef(0);
   /** Last time /observe returned OK (drives idle auto-end). */
   const lastObserveSuccessAtRef = useRef<number>(Date.now());
+  /** Mirrors `paused` for async loops / callbacks that can’t close over fresh state. */
+  const pausedRef = useRef(false);
+  const sessionRef = useRef<CopilotSession | null>(session);
+  const autoSteeringDirtyRef = useRef(false);
+  /** Ensures we merge chrome.storage steering draft once per active session id. */
+  const steeringStorageHydratedFor = useRef<string | null>(null);
 
   const sessionId = session?.id ?? null;
   const effectiveScope: SnapshotScope = mode === "auto" ? "full" : scope;
@@ -199,17 +215,73 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     return typeof v === "string" ? v : "";
   }, [session?.id, sessionMeta?.auto_steering_note]);
 
-  const [autoSteeringDraft, setAutoSteeringDraft] = useState("");
+  const [autoSteeringDraft, setAutoSteeringDraft] = useState(() => steeringNoteFromSession(initialSession));
   const [autoSteeringDirty, setAutoSteeringDirty] = useState(false);
+
+  sessionRef.current = session;
+  pausedRef.current = paused;
+  autoSteeringDirtyRef.current = autoSteeringDirty;
 
   useEffect(() => {
     if (!session?.id) {
       setAutoSteeringDraft("");
       setAutoSteeringDirty(false);
+      steeringStorageHydratedFor.current = null;
       return;
     }
     if (!autoSteeringDirty) setAutoSteeringDraft(serverAutoSteering);
   }, [session?.id, serverAutoSteering, autoSteeringDirty]);
+
+  /** Echo steering draft locally so it survives reloads before “Apply focus”. */
+  useEffect(() => {
+    if (!sessionId) return;
+    const id = window.setTimeout(() => {
+      try {
+        chrome.storage?.local?.set({
+          [STEERING_LOCAL_KEY]: { sessionId, draft: autoSteeringDraft, updatedAt: Date.now() },
+        });
+      } catch {
+        /* ignore */
+      }
+    }, 450);
+    return () => window.clearTimeout(id);
+  }, [sessionId, autoSteeringDraft]);
+
+  /** After navigation/re-mount: restore draft from storage when server has no applied steering yet. */
+  useEffect(() => {
+    if (!sessionId) return;
+    if (steeringStorageHydratedFor.current === sessionId) return;
+    steeringStorageHydratedFor.current = sessionId;
+    try {
+      chrome.storage?.local?.get(STEERING_LOCAL_KEY, (got) => {
+        if (chrome.runtime.lastError) return;
+        const pack = got?.[STEERING_LOCAL_KEY] as { sessionId?: string; draft?: string } | undefined;
+        if (!pack || pack.sessionId !== sessionId || typeof pack.draft !== "string") return;
+        const storedDraft = pack.draft;
+        setAutoSteeringDraft((prev) => {
+          if (autoSteeringDirtyRef.current) return prev;
+          const srv = steeringNoteFromSession(sessionRef.current);
+          if (srv.trim()) return srv;
+          if (prev.trim()) return prev;
+          return storedDraft;
+        });
+      });
+    } catch {
+      /* ignore */
+    }
+  }, [sessionId]);
+
+  /** Pause immediately cancels in-flight analyze noise and pending scroll-kick without waiting on UI locks. */
+  useEffect(() => {
+    if (!paused) return;
+    analyzeAbortRef.current?.abort();
+    analyzeAbortRef.current = null;
+    setBusy(null);
+    if (scrollKickTimerRef.current != null) {
+      window.clearTimeout(scrollKickTimerRef.current);
+      scrollKickTimerRef.current = null;
+    }
+  }, [paused]);
 
   // Hydrate persisted preferences (autoMode) once on mount.
   useEffect(() => {
@@ -349,6 +421,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
 
   const analyzePage = useCallback(async () => {
     if (!sessionId) return;
+    if (pausedRef.current) return;
     const snapshot = extractDomSnapshot({ scope: effectiveScope });
     if (snapshot.visible_text.length < 80) return;
     const fp = fingerprintSnapshot(snapshot, effectiveScope);
@@ -427,6 +500,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         setSuggestions([]);
         lastSnapshotRef.current = null;
         setResearchActivity("Loading a new page — will analyze shortly…");
+        void refreshSession();
         debounced();
       }
     };
@@ -451,7 +525,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       window.removeEventListener("scroll", onScroll);
       history.pushState = origPush;
     };
-  }, [paused, sessionId, analyzePage]);
+  }, [paused, sessionId, analyzePage, refreshSession]);
 
   // Poll session metadata (e.g. last_synced_at) while researching.
   useEffect(() => {
@@ -553,7 +627,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const applyAutoSteering = useCallback(async () => {
     if (!sessionId) return;
     setResearchActivity("Saving your research focus…");
-    setBusy("Saving focus…");
+    setSteeringSaving(true);
     setError(null);
     try {
       const res = await send<SessionResponse>({ type: "SET_AUTO_STEERING", note: autoSteeringDraft.trim() });
@@ -563,25 +637,30 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setBusy(null);
+      setSteeringSaving(false);
     }
   }, [sessionId, autoSteeringDraft]);
 
   const clearAutoSteering = useCallback(async () => {
     if (!sessionId) return;
     setResearchActivity("Clearing saved focus…");
-    setBusy("Clearing focus…");
+    setSteeringSaving(true);
     setError(null);
     try {
       const res = await send<SessionResponse>({ type: "SET_AUTO_STEERING", note: "" });
       setAutoSteeringDraft("");
       setAutoSteeringDirty(false);
+      try {
+        chrome.storage?.local?.remove(STEERING_LOCAL_KEY);
+      } catch {
+        /* ignore */
+      }
       if (res.session) setSession(res.session);
       setInfo("Steering cleared.");
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setBusy(null);
+      setSteeringSaving(false);
     }
   }, [sessionId]);
 
@@ -589,11 +668,13 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     if (!sessionId || paused || mode !== "auto" || busy) return;
     if (pendingNav) return;
     const run = async () => {
+      if (pausedRef.current) return;
       // Auto UI hides suggestion cards — resolve contradictions without asking (defer CRM truth; unblocks planner).
       const contradictRows = suggestions.filter((s) => s.kind === "contradicts" && s.event_id);
       if (contradictRows.length) {
         setResearchActivity("Untangling conflicting facts the model flagged…");
         for (const s of contradictRows) {
+          if (pausedRef.current) return;
           await decide(s, "reject", { silent: true });
         }
         return;
@@ -608,6 +689,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       const draftKeys = new Set(autoDraft.map((sn) => suggestionKey({ summary: "", snippet: sn.text })));
       const textsForDedupe = [...autoDraft.map((sn) => sn.text), ...snippets.map((sn) => sn.text)];
       for (const s of autoAccept) {
+        if (pausedRef.current) return;
         const key = suggestionKey(s);
         if (draftKeys.has(key)) continue;
         if (isNearDuplicateDraftSnippet(s.snippet, textsForDedupe)) continue;
@@ -633,6 +715,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         });
         setSuggestions((prev) => prev.filter((x) => (x.event_id ?? x.client_id) !== (s.event_id ?? s.client_id)));
       }
+      if (pausedRef.current) return;
       const snapshot = extractDomSnapshot({ scope: effectiveScope });
       const copilotExploreLinks = suggestions
         .filter((s) => s.kind === "explore" && typeof s.link_url === "string" && s.link_url.trim())
@@ -662,6 +745,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         plan_page_context,
         ...(copilotExploreLinks.length ? { copilotExploreLinks } : {}),
       });
+      if (pausedRef.current) return;
       if (res.next.action === "scroll") {
         agentScrollStreakRef.current += 1;
         if (agentScrollStreakRef.current > 8) {
@@ -680,6 +764,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: "smooth" });
         scrollKickTimerRef.current = window.setTimeout(() => {
           scrollKickTimerRef.current = null;
+          if (pausedRef.current) return;
           setResearchActivity("Re-reading the page after scrolling…");
           void analyzePage();
           setPostScrollPlannerKick((k) => k + 1);
@@ -704,6 +789,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         );
         return;
       }
+      if (pausedRef.current) return;
       if (res.next.action === "navigate" && res.next.url) {
         const rationale = res.next.rationale?.trim();
         let host = "the next page";
@@ -881,17 +967,17 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                       type="button"
                       onClick={() => void applyAutoSteering()}
                       disabled={
-                        !!busy ||
+                        steeringSaving ||
                         (!autoSteeringDirty && autoSteeringDraft.trim() === serverAutoSteering.trim())
                       }
                     >
-                      Apply focus
+                      {steeringSaving ? "Saving…" : "Apply focus"}
                     </button>
                     <button
                       className="btn"
                       type="button"
                       onClick={() => void clearAutoSteering()}
-                      disabled={!!busy || (!serverAutoSteering && !autoSteeringDraft.trim())}
+                      disabled={steeringSaving || (!serverAutoSteering && !autoSteeringDraft.trim())}
                     >
                       Clear
                     </button>
@@ -1078,11 +1164,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             <div className="toolbar">
               <button
                 className="btn"
+                type="button"
                 onClick={() => {
                   if (!paused) setPendingNav(null);
                   setPaused((v) => !v);
                 }}
-                disabled={!!busy}
               >
                 {paused ? "Resume" : "Pause"}
               </button>

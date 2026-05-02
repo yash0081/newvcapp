@@ -9,12 +9,24 @@ import "@livekit/components-styles";
 
 type AssistantEvent = {
   id: string;
-  kind: "contradiction" | "crm_fact" | "key_point" | "suggested_question" | "action_prompt";
+  kind: "contradiction" | "crm_fact" | "key_point" | "suggested_question" | "action_prompt" | "claim_verification";
   title: string | null;
   body: string;
   severity: "low" | "med" | "high";
   created_at: string;
   source_map?: Record<string, unknown> | null;
+};
+
+type ClaimVerificationRow = {
+  id: string;
+  claim_id: string;
+  stage: string;
+  auto_verdict: string | null;
+  auto_summary: string | null;
+  research_verdict: string | null;
+  research_summary: string | null;
+  research_citations: unknown;
+  claim_text?: string;
 };
 
 type TrackedQuestion = {
@@ -38,6 +50,19 @@ type QuestionEvidence = {
 };
 
 type EventLane = "attention" | "context" | "memo";
+
+/**
+ * Display label for `meeting_tracked_question.provenance`. The legacy `similar_company`
+ * value (from the killed peer-template recycler) renders the same as the new `peer_style`
+ * generator so historical rows in the DB keep a sensible badge.
+ */
+function provenanceLabel(p: string): string {
+  if (p === "similar_company" || p === "peer_style") return "peer style";
+  if (p === "assumption_inversion") return "assumption check";
+  if (p === "low_evidence") return "low evidence";
+  if (p === "coverage_prompt") return "coverage";
+  return p;
+}
 
 type NoteRow = {
   id: string;
@@ -311,18 +336,23 @@ function LeftSidebarPanel(props: { meetingId: string }) {
           <ul className="space-y-2">
             {answered.slice(0, 14).map((q) => {
               const ev = evidenceByQuestionId[q.id]?.[0];
+              // Prefer the literal answer span extracted by `llmAnswerCheck` (persisted in
+              // `meeting_question_claim_match.scores.answer_text`) over the full claim text.
+              const scores = ev?.scores && typeof ev.scores === "object" ? (ev.scores as Record<string, unknown>) : null;
+              const answerText = scores && typeof scores.answer_text === "string" ? scores.answer_text.trim() : "";
+              const display = answerText || ev?.claim_text || "";
               return (
                 <li key={q.id} className="rounded-2xl border border-emerald-200/70 bg-white p-3 shadow-sm">
                   <div className="flex flex-wrap gap-1.5 text-[10px] text-zinc-500">
                     <span className="rounded-full bg-emerald-50 text-emerald-800 px-2 py-0.5">answered</span>
-                    <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.provenance}</span>
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5">{provenanceLabel(q.provenance)}</span>
                     <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.section}</span>
                   </div>
                   <p className="mt-2 font-serif text-[15px] leading-snug text-zinc-800">{q.text}</p>
-                  {ev?.claim_text ? (
+                  {display ? (
                     <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50/40 px-3 py-2">
                       <p className="text-[11px] font-medium text-emerald-900">Answer</p>
-                      <p className="mt-1 text-[13px] leading-snug text-emerald-900/90">{ev.claim_text.slice(0, 260)}</p>
+                      <p className="mt-1 text-[13px] leading-snug text-emerald-900/90">{display.slice(0, 260)}</p>
                     </div>
                   ) : (
                     <p className="mt-2 text-xs text-zinc-500">No answer excerpt captured yet.</p>
@@ -340,7 +370,7 @@ function LeftSidebarPanel(props: { meetingId: string }) {
             <li key={q.id} className="rounded-2xl border border-violet-200/70 bg-white p-3 shadow-sm">
               <div className="flex flex-wrap gap-1.5 text-[10px] text-zinc-500">
                 <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.state}</span>
-                <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.provenance}</span>
+                <span className="rounded-full bg-zinc-100 px-2 py-0.5">{provenanceLabel(q.provenance)}</span>
                 <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.section}</span>
               </div>
               <p className="mt-2 font-serif text-[15px] leading-snug text-zinc-800">{q.text}</p>
@@ -574,6 +604,34 @@ function AssistantEventCrmLinks(props: { sourceMap: unknown; dealId?: string }) 
   );
 }
 
+/**
+ * When a contradiction / claim_verification card's `source_map.meeting_claim_id` was
+ * superseded by a later corrected claim, render a small inline footer so the user sees
+ * the correction without needing a separate fresh card. The supersession map is
+ * populated from /api/meetings/.../events on each poll.
+ */
+function SupersededFooter(props: {
+  sourceMap: unknown;
+  supersessions: Record<
+    string,
+    { superseded_by_claim_id: string; superseded_at: string | null; new_claim_text: string | null }
+  >;
+}) {
+  const sm = props.sourceMap && typeof props.sourceMap === "object" ? (props.sourceMap as Record<string, unknown>) : {};
+  const claimId = typeof sm.meeting_claim_id === "string" ? sm.meeting_claim_id : "";
+  if (!claimId) return null;
+  const info = props.supersessions[claimId];
+  if (!info) return null;
+  const text = info.new_claim_text ? info.new_claim_text.trim() : "";
+  return (
+    <div className="mt-2 pt-2 border-t border-zinc-100">
+      <p className="text-[11px] leading-snug text-emerald-700">
+        <span className="font-medium">Updated to:</span> {text ? `“${text.slice(0, 220)}”` : "guest provided a corrected value"}
+      </p>
+    </div>
+  );
+}
+
 function laneForEvent(e: AssistantEvent): EventLane {
   const lane = e.source_map && typeof e.source_map === "object" ? String((e.source_map as Record<string, unknown>).lane ?? "") : "";
   if (lane === "attention" || lane === "context" || lane === "memo") return lane;
@@ -590,19 +648,46 @@ function eventPriority(e: AssistantEvent): number {
   if (e.kind === "contradiction" && sm.fast_lane === true) return 10;
   if (e.kind === "action_prompt") return 60;
   if (e.kind === "crm_fact") return 30;
+  if (e.kind === "claim_verification") {
+    const rv = typeof sm.research_verdict === "string" ? sm.research_verdict : "";
+    if (rv === "contradicts") return 96;
+    const av = typeof sm.auto_verdict === "string" ? sm.auto_verdict : "";
+    if (av === "contradicts") return 93;
+    if (av === "new") return 58;
+    if (av === "aligns") return 28;
+    return 38;
+  }
   return 20;
 }
 
-function verifyQueryForEvent(e: AssistantEvent): string | null {
-  if (!e.source_map || typeof e.source_map !== "object") return null;
-  const sm = e.source_map as Record<string, unknown>;
-  const q = sm.verify_query;
-  return typeof q === "string" && q.trim() ? q.trim() : null;
+function parseResearchCitations(raw: unknown): Array<{ url: string; title: string; snippet: string }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ url: string; title: string; snippet: string }> = [];
+  for (const x of raw) {
+    if (!x || typeof x !== "object") continue;
+    const o = x as Record<string, unknown>;
+    const url = typeof o.url === "string" ? o.url.trim() : "";
+    if (!url) continue;
+    out.push({
+      url,
+      title: typeof o.title === "string" ? o.title : "",
+      snippet: typeof o.snippet === "string" ? o.snippet : "",
+    });
+  }
+  return out;
 }
 
 /** Host-only: subscribed from parent when `role === "host"`. */
+type SupersessionInfo = {
+  superseded_by_claim_id: string;
+  superseded_at: string | null;
+  new_claim_text: string | null;
+};
+
 function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
   const [events, setEvents] = useState<AssistantEvent[]>([]);
+  const [verifications, setVerifications] = useState<ClaimVerificationRow[]>([]);
+  const [supersessions, setSupersessions] = useState<Record<string, SupersessionInfo>>({});
   const [err, setErr] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [tab, setTab] = useState<EventLane>(() => {
@@ -630,15 +715,29 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
     let isCancelled = false;
 
     const load = async () => {
-      const evRes = await fetch(`/api/meetings/${mid}/events`, { method: "GET" });
-      const json = (await evRes.json().catch(() => null)) as { events?: AssistantEvent[]; error?: string } | null;
+      const [evRes, verRes] = await Promise.all([
+        fetch(`/api/meetings/${mid}/events`, { method: "GET" }),
+        fetch(`/api/meetings/${mid}/verifications`, { method: "GET" }),
+      ]);
+      const json = (await evRes.json().catch(() => null)) as {
+        events?: AssistantEvent[];
+        supersessions?: Record<string, SupersessionInfo>;
+        error?: string;
+      } | null;
+      const verJson = (await verRes.json().catch(() => null)) as { verifications?: ClaimVerificationRow[]; error?: string } | null;
       if (isCancelled) return;
       if (!evRes.ok) {
         setErr(json?.error || `Failed (${evRes.status})`);
         return;
       }
+      if (!verRes.ok) {
+        setErr(verJson?.error || `Verifications failed (${verRes.status})`);
+        return;
+      }
       setErr(null);
       setEvents(Array.isArray(json?.events) ? json!.events! : []);
+      setVerifications(Array.isArray(verJson?.verifications) ? verJson.verifications! : []);
+      setSupersessions(json?.supersessions && typeof json.supersessions === "object" ? json.supersessions : {});
     };
 
     void load();
@@ -653,6 +752,12 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
       window.clearInterval(pollId);
     };
   }, [props.meetingId]);
+
+  const verificationsByClaimId = useMemo(() => {
+    const m = new Map<string, ClaimVerificationRow>();
+    for (const v of verifications) m.set(String(v.claim_id), v);
+    return m;
+  }, [verifications]);
 
   const grouped = useMemo(() => {
     const out: Record<EventLane, AssistantEvent[]> = { attention: [], context: [], memo: [] };
@@ -704,91 +809,241 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
         <p className="text-xs text-zinc-500">{subtitle}</p>
       </div>
       {grouped[lane].length ? (
-        grouped[lane].map((e) => (
-          <div
-            key={e.id}
-            className={`rounded-2xl border p-4 shadow-sm ${
-              lane === "attention"
-                ? e.severity === "high"
-                  ? "border-rose-200 bg-white"
-                  : "border-amber-200 bg-white"
-                : lane === "context"
-                  ? "border-blue-200 bg-white"
-                  : "border-zinc-200 bg-white"
-            }`}
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-sm font-semibold tracking-tight text-zinc-900 truncate">{e.title ?? e.kind}</p>
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
-                  <span className="rounded-full border border-zinc-200 px-2 py-0.5 bg-zinc-50">{e.kind}</span>
-                  <span className="rounded-full border border-zinc-200 px-2 py-0.5 bg-zinc-50">{e.severity}</span>
-                  <span>{new Date(e.created_at).toLocaleTimeString()}</span>
+        grouped[lane].map((e) => {
+          if (e.kind === "claim_verification") {
+            const sm = e.source_map && typeof e.source_map === "object" ? (e.source_map as Record<string, unknown>) : {};
+            const claimId = typeof sm.claim_id === "string" ? sm.claim_id : "";
+            const ver = claimId ? verificationsByClaimId.get(claimId) : undefined;
+            const autoVerdict = String(ver?.auto_verdict ?? sm.auto_verdict ?? "").trim();
+            const researchVerdict = String(ver?.research_verdict ?? sm.research_verdict ?? "").trim();
+            const autoSummary = String(ver?.auto_summary ?? sm.auto_summary ?? "").trim();
+            const researchSummary = String(ver?.research_summary ?? sm.research_summary ?? "").trim();
+            const stage = String(ver?.stage ?? "");
+            const citations = parseResearchCitations(ver?.research_citations ?? sm.research_citations);
+            const quote =
+              (ver?.claim_text && String(ver.claim_text).trim()) ||
+              String(sm.claim_quote ?? "")
+                .trim()
+                .slice(0, 400) ||
+              String(e.body ?? "")
+                .replace(/^["“]|["”]$/g, "")
+                .trim()
+                .slice(0, 400);
+            // Surface Verify on both `new` (legacy) and `contradicts` (canonical-emitted
+            // contradiction cards) when no web research has run yet. This matches the
+            // Verify button the legacy `kind: "contradiction"` cards used to render.
+            const showVerify =
+              (autoVerdict === "new" || autoVerdict === "contradicts") &&
+              !researchVerdict &&
+              stage !== "research_pending" &&
+              stage !== "research_done";
+            const researching = stage === "research_pending";
+
+            return (
+              <div
+                key={e.id}
+                className={`rounded-2xl border p-4 shadow-sm ${
+                  lane === "attention"
+                    ? e.severity === "high"
+                      ? "border-rose-200 bg-white"
+                      : "border-amber-200 bg-white"
+                    : lane === "context"
+                      ? "border-blue-200 bg-white"
+                      : "border-zinc-200 bg-white"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold tracking-tight text-zinc-900 truncate">{e.title ?? "Claim check"}</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                      {autoVerdict ? (
+                        <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-violet-900">
+                          deal: {autoVerdict}
+                        </span>
+                      ) : null}
+                      {researchVerdict ? (
+                        <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-sky-900">
+                          web: {researchVerdict}
+                        </span>
+                      ) : null}
+                      <span className="rounded-full border border-zinc-200 px-2 py-0.5 bg-zinc-50">{e.severity}</span>
+                      <span>{new Date(e.created_at).toLocaleTimeString()}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {showVerify && claimId ? (
+                      <button
+                        className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-violet-300 bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50"
+                        disabled={busyId === e.id}
+                        type="button"
+                        onClick={async () => {
+                          setBusyId(e.id);
+                          setErr(null);
+                          try {
+                            const res = await fetch(`/api/meetings/${props.meetingId}/claims/${claimId}/verify`, {
+                              method: "POST",
+                            });
+                            const json = (await res.json().catch(() => null)) as { error?: string } | null;
+                            if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+                          } catch (ex) {
+                            setErr(ex instanceof Error ? ex.message : String(ex));
+                          } finally {
+                            setBusyId(null);
+                          }
+                        }}
+                      >
+                        Verify
+                      </button>
+                    ) : null}
+                    {researching ? (
+                      <span className="text-[11px] text-zinc-500 animate-pulse">Researching…</span>
+                    ) : null}
+                    <button
+                      className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                      disabled={busyId === e.id}
+                      onClick={async () => {
+                        setBusyId(e.id);
+                        setErr(null);
+                        try {
+                          const res = await fetch(`/api/meetings/${props.meetingId}/events/${e.id}`, { method: "DELETE" });
+                          const json = (await res.json().catch(() => null)) as { error?: string } | null;
+                          if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+                          setEvents((prev) => prev.filter((x) => x.id !== e.id));
+                        } catch (ex) {
+                          setErr(ex instanceof Error ? ex.message : String(ex));
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                      type="button"
+                      title="Dismiss"
+                    >
+                      {busyId === e.id ? "…" : "Dismiss"}
+                    </button>
+                  </div>
+                </div>
+                {quote ? (
+                  <p className="mt-3 font-serif text-[15px] leading-snug text-zinc-800">
+                    <span className="text-zinc-400">“</span>
+                    {quote}
+                    <span className="text-zinc-400">”</span>
+                  </p>
+                ) : null}
+                {autoSummary ? <p className="mt-2 text-[13px] leading-snug text-zinc-600">{autoSummary}</p> : null}
+                {researchSummary ? (
+                  <p className="mt-2 text-[13px] leading-snug text-zinc-800 font-medium">{researchSummary}</p>
+                ) : null}
+                {!researchSummary && researchVerdict ? (
+                  <p className="mt-2 text-[13px] text-zinc-600 capitalize">Web research: {researchVerdict}</p>
+                ) : null}
+                {citations.length ? (
+                  <details className="mt-3 rounded-xl border border-zinc-100 bg-zinc-50/60 px-3 py-2">
+                    <summary className="cursor-pointer text-[11px] font-medium text-zinc-700">Sources ({citations.length})</summary>
+                    <ul className="mt-2 space-y-2">
+                      {citations.map((c, idx) => (
+                        <li key={idx} className="text-[11px] leading-snug">
+                          <a href={c.url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-700 hover:underline break-all">
+                            {c.title || c.url}
+                          </a>
+                          {c.snippet ? <p className="mt-0.5 text-zinc-600">{c.snippet}</p> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
+                <AssistantEventCrmLinks sourceMap={e.source_map} dealId={props.dealId} />
+                <SupersededFooter sourceMap={e.source_map} supersessions={supersessions} />
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={e.id}
+              className={`rounded-2xl border p-4 shadow-sm ${
+                lane === "attention"
+                  ? e.severity === "high"
+                    ? "border-rose-200 bg-white"
+                    : "border-amber-200 bg-white"
+                  : lane === "context"
+                    ? "border-blue-200 bg-white"
+                    : "border-zinc-200 bg-white"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold tracking-tight text-zinc-900 truncate">{e.title ?? e.kind}</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                    <span className="rounded-full border border-zinc-200 px-2 py-0.5 bg-zinc-50">{e.kind}</span>
+                    <span className="rounded-full border border-zinc-200 px-2 py-0.5 bg-zinc-50">{e.severity}</span>
+                    <span>{new Date(e.created_at).toLocaleTimeString()}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {e.kind === "contradiction"
+                    ? (() => {
+                        const sm =
+                          e.source_map && typeof e.source_map === "object" ? (e.source_map as Record<string, unknown>) : {};
+                        const contraClaimId = typeof sm.meeting_claim_id === "string" ? sm.meeting_claim_id : "";
+                        return contraClaimId ? (
+                          <button
+                            className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-violet-300 bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50"
+                            disabled={busyId === e.id}
+                            type="button"
+                            title="Run web research on this utterance"
+                            onClick={async () => {
+                              setBusyId(e.id);
+                              setErr(null);
+                              try {
+                                const res = await fetch(`/api/meetings/${props.meetingId}/claims/${contraClaimId}/verify`, {
+                                  method: "POST",
+                                });
+                                const json = (await res.json().catch(() => null)) as { error?: string } | null;
+                                if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+                              } catch (ex) {
+                                setErr(ex instanceof Error ? ex.message : String(ex));
+                              } finally {
+                                setBusyId(null);
+                              }
+                            }}
+                          >
+                            Verify
+                          </button>
+                        ) : null;
+                      })()
+                    : null}
+                  {e.kind === "contradiction" || e.kind === "suggested_question" ? (
+                    <button
+                      className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                      disabled={busyId === e.id}
+                      onClick={async () => {
+                        setBusyId(e.id);
+                        setErr(null);
+                        try {
+                          const res = await fetch(`/api/meetings/${props.meetingId}/events/${e.id}`, { method: "DELETE" });
+                          const json = (await res.json().catch(() => null)) as { error?: string } | null;
+                          if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+                          setEvents((prev) => prev.filter((x) => x.id !== e.id));
+                        } catch (ex) {
+                          setErr(ex instanceof Error ? ex.message : String(ex));
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                      type="button"
+                      title="Dismiss"
+                    >
+                      {busyId === e.id ? "…" : "Dismiss"}
+                    </button>
+                  ) : null}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {verifyQueryForEvent(e) ? (
-                  <button
-                    className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
-                    disabled={busyId === e.id}
-                    onClick={async () => {
-                      const query = verifyQueryForEvent(e) || "";
-                      window.open(`https://www.google.com/search?q=${encodeURIComponent(query)}`, "_blank", "noopener,noreferrer");
-                      const url = window.prompt("Paste the best URL you found (optional):", "") || "";
-                      const notes = window.prompt("Paste short notes (optional):", "") || "";
-                      const decision = window.confirm("Save as ACCEPTED verification? (Cancel = Reject)") ? "accepted" : "rejected";
-                      setBusyId(e.id);
-                      setErr(null);
-                      try {
-                        const res = await fetch(`/api/meetings/${props.meetingId}/verify`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ decision, query, url, notes, event_id: e.id }),
-                        });
-                        const json = (await res.json().catch(() => null)) as { error?: string } | null;
-                        if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
-                      } catch (ex) {
-                        setErr(ex instanceof Error ? ex.message : String(ex));
-                      } finally {
-                        setBusyId(null);
-                      }
-                    }}
-                    type="button"
-                    title="Web search"
-                  >
-                    Web search
-                  </button>
-                ) : null}
-                {e.kind === "contradiction" || e.kind === "suggested_question" ? (
-                  <button
-                    className="inline-flex items-center justify-center h-8 px-3.5 text-[11px] font-medium leading-none rounded-full border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
-                    disabled={busyId === e.id}
-                    onClick={async () => {
-                      setBusyId(e.id);
-                      setErr(null);
-                      try {
-                        const res = await fetch(`/api/meetings/${props.meetingId}/events/${e.id}`, { method: "DELETE" });
-                        const json = (await res.json().catch(() => null)) as { error?: string } | null;
-                        if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
-                        setEvents((prev) => prev.filter((x) => x.id !== e.id));
-                      } catch (ex) {
-                        setErr(ex instanceof Error ? ex.message : String(ex));
-                      } finally {
-                        setBusyId(null);
-                      }
-                    }}
-                    type="button"
-                    title="Dismiss"
-                  >
-                    {busyId === e.id ? "…" : "Dismiss"}
-                  </button>
-                ) : null}
-              </div>
+              {renderBody(e.body)}
+              <AssistantEventCrmLinks sourceMap={e.source_map} dealId={props.dealId} />
+              <SupersededFooter sourceMap={e.source_map} supersessions={supersessions} />
             </div>
-            {renderBody(e.body)}
-            <AssistantEventCrmLinks sourceMap={e.source_map} dealId={props.dealId} />
-          </div>
-        ))
+          );
+        })
       ) : (
         <p className="text-xs text-zinc-500">No {title.toLowerCase()} cards yet.</p>
       )}

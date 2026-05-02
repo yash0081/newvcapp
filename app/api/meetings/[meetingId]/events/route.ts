@@ -60,6 +60,59 @@ export async function GET(req: Request, ctx: { params: Promise<{ meetingId: stri
   const res = await q.limit(200);
 
   if (res.error) return NextResponse.json({ error: res.error.message || "Failed to load events" }, { status: 500 });
-  return NextResponse.json({ events: res.data ?? [] });
+
+  const events = res.data ?? [];
+
+  // Resolve supersession state for the cards we're about to render. When a guest later
+  // corrects a number ("$20B" → "$215B"), the matcher writes `superseded_by_claim_id` on
+  // the original claim. The UI uses this to render an "Updated to: <new claim text>"
+  // footer on the original contradiction/claim_verification card so the user sees the
+  // correction inline rather than as a separate fresh card minutes later.
+  const claimIds = new Set<string>();
+  for (const e of events) {
+    const sm = (e as { source_map?: unknown }).source_map;
+    if (sm && typeof sm === "object") {
+      const v = (sm as Record<string, unknown>).meeting_claim_id;
+      if (typeof v === "string" && v) claimIds.add(v);
+    }
+  }
+  const supersessions: Record<string, { superseded_by_claim_id: string; superseded_at: string | null; new_claim_text: string | null }> = {};
+  if (claimIds.size) {
+    const supRes = await admin
+      .schema("deal_intel")
+      .from("meeting_claim")
+      .select("id, superseded_by_claim_id, superseded_at")
+      .in("id", [...claimIds])
+      .not("superseded_by_claim_id", "is", null);
+    const rows = (supRes.data ?? []) as Array<{
+      id: string;
+      superseded_by_claim_id: string | null;
+      superseded_at: string | null;
+    }>;
+    if (rows.length) {
+      const newClaimIds = [...new Set(rows.map((r) => r.superseded_by_claim_id).filter(Boolean) as string[])];
+      const newClaimTexts = new Map<string, string>();
+      if (newClaimIds.length) {
+        const tRes = await admin
+          .schema("deal_intel")
+          .from("meeting_claim")
+          .select("id, text")
+          .in("id", newClaimIds);
+        for (const r of (tRes.data ?? []) as Array<{ id: string; text: string }>) {
+          newClaimTexts.set(String(r.id), String(r.text ?? "").slice(0, 600));
+        }
+      }
+      for (const r of rows) {
+        if (!r.superseded_by_claim_id) continue;
+        supersessions[String(r.id)] = {
+          superseded_by_claim_id: String(r.superseded_by_claim_id),
+          superseded_at: r.superseded_at ? String(r.superseded_at) : null,
+          new_claim_text: newClaimTexts.get(String(r.superseded_by_claim_id)) ?? null,
+        };
+      }
+    }
+  }
+
+  return NextResponse.json({ events, supersessions });
 }
 

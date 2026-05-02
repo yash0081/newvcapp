@@ -5,6 +5,10 @@ import { parseJsonFromResponseOrNull, parseJsonFromResponseWithRepair } from "@/
 import { getLiveAssistantModel } from "@/lib/live-assistant/model-env";
 import { createMeetingAssistantEvent, getDealContext, matchClaimsHybrid } from "@/lib/live-assistant/tools";
 import { upsertMeetingTrackedQuestion } from "@/lib/live-assistant/tracked-questions";
+import { contradictionFactDedupeKey, metricFamily } from "@/lib/live-assistant/contradiction";
+import { findVerbatimSpan } from "@/lib/live-assistant/quote-grounding";
+import { normalizeNumberFromText } from "@/lib/live-assistant/fast-crm-compare";
+import { buildClaimContext } from "@/lib/live-assistant/claim-context";
 
 const BIG_MODEL = getLiveAssistantModel("big");
 
@@ -184,6 +188,39 @@ export async function runDeepContradictionBatch(admin: SupabaseClient, args: { m
     const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw))) as { contradictions?: unknown };
     const arr = Array.isArray(parsed?.contradictions) ? parsed.contradictions : [];
 
+    // Pull recent meeting_claim rows so we can map the model's founder_quote back to the
+    // exact persisted utterance and reuse its `cclaim:` dedupe key. When this resolves, the
+    // deep card collapses onto the slow / auto-verify card for the same source utterance
+    // inside `createMeetingAssistantEvent`'s recent-rows scan.
+    const recentClaimsRes = await admin
+      .schema("deal_intel")
+      .from("meeting_claim")
+      .select("id, text, t_start_ms, superseded_by_claim_id")
+      .eq("meeting_id", args.meetingId)
+      .order("t_start_ms", { ascending: false })
+      .limit(120);
+    const recentClaims = ((recentClaimsRes.data ?? []) as Array<{
+      id: string;
+      text: string;
+      superseded_by_claim_id: string | null;
+    }>).map((r) => ({
+      id: String(r.id),
+      text: String(r.text ?? "").trim(),
+      superseded_by_claim_id: r.superseded_by_claim_id ?? null,
+    }));
+
+    // Build a single transcript haystack so we can verify every founder_quote actually came
+    // from one of the meeting chunks we sent. The records_quote check uses the JSON-serialized
+    // pack (covers traction/solution/problem fields and prior_claims).
+    const transcriptHaystack = selected.join("\n");
+    const recordsHaystack = JSON.stringify({
+      canonical_facts: canonicalFacts,
+      prior_claims: priorClaims,
+      crm_company_traction: tractionRes.data ?? null,
+      crm_company_solution: solutionRes.data ?? null,
+      crm_company_problem: problemRes && "data" in problemRes ? problemRes.data : null,
+    });
+
     for (const x of arr) {
     const o = (x && typeof x === "object" ? (x as Record<string, unknown>) : {}) as Record<string, unknown>;
     const kind = String(o.kind ?? "");
@@ -192,9 +229,19 @@ export async function runDeepContradictionBatch(admin: SupabaseClient, args: { m
     if (conf < DEEP_DISPLAY_MIN_CONF) continue;
     const sev = String(o.severity ?? "low");
     const severity: "low" | "med" | "high" = sev === "high" ? "high" : sev === "med" ? "med" : "low";
-    const founderQuote = String(o.founder_quote ?? "").trim().slice(0, 600);
-    if (!founderQuote) continue;
-    const recordsQuote = o.records_quote == null ? null : String(o.records_quote).trim().slice(0, 600);
+    const rawFounderQuote = String(o.founder_quote ?? "").trim().slice(0, 600);
+    if (!rawFounderQuote) continue;
+
+    // Hard-drop: a deep contradiction whose founder_quote is not actually in any of the
+    // selected transcript chunks is the model fabricating a quote to justify a finding.
+    const grounded = findVerbatimSpan(transcriptHaystack, rawFounderQuote);
+    if (!grounded) continue;
+    const founderQuote = grounded.matched.slice(0, 600);
+
+    const rawRecordsQuote = o.records_quote == null ? null : String(o.records_quote).trim().slice(0, 600);
+    // Same rule for records_quote when present: must be substring of what we showed the model.
+    if (rawRecordsQuote && !findVerbatimSpan(recordsHaystack, rawRecordsQuote)) continue;
+    const recordsQuote = rawRecordsQuote;
     const why = o.why_it_matters == null ? null : String(o.why_it_matters).trim().slice(0, 500);
     const follow = o.suggested_followup_question == null ? null : String(o.suggested_followup_question).trim().slice(0, 500);
 
@@ -249,6 +296,93 @@ export async function runDeepContradictionBatch(admin: SupabaseClient, args: { m
       lines.push(`Follow-up: ${follow}`);
     }
 
+    // Resolve which persisted `meeting_claim` this founder_quote came from. Best-effort:
+    // exact equality first (case-insensitive), then substring containment in either direction.
+    // When this hits, the dedupe key becomes `cclaim:{meetingId}:{claim_id}` — the same key
+    // the slow / auto-verify paths use — so duplicate cards for the same utterance collapse.
+    const fqLower = founderQuote.toLowerCase().trim();
+    let resolvedClaimId: string | null = null;
+    let resolvedClaimSuperseded = false;
+    if (fqLower.length >= 12) {
+      let best: { id: string; len: number; superseded: boolean } | null = null;
+      for (const c of recentClaims) {
+        if (!c.text) continue;
+        const cl = c.text.toLowerCase();
+        if (cl === fqLower || cl.includes(fqLower) || fqLower.includes(cl)) {
+          const len = c.text.length;
+          if (!best || len > best.len) best = { id: c.id, len, superseded: !!c.superseded_by_claim_id };
+        }
+      }
+      if (best) {
+        resolvedClaimId = best.id;
+        resolvedClaimSuperseded = best.superseded;
+      }
+    }
+
+    // Honor supersession: when the matcher already replaced this utterance with a
+    // corrected one, late deep contradictions on the stale claim are silent. The earlier
+    // (correctly emitted) cards stay, but we don't add a new duplicate one minutes later.
+    if (resolvedClaimSuperseded) continue;
+
+    // Build claim context when we resolved the founder quote to a persisted claim. This
+    // gives us the answering tracked question + inferred topic, so we can drop deep flags
+    // whose `records_quote` doesn't share a token with the inferred metric — same anti-
+    // hallucination rule as the slow path's fact-path token grounding.
+    let resolvedContext: Awaited<ReturnType<typeof buildClaimContext>> | null = null;
+    if (resolvedClaimId) {
+      try {
+        resolvedContext = await buildClaimContext(admin, {
+          meetingId: args.meetingId,
+          meetingClaimId: resolvedClaimId,
+          claimText: founderQuote,
+        });
+      } catch {
+        resolvedContext = null;
+      }
+    }
+    if (
+      resolvedContext &&
+      resolvedContext.inferredTopic.metricFamily &&
+      resolvedContext.inferredTopic.confidence >= 0.6 &&
+      recordsQuote
+    ) {
+      const haystack = [
+        founderQuote,
+        resolvedContext.inferredTopic.metricFamily,
+        resolvedContext.answeringQuestion?.text ?? "",
+        resolvedContext.answeringQuestion?.askedSpanText ?? "",
+        ...resolvedContext.selfLabels,
+      ]
+        .join(" \n ")
+        .toLowerCase();
+      const recordTokens = recordsQuote
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t && t.length >= 4);
+      const overlap = recordTokens.some((t) => haystack.includes(t));
+      if (!overlap) continue;
+    }
+
+    // Use the shared fact-anchored key for the *event card* so it collapses with cards from
+    // fast/middle/slow paths for the same fact. Priority order:
+    //   1. resolved `meeting_claim_id` (cclaim:) — collapses with auto-verify + slow for the
+    //      same utterance regardless of metric extraction.
+    //   2. metric family + normalized value (cmetric:) — collapses across paraphrases of the
+    //      same number when no claim id resolved.
+    //   3. topic-token fallback (ctxt:) — last resort.
+    // The DB row above keeps the founder-quote-anchored `deep:` key because
+    // `meeting_contradiction.dedupe_key` has its own unique constraint and is intentionally
+    // per-quote.
+    const parsedFounderNum = normalizeNumberFromText(founderQuote);
+    const eventDedupeKey = resolvedClaimId
+      ? contradictionFactDedupeKey(args.meetingId, { meetingClaimId: resolvedClaimId })
+      : parsedFounderNum
+        ? contradictionFactDedupeKey(args.meetingId, {
+            metricFamily: metricFamily(founderQuote),
+            normalizedValue: parsedFounderNum.value,
+            founderQuote,
+          })
+        : contradictionFactDedupeKey(args.meetingId, { founderQuote });
     await createMeetingAssistantEvent(admin, {
       meeting_id: args.meetingId,
       kind: "contradiction",
@@ -258,10 +392,15 @@ export async function runDeepContradictionBatch(admin: SupabaseClient, args: { m
       source_map: {
         lane: "attention",
         kind: `deep_${kind}`,
+        meeting_claim_id: resolvedClaimId,
         section: args.section,
         confidence: conf,
         verify_query: `Verify: ${founderQuote.slice(0, 200)}`,
-        dedupe_key: dedupeKey,
+        dedupe_key: eventDedupeKey,
+        contradiction_row_dedupe_key: dedupeKey,
+        answers_question_id: resolvedContext?.answeringQuestion?.id ?? null,
+        metric_family: resolvedContext?.inferredTopic.metricFamily ?? null,
+        topic_source: resolvedContext?.inferredTopic.source ?? null,
       },
     });
 

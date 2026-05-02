@@ -14,6 +14,14 @@ function dedupeKeyForClaim(meetingId: string, speaker: string, tStart: number, t
   return `mc:${h}`;
 }
 
+export type PersistedMeetingClaimRow = {
+  id: string;
+  dedupe_key: string;
+  text: string;
+  t_start_ms: number;
+  t_end_ms: number;
+};
+
 export async function persistClassifiedClaimsForChunk(
   admin: SupabaseClient,
   args: {
@@ -24,8 +32,14 @@ export async function persistClassifiedClaimsForChunk(
     tEndMs: number;
     claims: ClassifiedClaim[];
   },
-): Promise<void> {
-  if (!args.claims.length) return;
+): Promise<{ dedupeKeys: string[]; persisted: PersistedMeetingClaimRow[] }> {
+  if (!args.claims.length) return { dedupeKeys: [], persisted: [] };
+  // Belt-and-suspenders for the worker-level guard: host turns are diligence prompts, not
+  // statements to verify. Refuse to write `meeting_claim` rows for host speakers so
+  // legacy / future callers can't reintroduce the "host question becomes Claim check" bug.
+  if (String(args.speaker ?? "").startsWith("host:")) {
+    return { dedupeKeys: [], persisted: [] };
+  }
   const model = process.env.VERTEX_EMBEDDING_MODEL || "text-embedding-004";
   const rows: Array<{
     meeting_id: string;
@@ -80,13 +94,21 @@ export async function persistClassifiedClaimsForChunk(
     });
   }
 
-  if (!rows.length) return;
+  if (!rows.length) return { dedupeKeys: [], persisted: [] };
 
-  const res = await admin.schema("deal_intel").from("meeting_claim").upsert(rows, {
-    onConflict: "meeting_id,dedupe_key",
-    ignoreDuplicates: false,
-  });
+  const res = await admin
+    .schema("deal_intel")
+    .from("meeting_claim")
+    .upsert(rows, {
+      onConflict: "meeting_id,dedupe_key",
+      ignoreDuplicates: false,
+    })
+    .select("id, dedupe_key, text, t_start_ms, t_end_ms");
   if (res.error && !String(res.error.message || "").includes("does not exist")) {
     console.error("meeting_claim upsert failed", res.error.message || res.error);
   }
+
+  const persisted = ((res.data ?? []) as PersistedMeetingClaimRow[]).filter((r) => r.id && r.dedupe_key);
+
+  return { dedupeKeys: rows.map((r) => r.dedupe_key), persisted };
 }

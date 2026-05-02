@@ -12,7 +12,10 @@ import { runDeepContradictionBatch } from "@/lib/live-assistant/deep-contradicti
 import { fetchDealIntelGroundingPack } from "@/lib/live-assistant/deal-intel-grounding";
 import { runKpiMiddlePath } from "@/lib/live-assistant/kpi-middle-path";
 import { runMeetingQuestionEngineTick } from "@/lib/live-assistant/question-engine-tick";
-import { dedupeFastContradictionEvents } from "@/lib/live-assistant/dedupe-contradictions";
+import { runMeetingClaimAutoVerify } from "@/lib/live-assistant/claim-verify-auto";
+import { runCanonicalClaimVerify } from "@/lib/live-assistant/claim-verifier";
+import { runMeetingClaimResearchVerify } from "@/lib/live-assistant/claim-verify-research";
+import { dedupeContradictionEventsByFactKey } from "@/lib/live-assistant/dedupe-contradictions";
 import { runMeetingNotesTick } from "@/lib/live-assistant/notes";
 import { loadLiveAssistantPreferenceSignals } from "@/lib/live-assistant/preferences";
 import { finalizeCopilotSessionToDocument } from "@/lib/copilot/finalize";
@@ -424,6 +427,7 @@ async function handleJob(admin: ReturnType<typeof createAdminClient>, job: JobRo
         dealId,
         claim: typedClaim,
         sourceText: String(payload.source_text ?? claim.text),
+        meetingClaimId: payload.meeting_claim_id == null ? null : String(payload.meeting_claim_id),
         preferenceContext:
           payload.preference_context && typeof payload.preference_context === "object"
             ? (payload.preference_context as {
@@ -450,7 +454,7 @@ async function handleJob(admin: ReturnType<typeof createAdminClient>, job: JobRo
     case "meeting_dedupe_contradictions": {
       const meetingId = String(payload.meeting_id ?? job.subject_id);
       if (!meetingId) return;
-      await dedupeFastContradictionEvents(admin, meetingId);
+      await dedupeContradictionEventsByFactKey(admin, meetingId);
       return;
     }
     case "meeting_notes_tick": {
@@ -465,6 +469,18 @@ async function handleJob(admin: ReturnType<typeof createAdminClient>, job: JobRo
       const meetingId = String(payload.meeting_id ?? job.subject_id);
       if (!meetingId) return;
       await runMeetingQuestionEngineTick(admin, payload);
+      return;
+    }
+    case "meeting_claim_auto_verify": {
+      await runMeetingClaimAutoVerify(admin, payload as Record<string, unknown>);
+      return;
+    }
+    case "meeting_canonical_claim_verify": {
+      await runCanonicalClaimVerify(admin, payload as Record<string, unknown>);
+      return;
+    }
+    case "meeting_claim_research_verify": {
+      await runMeetingClaimResearchVerify(admin, payload as Record<string, unknown>);
       return;
     }
     case "meeting_kpi_middle": {

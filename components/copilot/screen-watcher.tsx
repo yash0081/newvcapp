@@ -119,13 +119,14 @@ export function ScreenWatcher(props: Props) {
     }
   }, [props.paused, onFrame, hostname]);
 
+  // Don’t register an interval while paused — otherwise pause can feel delayed by up to SAMPLE_MS.
   useEffect(() => {
-    if (!active) return;
+    if (!active || props.paused) return;
     const id = window.setInterval(() => {
       captureAndMaybeSend().catch(() => undefined);
     }, SAMPLE_MS);
     return () => window.clearInterval(id);
-  }, [active, captureAndMaybeSend]);
+  }, [active, props.paused, captureAndMaybeSend]);
 
   useEffect(() => {
     return () => {

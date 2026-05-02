@@ -28,12 +28,18 @@ type ChunkBuilderOpts = {
   pauseMs?: number;
 };
 
+type ChunkSlot = {
+  segmentId: string;
+  segment: ChunkSourceSegment;
+  text: string;
+};
+
 type MutableChunkState = {
   speaker: string;
-  sourceSegments: ChunkSourceSegment[];
+  slots: ChunkSlot[];
+  bySegmentId: Map<string, number>;
   lastEndMs: number;
   startedAtMs: number;
-  textParts: string[];
 };
 
 const DEFAULT_MIN_TOKENS = 10;
@@ -54,6 +60,10 @@ function sentenceCount(text: string): number {
 
 function normalizeText(text: string): string {
   return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function joinSlots(slots: ChunkSlot[]): string {
+  return normalizeText(slots.map((s) => s.text).join(" "));
 }
 
 function chunkId(speaker: string, startedAtMs: number, endedAtMs: number): string {
@@ -82,54 +92,91 @@ export class SemanticChunkBuilder {
     if (!st) {
       st = {
         speaker,
-        sourceSegments: [],
+        slots: [],
+        bySegmentId: new Map(),
         lastEndMs: segment.tEndMs,
         startedAtMs: segment.tStartMs,
-        textParts: [],
       };
       this.stateBySpeaker.set(speaker, st);
     }
 
-    const pause = Math.max(0, segment.tStartMs - st.lastEndMs);
-    const preText = normalizeText(st.textParts.join(" "));
+    const preText = joinSlots(st.slots);
     const preTokens = tokenize(preText).length;
+    const pause = Math.max(0, segment.tStartMs - st.lastEndMs);
 
     if (pause > this.pauseMs && preTokens >= this.minTokens) {
       const flushed = this.flushSpeaker(speaker, "pause_timeout");
       if (flushed) out.push(flushed);
       st = {
         speaker,
-        sourceSegments: [],
+        slots: [],
+        bySegmentId: new Map(),
         lastEndMs: segment.tEndMs,
         startedAtMs: segment.tStartMs,
-        textParts: [],
       };
       this.stateBySpeaker.set(speaker, st);
     }
 
-    st.sourceSegments.push(segment);
-    st.textParts.push(normalized);
-    st.lastEndMs = segment.tEndMs;
-    if (st.sourceSegments.length === 1) st.startedAtMs = segment.tStartMs;
+    const segId = String(segment.segmentId || "");
+    if (segId && st.bySegmentId.has(segId)) {
+      const idx = st.bySegmentId.get(segId)!;
+      st.slots[idx] = { segmentId: segId, segment, text: normalized };
+    } else {
+      const idx = st.slots.length;
+      st.slots.push({ segmentId: segId || `anon:${idx}:${segment.tStartMs}`, segment, text: normalized });
+      if (segId) st.bySegmentId.set(segId, idx);
+    }
 
-    const text = normalizeText(st.textParts.join(" "));
+    st.lastEndMs = segment.tEndMs;
+    if (st.slots.length) {
+      st.startedAtMs = Math.min(...st.slots.map((s) => s.segment.tStartMs));
+    }
+
+    const text = joinSlots(st.slots);
     const tokens = tokenize(text).length;
-    const endedWithBoundary = /[.!?]\s*$/.test(text) || /\b(actually|to clarify|however|but)\b/i.test(normalized);
+    const endedWithBoundary =
+      /[.!?]\s*$/.test(text) || /\b(actually|to clarify|however|but)\b/i.test(text);
 
     if (tokens >= this.maxTokens) {
       const flushed = this.flushSpeaker(speaker, "max_length");
       if (flushed) out.push(flushed);
       return out;
     }
-    if (eventType === "eos" || (eventType === "final" && segment.isFinal)) {
-      if (tokens >= this.minTokens) {
-        const flushed = this.flushSpeaker(speaker, "end_of_speech");
-        if (flushed) out.push(flushed);
-      }
+    // Do NOT flush on every `final && isFinal` — Deepgram may emit multiple finals for the same
+    // logical segment (smart-format rewrite). Same `segmentId` replaces in-place; we flush only
+    // on EOS, punctuation boundary, pause, max_length, or flushIdle.
+    if (eventType === "eos") {
+      const flushed = this.flushSpeaker(speaker, "end_of_speech");
+      if (flushed) out.push(flushed);
       return out;
     }
-    if (eventType === "final" && endedWithBoundary && tokens >= this.minTokens) {
+    if (eventType === "final" && endedWithBoundary) {
       const flushed = this.flushSpeaker(speaker, "punctuation_boundary");
+      if (flushed) out.push(flushed);
+    }
+    return out;
+  }
+
+  /**
+   * Flush any speaker buffer that has been idle longer than `pauseMs` (no new STT event).
+   * Call from a periodic watchdog — otherwise pause-timeout never fires when audio stops.
+   */
+  /**
+   * Flush when the last segment ended long enough ago. Uses `minTokens` for normal idle; if the
+   * buffer is still short, only flushes after `3 * pauseMs` so "Yes" / "Ok" is not cut off
+   * mid-utterance but cannot hang for minutes.
+   */
+  flushIdle(nowMs: number): SemanticChunk[] {
+    const out: SemanticChunk[] = [];
+    for (const speaker of [...this.stateBySpeaker.keys()]) {
+      const st = this.stateBySpeaker.get(speaker);
+      if (!st || st.slots.length === 0) continue;
+      const idleMs = nowMs - st.lastEndMs;
+      if (idleMs <= this.pauseMs) continue;
+      const preText = joinSlots(st.slots);
+      const preTokens = tokenize(preText).length;
+      if (preTokens < this.minTokens && idleMs <= this.pauseMs * 3) continue;
+      const flushed = this.flushSpeaker(speaker, "pause_timeout");
       if (flushed) out.push(flushed);
     }
     return out;
@@ -146,8 +193,8 @@ export class SemanticChunkBuilder {
 
   private flushSpeaker(speaker: string, reason: ChunkFinalizeReason): SemanticChunk | null {
     const st = this.stateBySpeaker.get(speaker);
-    if (!st || st.sourceSegments.length === 0) return null;
-    const text = normalizeText(st.textParts.join(" "));
+    if (!st || st.slots.length === 0) return null;
+    const text = joinSlots(st.slots);
     const tokens = tokenize(text).length;
     if (!text || tokens === 0) {
       this.stateBySpeaker.delete(speaker);
@@ -162,11 +209,10 @@ export class SemanticChunkBuilder {
       startedAtMs: st.startedAtMs,
       endedAtMs: st.lastEndMs,
       finalizeReason: reason,
-      sourceSegments: st.sourceSegments,
+      sourceSegments: st.slots.map((s) => s.segment),
       emittedAtMs: Date.now(),
     };
     this.stateBySpeaker.delete(speaker);
     return c;
   }
 }
-
