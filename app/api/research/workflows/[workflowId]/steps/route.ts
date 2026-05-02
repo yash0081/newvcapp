@@ -14,6 +14,11 @@ type StepPatch = {
   metadata?: Record<string, unknown>;
 };
 
+function isPreferenceSource(website: string): boolean {
+  const s = website.trim().toLowerCase();
+  return Boolean(s) && s !== "web" && s !== "broad-web" && s !== "general-web";
+}
+
 export async function PATCH(req: Request, ctx: { params: Promise<{ workflowId: string }> }) {
   const { workflowId } = await ctx.params;
   const user = await getAuthedUser();
@@ -73,7 +78,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ workflowId: s
       return typeof m.category === "string" ? m.category : "general";
     };
     const events = [
-      ...added.map((s) => ({
+      ...added.filter((s) => isPreferenceSource(s.website)).map((s) => ({
         domain: s.website,
         category: categoryFor(s.metadata),
         deltaPreferenceScore: 0.08,
@@ -81,7 +86,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ workflowId: s
         reason: "User added/kept a research step in the plan.",
         task: s.task,
       })),
-      ...removed.map((s) => ({
+      ...removed.filter((s) => isPreferenceSource(s.website)).map((s) => ({
         domain: s.website,
         category: categoryFor(s.metadata),
         deltaPreferenceScore: -0.08,
@@ -134,4 +139,3 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ workflowId: s
     steps: ins.data ?? [],
   });
 }
-

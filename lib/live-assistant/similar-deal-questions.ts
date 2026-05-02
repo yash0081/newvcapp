@@ -28,8 +28,6 @@ import { loadLiveAssistantPreferenceSignals } from "@/lib/live-assistant/prefere
  * output.
  */
 
-const MODEL = getLiveAssistantModel("fast");
-
 /** Min interval between peer-style question LLM runs (default ~36s — faster cadence than 60s without stacking redundant calls). Override with LIVE_ASSISTANT_QUESTION_HYDRATE_COOLDOWN_MS. */
 function hydrateCooldownMs(): number {
   const raw = Number(process.env.LIVE_ASSISTANT_QUESTION_HYDRATE_COOLDOWN_MS);
@@ -38,6 +36,18 @@ function hydrateCooldownMs(): number {
 }
 
 const MAX_NEW_QUESTIONS_PER_TICK = 3;
+
+const DILIGENCE_TOPIC_RE =
+  /\b(arr|mrr|revenue|growth|churn|retention|nrr|cac|ltv|gross margin|margin|runway|burn|cash|customer|customers|logos|users|pipeline|acv|contract|pilot|deployment|integration|pricing|sales|gtm|market|tam|sam|som|competition|competitor|moat|defensibility|product|platform|workflow|launch|regulatory|regulation|funding|round|valuation|hiring|hire|headcount|enterprise|smb|mid-market|partner|partnership)\b/i;
+
+const PERSON_ONLY_CLAIM_RE =
+  /\b(joined|joins|hired|hire|ceo|cto|cfo|coo|founder|cofounder|co-founder|advisor|adviser|board|vp|head of|director|manager|lead|engineer|operator)\b/i;
+
+const FORCED_PERSON_QUESTION_RE =
+  /\b(?:role|responsibilit(?:y|ies)|background|experience|bio|who is|who's|what does)\b.{0,80}\b(?:in|for|at|on)\b/i;
+
+const GENERIC_QUESTION_RE =
+  /\b(?:tell me more|can you elaborate|how should we think about|what does that mean|what is the role of|how does this impact|what are the implications)\b/i;
 
 const STOPWORDS: ReadonlySet<string> = new Set([
   "the", "and", "for", "with", "that", "this", "have", "has", "had", "are", "was", "were",
@@ -82,6 +92,41 @@ function shareToken(text: string, claimTokens: ReadonlySet<string>): boolean {
   return false;
 }
 
+export function isInvestableQuestionSeed(claim: Pick<RecentClaim, "text" | "section">): boolean {
+  const text = String(claim.text || "");
+  const section = String(claim.section || "other").toLowerCase();
+  if (DILIGENCE_TOPIC_RE.test(text) || /\d/.test(text)) return true;
+  if (["traction", "gtm", "market", "financials", "risks", "problem", "solution"].includes(section)) {
+    return text.trim().length >= 45;
+  }
+  // Team/person updates are often noise in a live call unless they include a business-relevant
+  // hook. This is the path that otherwise turns "they mentioned John" into forced role questions.
+  if (section === "team" || PERSON_ONLY_CLAIM_RE.test(text)) return false;
+  return false;
+}
+
+export function isHighQualityLiveQuestion(question: string, groundedClaim: Pick<RecentClaim, "text" | "section">): boolean {
+  const q = String(question || "").trim();
+  if (q.length < 18 || q.length > 180) return false;
+  if (!/\?\s*$/.test(q)) return false;
+  if (/\b(?:x y z|xyz|etc\.?|and so on)\b/i.test(q)) return false;
+  if (GENERIC_QUESTION_RE.test(q)) return false;
+
+  const claimText = String(groundedClaim.text || "");
+  const claimHasDiligenceTopic = DILIGENCE_TOPIC_RE.test(claimText) || /\d/.test(claimText);
+  const questionHasDiligenceTopic = DILIGENCE_TOPIC_RE.test(q) || /\d/.test(q);
+  if (!questionHasDiligenceTopic && !claimHasDiligenceTopic) return false;
+
+  // If the claim is basically a person/title mention, suppress questions that awkwardly
+  // stretch that name across unrelated diligence topics.
+  const section = String(groundedClaim.section || "other").toLowerCase();
+  if ((section === "team" || PERSON_ONLY_CLAIM_RE.test(claimText)) && FORCED_PERSON_QUESTION_RE.test(q)) {
+    return false;
+  }
+
+  return true;
+}
+
 type RecentClaim = { id: string; text: string; section: string };
 type StyleExample = { text: string };
 
@@ -110,7 +155,8 @@ async function loadRecentClaims(admin: SupabaseClient, meetingId: string): Promi
         section,
       };
     })
-    .filter((r) => r.text.length >= 12);
+    .filter((r) => r.text.length >= 12)
+    .filter(isInvestableQuestionSeed);
 }
 
 /**
@@ -232,7 +278,10 @@ ${examples.map((e, i) => `${i + 1}. ${e.text}`).join("\n")}`
 Propose 0 to ${MAX_NEW_QUESTIONS_PER_TICK} questions a thoughtful investor would ask NEXT, grounded in the RECENT_CLAIMS below.
 
 Hard rules:
-- Each question MUST reference at least one specific noun, number, or entity that appears in one of the RECENT_CLAIMS. No generic, reusable, or template-ish questions.
+- Prefer returning 0 questions over forcing relevance. Only ask when the next question would be natural aloud.
+- Each question MUST reference a concrete business topic from one RECENT_CLAIM (metric, customer segment, GTM motion, workflow, contract, market size, product behavior, regulatory issue, hiring plan, etc.). A person's name alone is not enough grounding.
+- If a claim only names a person, title, advisor, investor, or company contact without a concrete business implication, generate no question for that claim.
+- Do NOT ask "what is X's role..." or "how is X involved..." unless the claim itself says X owns a specific milestone, customer, product, or risk.
 - Do NOT propose assumption-inversion questions ("what breaks if...", "what evidence would invalidate..."), do NOT propose contradiction restates. Those are handled by other systems.
 - Do NOT propose questions that are essentially restating a claim back as a question.
 - Each question must be a single sentence, <= 180 chars, ending in a question mark.
@@ -250,7 +299,7 @@ Return JSON: {"questions": [{"text": "...", "section": "<one of: problem|solutio
 
   let raw: string;
   try {
-    raw = await vertexRunWithText(MODEL, prompt, false);
+    raw = await vertexRunWithText(getLiveAssistantModel("fast"), prompt, false);
   } catch (e) {
     console.error("runUserStyleQuestionHydrate LLM", e);
     await touchHydrateState(admin, args.meetingId);
@@ -263,6 +312,7 @@ Return JSON: {"questions": [{"text": "...", "section": "<one of: problem|solutio
   const arr = Array.isArray(parsed?.questions) ? parsed.questions : [];
 
   const claimIdSet = new Set(claims.map((c) => c.id));
+  const claimById = new Map(claims.map((c) => [c.id, c]));
   const claimSectionById = new Map(claims.map((c) => [c.id, c.section]));
 
   let emitted = 0;
@@ -277,10 +327,13 @@ Return JSON: {"questions": [{"text": "...", "section": "<one of: problem|solutio
 
     // The LLM has to point at a specific claim - if it invented an id we drop the question.
     if (!claimIdSet.has(groundedClaimId)) continue;
+    const groundedClaim = claimById.get(groundedClaimId);
+    if (!groundedClaim) continue;
 
     // And the question text itself has to share at least one topic token with the active
     // claims. This is the same gate `assumption-extract` uses to kill generic platitudes.
     if (!shareToken(text, claimTokenSet)) continue;
+    if (!isHighQualityLiveQuestion(text, groundedClaim)) continue;
 
     const sectionRaw = String(r.section ?? "").trim().toLowerCase();
     const allowedSections = new Set([

@@ -20,11 +20,10 @@ import {
 } from "@/lib/live-assistant/deal-intel-grounding";
 import { extractFastSignals } from "@/lib/live-assistant/fast-kpi";
 import { createMeetingAssistantEvent } from "@/lib/live-assistant/tools";
+import { upsertMeetingTrackedQuestion } from "@/lib/live-assistant/tracked-questions";
 import { formatMemoClaimVerificationBody } from "@/lib/live-assistant/assistant-card-format";
 import type { DialogueLine, SettledTurn } from "@/lib/live-assistant/guest-turn-tracker";
 import { isDiscourseFragment } from "@/lib/live-assistant/guest-turn-gate";
-
-const FAST = getLiveAssistantModel("fast");
 
 export type GuestTurnVerdict = "aligns" | "contradicts" | "new" | "inconclusive";
 
@@ -36,6 +35,15 @@ type NumericPrecheck = {
   guest_value: string;
   record_value: string;
 } | null;
+
+type AnswerResolutionStatus = "answered" | "partial" | "not_answered";
+
+type AnswerResolution = {
+  status: AnswerResolutionStatus;
+  confidence: number;
+  rationale: string | null;
+  answerExcerpt: string | null;
+};
 
 export type RunGuestTurnVerifyArgs = {
   meetingId: string;
@@ -86,6 +94,144 @@ function normalizeEvidence(raw: unknown): EvidenceItem[] {
     if (out.length >= 6) break;
   }
   return out;
+}
+
+function normalizeFollowupQuestion(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const q = raw.replace(/\s+/g, " ").trim();
+  if (q.length < 18 || q.length > 220) return null;
+  if (!/\?\s*$/.test(q)) return null;
+  if (/\b(?:tell me more|can you elaborate|how should we think about|what does that mean|what are the implications)\b/i.test(q)) {
+    return null;
+  }
+  return q.slice(0, 220);
+}
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+export function normalizeAnswerResolution(raw: unknown): AnswerResolution {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const rawStatus = String(o.status ?? "").toLowerCase().trim();
+  const status: AnswerResolutionStatus =
+    rawStatus === "answered" || rawStatus === "partial" || rawStatus === "not_answered"
+      ? rawStatus
+      : "not_answered";
+  const confidence = clamp01(typeof o.confidence === "number" ? o.confidence : 0);
+  const rationale = typeof o.rationale === "string" && o.rationale.trim()
+    ? o.rationale.trim().slice(0, 220)
+    : null;
+  const answerExcerpt = typeof o.answer_excerpt === "string" && o.answer_excerpt.trim()
+    ? o.answer_excerpt.trim().slice(0, 500)
+    : null;
+  return { status, confidence, rationale, answerExcerpt };
+}
+
+const LOW_INFORMATION_ANSWER_RE =
+  /\b(?:chill|nice|cool|great|awesome|smart|pretty|good guy|good person|solid guy|solid person|like him|like her)\b/i;
+
+const FACTUAL_ANSWER_TOKEN_RE =
+  /\b(?:ceo|cto|cfo|coo|founder|cofounder|co-founder|president|leadership|team|role|responsible|owns|owner|leads|runs|reports|current|currently|now|was|used to|changed|actually|source|definition|means|because|as of|since|named|name is|his name|her name|their name|it's|it is)\b/i;
+
+const CLARIFICATION_QUESTION_RE =
+  /\b(?:clarify|reconcile|resolve|current|currently|record|records|indicate|source|definition|timing|as of|who|name|ceo|cto|cfo|coo|founder|leadership|team|role)\b/i;
+
+function contentTokens(text: string): string[] {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4 && !["what", "when", "where", "which", "would", "could", "should", "about", "with", "from", "that", "this", "your", "their", "there", "have", "been"].includes(t));
+}
+
+export function guestTurnActuallyAnswersQuestion(question: string, answer: string): boolean {
+  const q = String(question || "").trim();
+  const a = String(answer || "").trim();
+  if (!q || !a) return false;
+  if (a.length < 12) return false;
+
+  const asksForClarification = CLARIFICATION_QUESTION_RE.test(q);
+  const hasFactualToken = FACTUAL_ANSWER_TOKEN_RE.test(a);
+  if (asksForClarification) {
+    // A related opinion ("he's a chill guy") is not an answer to "who is CEO / reconcile records".
+    if (LOW_INFORMATION_ANSWER_RE.test(a) && !hasFactualToken) return false;
+    if (hasFactualToken) return true;
+
+    const qTokens = new Set(contentTokens(q));
+    const answerTokens = contentTokens(a);
+    const overlap = answerTokens.filter((t) => qTokens.has(t)).length;
+    return overlap >= 2;
+  }
+
+  const qTokens = new Set(contentTokens(q));
+  const answerTokens = contentTokens(a);
+  if (!answerTokens.length) return false;
+  if (LOW_INFORMATION_ANSWER_RE.test(a) && !hasFactualToken) return false;
+  return answerTokens.some((t) => qTokens.has(t)) || hasFactualToken || /\d/.test(a);
+}
+
+async function verifyAnswerResolutionWithLlm(args: {
+  question: string;
+  guestText: string;
+  recentTurns: DialogueLine[];
+}): Promise<AnswerResolution> {
+  const question = args.question.trim().slice(0, 600);
+  const guestText = args.guestText.trim().slice(0, 1200);
+  if (!question || !guestText) {
+    return { status: "not_answered", confidence: 1, rationale: "Missing question or answer text.", answerExcerpt: null };
+  }
+
+  const dialogue = args.recentTurns
+    .slice(-5)
+    .map((r) => `${dialogueLabel(r.role)}${r.inProgress ? " (in progress)" : ""}: ${r.text.slice(0, 500)}`)
+    .join("\n");
+
+  const prompt = `Decide whether the GUEST_TURN actually answers the TRACKED_QUESTION.
+
+TRACKED_QUESTION:
+${question}
+
+RECENT_DIALOGUE:
+${dialogue || "(none)"}
+
+GUEST_TURN:
+${guestText}
+
+Return strict JSON only:
+{
+  "status": "answered" | "partial" | "not_answered",
+  "confidence": 0.0,
+  "rationale": "<= 1 sentence",
+  "answer_excerpt": string | null
+}
+
+Rules:
+- Use "answered" only if the guest directly provides the requested information or clearly resolves the uncertainty, so the host would not need to ask the same question again.
+- Use "partial" if the guest addresses the topic but leaves a key requested fact unresolved.
+- Use "not_answered" if the guest is merely related, gives color/opinion, deflects, jokes, repeats the premise, or answers a different question.
+- For clarification/reconciliation questions, the guest must provide the actual reconciliation: name, title, owner, timing, definition, source, metric basis, or correction.
+- Example: Question asks "Could you clarify the current leadership team...?" and guest says "He is a chill guy." => not_answered.
+- Example: Question asks "Could you clarify the current leadership team...?" and guest says "Daniel is CEO now; Jensen moved to advisor in March." => answered.`;
+
+  try {
+    const raw = await vertexRunWithText(getLiveAssistantModel("fast"), prompt, false);
+    const parsed = (parseJsonFromResponseOrNull(raw) ??
+      (await parseJsonFromResponseWithRepair(raw))) as Record<string, unknown> | null;
+    return normalizeAnswerResolution(parsed);
+  } catch (e) {
+    console.warn("[guest-turn-verify] answer-resolution LLM failed", e instanceof Error ? e.message : e);
+    // Fail conservatively: only close on fallback if the deterministic guard sees a direct answer.
+    const answered = guestTurnActuallyAnswersQuestion(question, guestText);
+    return {
+      status: answered ? "answered" : "not_answered",
+      confidence: answered ? 0.62 : 0.8,
+      rationale: "Fallback answer-resolution check.",
+      answerExcerpt: answered ? guestText.slice(0, 500) : null,
+    };
+  }
 }
 
 function dialogueLabel(role: DialogueLine["role"]): string {
@@ -218,32 +364,37 @@ Return strict JSON only:
   "answer_excerpt": string | null,
   "summary": "<= 1 short sentence; phrased as the guest answered/stated/contradicted (never 'introduced')",
   "conflicts_with": null | { "fact": string, "record_value": string },
-  "evidence": [{ "text": "...", "source": "crm_fact|prior_turn" }]
+  "evidence": [{ "text": "...", "source": "crm_fact|prior_turn" }],
+  "suggested_followup_question": string | null
 }
 
 Rules:
 - Set "suppress_card" to true when GUEST_TURN is not ready to score: mid-sentence cutoff, only a conjunction/discourse marker, filler, or otherwise incomplete — do NOT emit a user-visible card in those cases (set verdict "inconclusive").
 - If NUMERIC_PRECHECK has verdict "contradicts" or "aligns", verdict MUST match it and suppress_card should be false.
 - Pick "answers_question_id" only when the GUEST_TURN clearly and completely answers that tracked question. Otherwise null.
+- Related but non-answering remarks do NOT count. Example: if the question asks to clarify who the CEO/leadership is, "he is a chill guy" is not an answer because it gives no name, title, timing, source, or reconciliation.
 - When answers_question_id is non-null, set "answer_excerpt" to a short verbatim or tight paraphrase of the answering phrase (max ~400 chars). The server persists the **full guest turn text** for the Questions UI so partial phrases here do not replace the stored answer.
 - "new": substantive factual claim not anchored in CRM facts but still valid (e.g. naming a CEO when CRM lacks that field) — phrase summary as "Guest answered..." when the prior dialogue shows the host asked.
 - "contradicts": the guest figure / fact disagrees with CRM.
 - "aligns": the guest figure / fact matches CRM.
 - "inconclusive": hedged, off-topic, or insufficient evidence.
+- For "contradicts", include suggested_followup_question only when there is a crisp, natural question the host should ask to resolve the mismatch. It should ask for the source, timing, definition, or reconciliation of the conflicting fact; do not restate the contradiction.
 - Keep summary short and factual; never write "introduced" or "introduces".`;
 
   let verdict: GuestTurnVerdict = numericPrecheck?.verdict ?? "inconclusive";
   let summary = "";
   let evidence: EvidenceItem[] = [];
   let answersQuestionId: string | null = null;
-  let answerExcerpt: string | null = null;
+  let nominatedQuestion: { id: string; text: string } | null = null;
+  let answerResolution: AnswerResolution | null = null;
   let suppressCard = false;
   let conflictsWith: { fact: string; record_value: string } | null = null;
+  let suggestedFollowupQuestion: string | null = null;
   let llmMs = 0;
 
   try {
     const t0 = Date.now();
-    const raw = await vertexRunWithText(FAST, prompt, false);
+    const raw = await vertexRunWithText(getLiveAssistantModel("fast"), prompt, false);
     llmMs = Date.now() - t0;
     const parsed = (parseJsonFromResponseOrNull(raw) ??
       (await parseJsonFromResponseWithRepair(raw))) as Record<string, unknown> | null;
@@ -260,10 +411,10 @@ Rules:
       const aqid = parsed.answers_question_id;
       if (typeof aqid === "string" && aqid.trim()) {
         const known = trackedQuestions.find((q) => q.id === aqid.trim());
-        if (known) answersQuestionId = aqid.trim();
+        if (known) nominatedQuestion = known;
       }
-      const ax = parsed.answer_excerpt;
-      if (typeof ax === "string" && ax.trim()) answerExcerpt = ax.trim().slice(0, 800);
+      // `answer_excerpt` remains in the prompt schema for compatibility. The canonical UI
+      // stores the full settled guest turn below so short LLM snippets never replace it.
       const cw = parsed.conflicts_with;
       if (cw && typeof cw === "object") {
         const o = cw as Record<string, unknown>;
@@ -271,6 +422,7 @@ Rules:
         const rv = o.record_value == null ? "" : String(o.record_value).slice(0, 400);
         if (fact || rv) conflictsWith = { fact, record_value: rv };
       }
+      suggestedFollowupQuestion = normalizeFollowupQuestion(parsed.suggested_followup_question);
     }
   } catch (e) {
     console.warn("[guest-turn-verify] LLM call failed", e instanceof Error ? e.message : e);
@@ -288,6 +440,17 @@ Rules:
     };
     if (!summary) {
       summary = `Guest's ${numericPrecheck.metric_key} (${numericPrecheck.guest_value}) differs from the CRM value.`;
+    }
+  }
+
+  if (nominatedQuestion && !suppressCard) {
+    answerResolution = await verifyAnswerResolutionWithLlm({
+      question: nominatedQuestion.text,
+      guestText,
+      recentTurns: args.recentTurns,
+    });
+    if (answerResolution.status === "answered" && answerResolution.confidence >= 0.72) {
+      answersQuestionId = nominatedQuestion.id;
     }
   }
 
@@ -331,6 +494,9 @@ Rules:
         auto_verdict: verdict,
         auto_summary: summary,
         auto_evidence: evidence,
+        suggested_followup_question: suggestedFollowupQuestion,
+        nominated_answers_question_id: nominatedQuestion?.id ?? null,
+        answer_resolution: answerResolution,
         answers_question_id: answersQuestionId,
         answer_excerpt: resolvedAnswerExcerpt ?? undefined,
         conflicts_with: conflictsWith,
@@ -348,6 +514,33 @@ Rules:
           })),
       },
     });
+  }
+
+  if (verdict === "contradicts" && suggestedFollowupQuestion && !suppressCard) {
+    try {
+      await upsertMeetingTrackedQuestion(admin, {
+        meetingId,
+        text: suggestedFollowupQuestion,
+        section: "risks",
+        importanceWeight: 0.86,
+        state: "needs_followup",
+        provenance: "contradiction",
+        venue: "in_meeting",
+        dedupeKey: `gturn_contra:${meetingId}:${turn.turnId}`,
+        metadata: {
+          source: "guest_turn_canonical",
+          turn_id: turn.turnId,
+          guest_text: guestText.slice(0, 800),
+          conflicts_with: conflictsWith,
+        },
+        syncEvent: { title: "Contradiction follow-up", lane: "attention", severity: "med" },
+      });
+    } catch (e) {
+      console.warn(
+        "[guest-turn-verify] contradiction follow-up upsert failed",
+        e instanceof Error ? e.message : e,
+      );
+    }
   }
 
   if (answersQuestionId && !suppressCard) {
@@ -373,6 +566,7 @@ Rules:
             answered_at: new Date().toISOString(),
             answer_source: "guest_turn_canonical",
             answer_excerpt: resolvedAnswerExcerpt ?? guestText.slice(0, 800),
+            answer_resolution: answerResolution,
             answer_verdict: verdict,
           },
           updated_at: new Date().toISOString(),
@@ -395,6 +589,8 @@ Rules:
     verdict,
     suppress_card: suppressCard,
     answers_question_id: answersQuestionId,
+    nominated_answers_question_id: nominatedQuestion?.id ?? null,
+    answer_resolution: answerResolution,
     numeric_precheck: numericPrecheck?.verdict ?? null,
     tracked_q_count: trackedQuestions.length,
     llm_ms: llmMs,

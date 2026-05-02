@@ -17,6 +17,14 @@ type DocRow = {
   created_at: string;
 };
 
+type GeneratedDocRow = {
+  id: string;
+  title: string;
+  status: string;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+};
+
 export default async function DealIntelDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const supabase = await createClient();
@@ -73,13 +81,22 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
     // setting cookies in some render contexts can be a no-op; ignore
   }
 
-  const [{ data: docs }] = await Promise.all([
+  const [{ data: docs }, { data: generatedDocs }] = await Promise.all([
     supabase
       .schema("deal_intel")
       .from("document")
       .select("id, original_filename, folder_path, source_kind, mime_type, status, created_at")
       .eq("deal_id", id)
       .order("created_at", { ascending: false }),
+    supabase
+      .schema("deal_intel")
+      .from("generated_document_draft")
+      .select("id, title, status, created_at, metadata")
+      .eq("deal_id", id)
+      .eq("user_id", user.id)
+      .neq("status", "archived")
+      .order("created_at", { ascending: false })
+      .limit(20),
   ]);
 
   return (
@@ -110,6 +127,53 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
         </CardHeader>
         <CardContent>
           <CompanyDocuments dealId={id} initialDocs={((docs ?? []) as DocRow[])} />
+        </CardContent>
+      </Card>
+
+      <Card className="border-zinc-200/90 bg-white">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-sm">Generated docs</CardTitle>
+            <Link className="crm-button-secondary" href={`/home/document-generator?dealId=${id}`}>
+              Create doc
+            </Link>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {((generatedDocs ?? []) as GeneratedDocRow[]).length ? (
+            <div className="space-y-2">
+              {((generatedDocs ?? []) as GeneratedDocRow[]).map((d) => {
+                const format = typeof d.metadata?.output_format === "string" ? d.metadata.output_format : "markdown";
+                return (
+                  <div
+                    key={d.id}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 px-3 py-2 hover:bg-zinc-50"
+                  >
+                    <div className="min-w-0">
+                      <Link href={`/home/generated-documents/${d.id}`} className="truncate text-sm font-medium text-zinc-900 hover:underline">
+                        {d.title}
+                      </Link>
+                      <p className="text-xs text-zinc-500">
+                        {format.toUpperCase()} - {d.status} - {new Date(d.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Link href={`/home/generated-documents/${d.id}`} className="text-xs text-zinc-500 hover:text-zinc-900">
+                        Open
+                      </Link>
+                      <a href={`/api/document-generation/drafts/${d.id}/download`} className="text-xs font-medium text-zinc-700 hover:text-zinc-950">
+                        Download
+                      </a>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="rounded-lg border border-dashed border-zinc-200 p-6 text-center text-sm text-zinc-500">
+              No generated docs for this company yet.
+            </p>
+          )}
         </CardContent>
       </Card>
 

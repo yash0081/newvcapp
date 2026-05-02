@@ -3,6 +3,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 
+function isPreferenceSource(website: string): boolean {
+  const s = website.trim().toLowerCase();
+  return Boolean(s) && s !== "web" && s !== "broad-web" && s !== "general-web";
+}
+
 export async function POST(req: Request, ctx: { params: Promise<{ workflowId: string }> }) {
   const { workflowId } = await ctx.params;
   const user = await getAuthedUser();
@@ -52,7 +57,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ workflowId: st
       task: typeof x.task === "string" ? x.task : "",
     });
 
-    const events = [...accepted.map((x) => mk(x, 1)), ...rejected.map((x) => mk(x, -1))].filter((e) => e.domain && e.task);
+    const events = [...accepted.map((x) => mk(x, 1)), ...rejected.map((x) => mk(x, -1))]
+      .filter((e) => e.domain && e.task && isPreferenceSource(e.domain));
     if (events.length) {
       await recordResearchPreferenceEvents({
         admin,
@@ -67,4 +73,3 @@ export async function POST(req: Request, ctx: { params: Promise<{ workflowId: st
 
   return NextResponse.json({ feedback: ins.data });
 }
-

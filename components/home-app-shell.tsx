@@ -7,11 +7,17 @@ import { cn } from "@/lib/utils";
 
 const nav: { href: string; label: string }[] = [
   { href: "/home/deals", label: "Companies" },
+  { href: "/home/chat", label: "Chat" },
+  { href: "/home/matrix", label: "Matrix" },
+  { href: "/home/document-generator", label: "Documents" },
   { href: "/home/research", label: "Thesis & criteria" },
 ];
 
 function navActive(href: string, pathname: string): boolean {
   if (href === "/home/research") return pathname === "/home/research";
+  if (href === "/home/chat") return pathname === "/home/chat";
+  if (href === "/home/matrix") return pathname === "/home/matrix";
+  if (href === "/home/document-generator") return pathname === "/home/document-generator";
   if (href === "/home/deals") return pathname === "/home/deals" || pathname.startsWith("/home/deal/");
   return false;
 }
@@ -20,9 +26,11 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const chatRoute = pathname === "/home/chat";
   const gridRoute = pathname === "/home/deals/grid";
+  const matrixRoute = pathname === "/home/matrix";
   const wideContent =
     pathname.startsWith("/home/deal/") ||
     pathname.startsWith("/home/deal-intel/") ||
+    pathname === "/home/document-generator" ||
     pathname === "/home/deals/grid";
 
   return (
@@ -63,10 +71,12 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
           className={
             chatRoute
               ? "flex-1 flex flex-col min-h-0 overflow-hidden"
-              : "flex-1 overflow-y-auto min-h-0 p-4 md:p-8"
+              : matrixRoute
+                ? "flex-1 flex flex-col min-h-0 overflow-hidden"
+                : "flex-1 overflow-y-auto min-h-0 p-4 md:p-8"
           }
         >
-          {chatRoute || gridRoute ? (
+          {chatRoute || gridRoute || matrixRoute ? (
             <div className="flex flex-1 flex-col min-h-0 w-full max-w-[1600px] mx-auto bg-white md:rounded-b-2xl md:border-x md:border-b border-zinc-200/90 shadow-sm overflow-hidden">
               {children}
             </div>

@@ -95,6 +95,9 @@ export function ResearchPlanner(props: {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dismissedSuggestionKeys, setDismissedSuggestionKeys] = useState<Record<string, "accepted" | "rejected">>({});
   const [dirty, setDirty] = useState(false);
+  const [focus, setFocus] = useState(
+    typeof props.initialWorkflow?.metadata?.focus === "string" ? props.initialWorkflow.metadata.focus : ""
+  );
 
   const suggestions = useMemo(() => {
     const all = getSuggestedUpdates(runs);
@@ -138,7 +141,7 @@ export function ResearchPlanner(props: {
       const res = await fetch("/api/research/workflows/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dealId: props.dealId }),
+        body: JSON.stringify({ dealId: props.dealId, focus: focus.trim() || undefined }),
       });
       const json = (await res.json().catch(() => null)) as
         | { workflow?: Workflow; steps?: Step[]; error?: string }
@@ -164,7 +167,7 @@ export function ResearchPlanner(props: {
         workflow_id: workflow?.id || "",
         position: prev.length,
         status: "todo",
-        website: "company-website",
+        website: "web",
         task: "Add a concrete research task.",
         notes: null,
         depends_on_step_ids: [],
@@ -409,6 +412,19 @@ export function ResearchPlanner(props: {
             </button>
           </div>
         </div>
+        <div className="grid gap-1">
+          <label htmlFor="research-focus" className="text-xs font-medium text-zinc-600">
+            Focus
+          </label>
+          <textarea
+            id="research-focus"
+            className="crm-input min-h-16 resize-y"
+            value={focus}
+            onChange={(e) => setFocus(e.target.value)}
+            placeholder="Example: verify enterprise traction, dig into founder background, or compare competitors"
+            disabled={busy}
+          />
+        </div>
         {workflow ? (
           <p className="text-xs text-zinc-500">
             Status: {workflow.status} · Version: {workflow.version}
@@ -465,12 +481,15 @@ export function ResearchPlanner(props: {
                   </div>
                 </div>
                 <div className="grid gap-2">
-                  <input
-                    className="crm-input"
-                    value={step.website}
-                    onChange={(e) => updateStep(step.id, { website: e.target.value })}
-                    placeholder="website domain"
-                  />
+                  <label className="grid gap-1">
+                    <span className="text-xs font-medium text-zinc-500">Source hint</span>
+                    <input
+                      className="crm-input"
+                      value={step.website}
+                      onChange={(e) => updateStep(step.id, { website: e.target.value })}
+                      placeholder="web, or a specific source when required"
+                    />
+                  </label>
                   <textarea
                     className="crm-input min-h-20"
                     value={step.task}
@@ -499,7 +518,7 @@ export function ResearchPlanner(props: {
                 {suggestions.slice(0, 5).map((s, idx) => (
                   <div key={`${s.website}_${idx}`} className="rounded-xl border border-zinc-200 p-2 bg-zinc-50">
                     <p className="text-xs text-zinc-700">{s.reason}</p>
-                    <p className="text-xs text-zinc-500 mt-1">{s.website} — {s.task}</p>
+                    <p className="text-xs text-zinc-500 mt-1">{s.website} - {s.task}</p>
                     <div className="mt-2 flex gap-2">
                       <button
                         className="crm-button-secondary"
@@ -590,4 +609,3 @@ export function ResearchPlanner(props: {
     </div>
   );
 }
-

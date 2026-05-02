@@ -3,11 +3,23 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
 import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
+import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
   const m = meta as Record<string, unknown>;
   return typeof m.company_name === "string" ? m.company_name : "Company";
+}
+
+function categoryForMeta(meta: unknown): string {
+  if (!meta || typeof meta !== "object") return "general";
+  const m = meta as Record<string, unknown>;
+  return typeof m.category === "string" && m.category ? m.category : "general";
+}
+
+function isPreferenceSource(website: string): boolean {
+  const s = website.trim().toLowerCase();
+  return Boolean(s) && s !== "web" && s !== "broad-web" && s !== "general-web";
 }
 
 export async function POST(
@@ -26,7 +38,7 @@ export async function POST(
   const stepRes = await admin
     .schema("deal_intel")
     .from("deal_research_step")
-    .select("id, workflow_id, position, status, website, task, depends_on_step_ids")
+    .select("id, workflow_id, position, status, website, task, depends_on_step_ids, metadata")
     .eq("workflow_id", workflowId)
     .eq("id", stepId)
     .maybeSingle();
@@ -144,6 +156,28 @@ export async function POST(
         .eq("id", stepId)
         .eq("workflow_id", workflowId);
       if (stepUpd.error) throw new Error(stepUpd.error.message);
+
+      if (isPreferenceSource(stepRes.data.website)) {
+        try {
+          await recordResearchPreferenceEvents({
+            admin,
+            userId: user.id,
+            dealId: String(workflow.deal_id),
+            events: [
+              {
+                domain: stepRes.data.website,
+                category: categoryForMeta(stepRes.data.metadata),
+                deltaPreferenceScore: 0.1,
+                deltaUsageCount: 1,
+                reason: "Research planner step executed successfully.",
+                task: stepRes.data.task,
+              },
+            ],
+          });
+        } catch {
+          // ignore preference learning failures
+        }
+      }
     } else {
       const upd = await admin
         .schema("deal_intel")

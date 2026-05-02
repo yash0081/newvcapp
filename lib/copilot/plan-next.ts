@@ -4,7 +4,6 @@ import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import {
   type AgendaPatch,
-  type CandidateIntent,
   type CompanyContext,
   type ResearchAgenda,
   type ResearchGap,
@@ -230,6 +229,9 @@ export function trustedDomainSearchUrl(domainRaw: string, query: string): string
     "nytimes.com": `https://www.nytimes.com/search?query=${enc}`,
     "pitchbook.com": `https://pitchbook.com/profiles/search?q=${enc}`,
     "techcrunch.com": `https://techcrunch.com/?s=${enc}`,
+    "news.google.com": `https://news.google.com/search?q=${enc}`,
+    "wellfound.com": `https://wellfound.com/company?q=${enc}`,
+    "g2.com": `https://www.g2.com/search?query=${enc}`,
   };
 
   const direct = apexTemplates[host];

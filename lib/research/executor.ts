@@ -17,6 +17,11 @@ export type ExecutionErr = {
 
 export type ExecutionResult = ExecutionOk | ExecutionErr;
 
+function isBroadWebSource(website: string): boolean {
+  const s = website.trim().toLowerCase();
+  return !s || s === "web" || s === "broad-web" || s === "general-web";
+}
+
 function parseExecution(raw: string): Omit<ExecutionOk, "ok"> | null {
   const normalizeSource = (s: unknown): ResearchSource | null => {
     if (!s || typeof s !== "object") return null;
@@ -113,6 +118,17 @@ export async function executeResearchStep(args: {
   website: string;
   task: string;
 }): Promise<ExecutionResult> {
+  const sourceConstraint = isBroadWebSource(args.website)
+    ? {
+        mode: "broad_web",
+        instruction: "Use the best available public web sources. The step is not tied to a particular website.",
+      }
+    : {
+        mode: "source_constrained",
+        instruction:
+          "Use this source hint as a required target. If it is accessible and relevant, cite it directly; supplement with other sources only when needed.",
+        website: args.website,
+      };
   const prompt = `Execute one public-web research step.
 Return strict JSON only:
 {
@@ -121,8 +137,13 @@ Return strict JSON only:
   "suggestedStepUpdates": [{"reason":"...","website":"...","task":"..."}]
 }
 Rules:
+- Use Google Search grounding/server-side browsing. Do not assume the preferred website is already open.
+- If Source constraint mode is "broad_web", choose the best sources for the task and do not force any particular website.
+- If Source constraint mode is "source_constrained", use the provided source hint as a required target. If the source is inaccessible or has no relevant evidence, say that explicitly in notes.
+- Stay focused on the research task. Do not return adjacent facts that fail to answer it.
 - Use external web evidence where possible.
 - Include 2-6 sources when available.
+- Suggested follow-up steps should use website "web" unless they truly require a specific source.
 - If evidence is weak, say so explicitly in notes.`;
 
   let raw = "";
@@ -133,7 +154,7 @@ Rules:
       [
         { label: "Company name", value: args.companyName || "Unknown" },
         { label: "Company context", value: args.companyContext || "No context." },
-        { label: "Preferred website", value: args.website },
+        { label: "Source constraint", value: sourceConstraint },
         { label: "Research task", value: args.task },
       ],
       true

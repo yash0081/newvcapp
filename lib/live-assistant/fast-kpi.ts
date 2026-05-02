@@ -208,7 +208,7 @@ function inferIntent(text: string): ClaimIntent {
 function spokenArrOrRevenue(text: string): NormalizedMetric | null {
   const patterns: RegExp[] = [
     /\b(\d+(?:\.\d+)?)\s*(million|billion|thousand|mn|mil|bill)\b[\s\S]{0,60}?\b(?:arr|mrr|annual recurring revenue|revenue)\b/i,
-    /\b(?:arr|mrr|annual recurring revenue)\b[\s\S]{0,60}?\$?\s*(\d+(?:\.\d+)?)\s*(million|billion|thousand|m|b|k)?\b/i,
+    /\b(?:arr|mrr|annual recurring revenue)\b[\s\S]{0,60}?\$?\s*(\d+(?:\.\d+)?)\s*(million|billion|thousand|m|b|k)\b/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
@@ -221,7 +221,6 @@ function spokenArrOrRevenue(text: string): NormalizedMetric | null {
     if (w.startsWith("million") || w === "m" || w === "mn" || w === "mil") mult = 1_000_000;
     else if (w.startsWith("billion") || w === "b") mult = 1_000_000_000;
     else if (w.startsWith("thousand") || w === "k") mult = 1_000;
-    else if (!w && /\b(?:arr|mrr|annual recurring revenue)\b/i.test(m[0] || "")) mult = 1_000_000;
     return {
       key: /\b(?:mrr)\b/i.test(m[0] || "") ? "mrr" : "arr",
       rawValue: m[0]!.slice(0, 48),

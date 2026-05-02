@@ -65,9 +65,8 @@ export function contradictionBodiesNearDuplicate(a: string, b: string): boolean 
 
 /**
  * Sweep duplicate contradiction event cards for a meeting, keeping the newest one per
- * `source_map.dedupe_key`. All contradiction emitters (fast / middle / slow / deep) now
- * write a fact-anchored `dedupe_key`, so this catches any cross-path leftovers and any
- * pre-existing duplicates from older code paths.
+ * `source_map.dedupe_key`. The legacy multi-path contradiction emitters have been removed,
+ * so this is primarily a backfill/safety sweep for older meeting data.
  *
  * In normal operation this should be a no-op now that `createMeetingAssistantEvent`
  * runs the recent-rows dedupe check inline (no `fast_lane` skip), but we keep the sweep
@@ -107,8 +106,7 @@ export async function dedupeContradictionEventsByFactKey(admin: SupabaseClient, 
   for (const r of rows) {
     const sm = safeSourceMap(r.source_map);
     const dk = typeof sm.dedupe_key === "string" ? sm.dedupe_key : "";
-    // Without a dedupe_key we fall back to title+body — same as before, just no longer gated
-    // on `fast_lane`, so deep/slow/mid contradictions also get collapsed.
+    // Without a dedupe_key we fall back to title+body.
     const k = dk ? `dk:${dk}` : `b:${normKey(`${r.title ?? ""}|${r.body}`)}`;
     if (seen.has(k)) {
       del.push(r.id);
@@ -155,4 +153,3 @@ export async function dedupeContradictionEventsByFactKey(admin: SupabaseClient, 
     }
   }
 }
-

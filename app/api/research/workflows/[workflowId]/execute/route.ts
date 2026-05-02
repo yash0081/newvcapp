@@ -4,6 +4,7 @@ import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
 import { mapWithConcurrency } from "@/lib/async/concurrency";
 import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
+import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -19,7 +20,18 @@ type StepRow = {
   website: string;
   task: string;
   depends_on_step_ids: string[] | null;
+  metadata?: Record<string, unknown> | null;
 };
+
+function categoryForStep(step: StepRow): string {
+  const meta = step.metadata && typeof step.metadata === "object" ? step.metadata : {};
+  return typeof meta.category === "string" && meta.category ? meta.category : "general";
+}
+
+function isPreferenceSource(website: string): boolean {
+  const s = website.trim().toLowerCase();
+  return Boolean(s) && s !== "web" && s !== "broad-web" && s !== "general-web";
+}
 
 function runnableSteps(steps: StepRow[], maxBatch: number): StepRow[] {
   const stepIds = new Set(steps.map((s) => s.id));
@@ -131,6 +143,28 @@ async function runOneStep(args: {
         .eq("id", step.id)
         .eq("workflow_id", workflowId);
       if (stepUpd.error) throw new Error(stepUpd.error.message);
+
+      if (isPreferenceSource(step.website)) {
+        try {
+          await recordResearchPreferenceEvents({
+            admin,
+            userId,
+            dealId,
+            events: [
+              {
+                domain: step.website,
+                category: categoryForStep(step),
+                deltaPreferenceScore: 0.1,
+                deltaUsageCount: 1,
+                reason: "Research planner step executed successfully.",
+                task: step.task,
+              },
+            ],
+          });
+        } catch {
+          // ignore preference learning failures
+        }
+      }
     } else {
       const upd = await admin
         .schema("deal_intel")
@@ -191,7 +225,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
   const stepRes = await admin
     .schema("deal_intel")
     .from("deal_research_step")
-    .select("id, workflow_id, position, status, website, task, depends_on_step_ids")
+    .select("id, workflow_id, position, status, website, task, depends_on_step_ids, metadata")
     .eq("workflow_id", workflowId)
     .order("position", { ascending: true });
   if (stepRes.error) return NextResponse.json({ error: stepRes.error.message }, { status: 500 });
