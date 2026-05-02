@@ -93,3 +93,19 @@ test("flushAll closes every open turn and emits guest turns", () => {
   assert.equal(fired.length, 1);
   assert.equal(fired[0]!.text, "Bob.");
 });
+
+test("discourse fragment guest turn is absorbed and merged into the next guest utterance", () => {
+  const tracker = new GuestTurnTracker({ meetingId: "m1", settleMs: 5000 });
+  const fired: SettledTurn[] = [];
+  tracker.onGuestTurnSettled((t) => fired.push(t));
+
+  tracker.ingestChunk(chunk({ speaker: "guest:1", text: "But", startedAtMs: 0, endedAtMs: 400 }));
+  tracker.ingestChunk(chunk({ speaker: "host:1", text: "Tell me about the chip.", startedAtMs: 500, endedAtMs: 1200 }));
+  assert.equal(fired.length, 0, "fragment alone should not emit");
+
+  tracker.ingestChunk(chunk({ speaker: "guest:1", text: "our new chip targets enterprise.", startedAtMs: 1300, endedAtMs: 2400 }));
+  tracker.ingestChunk(chunk({ speaker: "host:1", text: "Thanks.", startedAtMs: 2500, endedAtMs: 2800 }));
+  assert.equal(fired.length, 1);
+  assert.ok(fired[0]!.text.toLowerCase().includes("but"));
+  assert.ok(fired[0]!.text.toLowerCase().includes("chip"));
+});

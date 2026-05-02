@@ -12,6 +12,7 @@
 
 import { createHash } from "node:crypto";
 import type { SemanticChunk } from "@/lib/live-assistant/chunker";
+import { appendGuestCarryover, isDiscourseFragment } from "@/lib/live-assistant/guest-turn-gate";
 
 export type SpeakerRole = "host" | "guest" | "other";
 
@@ -77,6 +78,8 @@ export class GuestTurnTracker {
   private readonly openByRole = new Map<SpeakerRole, OpenTurnState>();
   private readonly recent: SettledTurn[] = [];
   private listener: ((turn: SettledTurn) => void) | null = null;
+  /** Discourse prefix absorbed instead of settling (e.g. "But") — prepended to the next guest turn. */
+  private guestCarryover: string | null = null;
 
   constructor(opts: GuestTurnTrackerOpts) {
     this.meetingId = opts.meetingId;
@@ -119,6 +122,10 @@ export class GuestTurnTracker {
         sourceChunkIds: [],
       };
       this.openByRole.set(role, open);
+      if (role === "guest" && this.guestCarryover) {
+        open.parts.push(this.guestCarryover);
+        this.guestCarryover = null;
+      }
     }
 
     open.parts.push(ch.text);
@@ -151,6 +158,7 @@ export class GuestTurnTracker {
       const t = this.closeRole(role);
       if (t) out.push(t);
     }
+    this.guestCarryover = null;
     out.sort((a, b) => a.tStartMs - b.tStartMs);
     return out;
   }
@@ -186,6 +194,10 @@ export class GuestTurnTracker {
     this.openByRole.delete(role);
     const text = normalizeJoin(st.parts);
     if (!text) return null;
+    if (role === "guest" && isDiscourseFragment(text)) {
+      this.guestCarryover = appendGuestCarryover(this.guestCarryover, text);
+      return null;
+    }
     const turn: SettledTurn = {
       turnId: turnIdFor(this.meetingId, st.speaker, st.tStartMs, st.tEndMs),
       role: st.role,

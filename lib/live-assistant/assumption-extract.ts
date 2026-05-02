@@ -103,6 +103,7 @@ export async function runMeetingAssumptionExtract(admin: SupabaseClient, meeting
     .from("meeting_claim")
     .select("id, text, section_labels, confidence, raw_classifier_output, updated_at")
     .eq("meeting_id", meetingId)
+    .is("superseded_by_claim_id", null)
     .gte("updated_at", watermark)
     .gte("confidence", 0.55)
     .order("updated_at", { ascending: false })

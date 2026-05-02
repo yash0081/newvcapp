@@ -2,6 +2,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { embedText } from "@/lib/vertex-embeddings";
 import { vectorParam } from "@/lib/data-layer/shared/vector";
 import { createHash } from "node:crypto";
+import { contradictionBodiesNearDuplicate } from "@/lib/live-assistant/dedupe-contradictions";
+import {
+  assistantSemanticDedupeEmbedEnabled,
+  claimVerificationEmbedSimThreshold,
+  contradictionEmbedSimThreshold,
+  embeddingMaxSimilarityToCorpus,
+} from "@/lib/live-assistant/semantic-assistant-dedupe";
 
 export type MeetingEventKind =
   | "contradiction"
@@ -160,17 +167,41 @@ export async function createMeetingAssistantEvent(admin: SupabaseClient, input: 
     const recent = await admin
       .schema("deal_intel")
       .from("meeting_assistant_event")
-      .select("id, source_map")
+      .select("id, source_map, body, kind")
       .eq("meeting_id", input.meeting_id)
       .order("created_at", { ascending: false })
       .limit(80);
     if (!recent.error) {
-      for (const r of (recent.data ?? []) as Array<{ id: string; source_map: unknown }>) {
+      const rows = (recent.data ?? []) as Array<{ id: string; source_map: unknown; body?: string; kind?: string }>;
+      for (const r of rows) {
         const sm = (r.source_map && typeof r.source_map === "object" ? (r.source_map as Record<string, unknown>) : {}) as Record<
           string,
           unknown
         >;
         if (String(sm.dedupe_key ?? "") === dedupeKey) return { data: { id: r.id }, error: null };
+      }
+
+      const body = input.body?.trim();
+      if (body && (input.kind === "contradiction" || input.kind === "claim_verification")) {
+        const kindFilter = input.kind;
+        for (const r of rows) {
+          if (r.kind !== kindFilter || !r.body) continue;
+          if (contradictionBodiesNearDuplicate(body, String(r.body))) return { data: { id: r.id }, error: null };
+        }
+
+        if (assistantSemanticDedupeEmbedEnabled()) {
+          const sameKind = rows.filter((r) => r.kind === kindFilter && String(r.body ?? "").trim()).slice(0, 32);
+          const corpus = sameKind.map((r) => String(r.body));
+          if (corpus.length) {
+            const thresh =
+              input.kind === "contradiction" ? contradictionEmbedSimThreshold() : claimVerificationEmbedSimThreshold();
+            const { maxSim, bestIndex } = await embeddingMaxSimilarityToCorpus(body, corpus);
+            if (bestIndex >= 0 && maxSim >= thresh) {
+              const hit = sameKind[bestIndex];
+              if (hit) return { data: { id: hit.id }, error: null };
+            }
+          }
+        }
       }
     }
   } catch {

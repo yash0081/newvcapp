@@ -114,6 +114,54 @@ Auto-start is intentionally limited to local development (`NODE_ENV=development`
 - **No transcript/events**: confirm host enabled assistant and both host + guest are connected with mic permission.
 - **Contradiction checks missing**: worker may be running without Vertex auth; transcript can still work while advanced checks are limited.
 
+### Echo / garbled transcript when testing with two browser tabs (same PC)
+
+The meeting UI uses LiveKit’s **RoomAudioRenderer**, which plays **every remote participant’s audio** in that tab. If you open **host + guest in two tabs on one machine**, both tabs play each other’s audio: you hear **double playback**, and your **microphone can pick up speaker output**, which sounds like echo and **hurts STT quality**.
+
+**Mitigations**
+
+- Prefer **headphones** on at least one participant when testing host + guest on one machine.
+- Use **two physical devices** for host vs guest when possible.
+
+**Chrome (regular profile vs incognito on one laptop)**
+
+There is no Chrome toggle that magically removes acoustic echo; echo comes from **speaker sound leaking into the mic**. Useful habits:
+
+- **Two tabs on one PC**: **Mute one tab’s audio** (right‑click the tab → *Mute site*) so only one tab plays the remote participant, **or** use headphones so speaker bleed doesn’t hit the mic.
+- **Incognito guest**: Incognito does not fix echo by itself; it only isolates cookies/session. You still need headphones, tab mute, or separate devices.
+- **macOS**: Pick one output device (*Sound* → *Output*)—avoid splitting output across laptop speakers and monitor speakers simultaneously while testing.
+- **Mic**: Use the built‑in mic only if you must; a headset mic picks up far less room noise than laptop speakers playing the remote guest.
+
+This is normal WebRTC behavior, not a duplicate bug in `RoomAudioRenderer` mounting—the worker process still attaches **one transcription pipeline per enabled assistant meeting** (`worker-manager` keys workers by `meetingId`).
+
+### Meeting notes pipeline (grounding / hallucinations)
+
+Notes are generated server-side from `meeting_claim` rows. Relevant env vars:
+
+| Variable | Effect |
+|----------|--------|
+| `LIVE_ASSISTANT_NOTES_MODE` | `llm` (default): memo-style LLM bullets + soft grounding (no verbatim transcript splice). `hybrid`: same bullet path as `llm` (claim grouping may differ). `extractive`: clipped claim text + verbatim-style grounding—avoid for “pretty” investor notes. |
+| `LIVE_ASSISTANT_NOTES_REFINE` | Must be `1` to enable the **second** LLM polish pass (`notes-refine`). Default is **off** (opt-in). After refine, grounding runs again so polish cannot drift off-source. |
+| `LIVE_ASSISTANT_NOTES_ENTAILMENT` | Set `1` for an extra LLM check that bullets are fully entailed by source quotes. |
+| `LIVE_ASSISTANT_NOTES_TICK_MS` | How often the worker enqueues a notes tick (default **4000** ms, clamped 2500–12000). |
+| `LIVE_ASSISTANT_Q_TICK_MS` | How often the question engine job is enqueued (default **4000** ms, clamped 2500–12000). |
+| `LIVE_ASSISTANT_QUESTION_HYDRATE_COOLDOWN_MS` | Min interval between **peer-style question** LLM runs (default **36s**, clamped 15s–180s). Lower slightly for faster question surfacing. |
+
+**Ordering**: Notes returned by `GET /api/meetings/.../notes` are grouped by section; within a section, bullets sort by **importance_score** (desc), then **t_ms** (desc).
+
+### Assistant feed dedupe (surface)
+
+During meetings, the transcription worker periodically enqueues `meeting_assistant_surface_dedupe`, which batch-embeds recent `claim_verification` and `contradiction` card bodies and **soft-hides** near-duplicate older rows by setting `source_map.ui_suppressed: true` and `source_map.dedupe_of_event_id` on the duplicate. The host/guest events API **omits** `ui_suppressed` cards so the feed shows one story per cluster; rows stay in the database for audit.
+
+| Variable | Effect |
+|----------|--------|
+| `LIVE_ASSISTANT_SURFACE_DEDUPE_SIM` | Cosine similarity threshold for treating two card bodies as duplicates (default **0.91**, clamped ~0.84–0.99). Raise slightly if you see false collapses. |
+| `LIVE_ASSISTANT_BG_JOB_DIRECT` | When true (default **on** outside production for the live worker), the worker also runs in-process **fact-key dedupe** and **surface dedupe** so cards collapse even if the `deal_intel` background worker is not draining the queue. |
+
+### Tracked questions and superseded claims
+
+`meeting_claim` rows that were **corrected in-meeting** get `superseded_by_claim_id` on the old row. Listings for **notes**, **similar-deal style hints**, and **assumption extract** intentionally include only **current** (non-superseded) claims so the model does not re-assert stale numbers. **Q&A detection** (which claim answers which tracked question) still resolves via `buildClaimContext` using the **specific claim id** being verified and matcher rows (`meeting_question_claim_match`), not those filtered lists—so supersession filters should not block marking a question answered when the active replacement claim is linked correctly.
+
 ## Research Planner MVP
 
 ### Where it lives

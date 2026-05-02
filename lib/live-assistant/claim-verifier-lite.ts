@@ -20,6 +20,7 @@ import {
   type DealIntelGroundingPack,
 } from "@/lib/live-assistant/deal-intel-grounding";
 import { createMeetingAssistantEvent, matchClaimsHybrid, type ClaimHit } from "@/lib/live-assistant/tools";
+import { formatMemoClaimVerificationBody } from "@/lib/live-assistant/assistant-card-format";
 
 const FAST = getLiveAssistantModel("fast");
 
@@ -341,18 +342,27 @@ Rules:
   }
 
   const title = verdict === "contradicts" ? "Possible contradiction" : "Claim check";
-  const bodyParts: string[] = [];
-  if (lastHostText) bodyParts.push(`Host (prompt): "${lastHostText.slice(0, 400)}"`);
-  bodyParts.push(`Guest: "${guestText.slice(0, 400)}"`);
-  if (summary) bodyParts.push(summary);
-  if (verdict === "contradicts" && conflictsWith) {
-    const prior =
-      conflictsWith.canonical_value ||
-      conflictsWith.claim_quote ||
-      (conflictsWith.fact_path ? `Fact: ${conflictsWith.fact_path}` : null);
-    if (prior) bodyParts.push(`Our records: ${String(prior).slice(0, 260)}`);
-  }
-  const body = bodyParts.join("\n");
+  const recordsSnap =
+    verdict === "contradicts" && conflictsWith
+      ? String(
+          conflictsWith.canonical_value ||
+            conflictsWith.claim_quote ||
+            (conflictsWith.fact_path ? String(conflictsWith.fact_path) : "") ||
+            "",
+        ).trim()
+      : "";
+  const memoSummary =
+    summary.trim() ||
+    (verdict === "contradicts"
+      ? "Possible mismatch between what was stated and CRM snapshot."
+      : verdict === "new"
+        ? "New factual detail vs prior records."
+        : "Claim checked against workspace records.");
+  const body = formatMemoClaimVerificationBody({
+    summary: memoSummary.slice(0, 600),
+    recordsSnapshot: recordsSnap ? recordsSnap.slice(0, 320) : null,
+    relatedQuestion: null,
+  });
 
   const dedupeKey = `cclaim_lite:${meetingId}:${guestChunkId}`;
 

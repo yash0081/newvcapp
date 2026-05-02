@@ -190,6 +190,7 @@ export function MeetRoomClient(props: { meetingId: string }) {
 
 function ConnectedMeetingView(props: { meetingId: string; guestToken: string | null; join: JoinResponse }) {
   const isHost = props.join.role === "host";
+
   return (
     <div className="h-[calc(100vh-2rem)]">
       <LiveKitRoom
@@ -335,12 +336,21 @@ function LeftSidebarPanel(props: { meetingId: string }) {
         answered.length ? (
           <ul className="space-y-2">
             {answered.slice(0, 14).map((q) => {
+              const meta = q.metadata && typeof q.metadata === "object" ? (q.metadata as Record<string, unknown>) : {};
+              const metaAnswer =
+                typeof meta.answer_excerpt === "string" && meta.answer_excerpt.trim() ? meta.answer_excerpt.trim() : "";
+              const answerSource =
+                typeof meta.answer_source === "string" ? String(meta.answer_source).trim().toLowerCase() : "";
               const ev = evidenceByQuestionId[q.id]?.[0];
-              // Prefer the literal answer span extracted by `llmAnswerCheck` (persisted in
-              // `meeting_question_claim_match.scores.answer_text`) over the full claim text.
               const scores = ev?.scores && typeof ev.scores === "object" ? (ev.scores as Record<string, unknown>) : null;
-              const answerText = scores && typeof scores.answer_text === "string" ? scores.answer_text.trim() : "";
-              const display = answerText || ev?.claim_text || "";
+              const scoreAnswer = scores && typeof scores.answer_text === "string" ? scores.answer_text.trim() : "";
+              const claimSnippet = typeof ev?.claim_text === "string" ? ev.claim_text.trim() : "";
+              // Canonical guest-turn answers must use persisted excerpt only — matcher spans can
+              // reflect a different chunk and flip the UI between polls if merged with OR logic.
+              const display =
+                answerSource === "guest_turn_canonical"
+                  ? metaAnswer
+                  : metaAnswer || scoreAnswer || claimSnippet || "";
               return (
                 <li key={q.id} className="rounded-2xl border border-emerald-200/70 bg-white p-3 shadow-sm">
                   <div className="flex flex-wrap gap-1.5 text-[10px] text-zinc-500">
@@ -348,11 +358,11 @@ function LeftSidebarPanel(props: { meetingId: string }) {
                     <span className="rounded-full bg-zinc-100 px-2 py-0.5">{provenanceLabel(q.provenance)}</span>
                     <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.section}</span>
                   </div>
-                  <p className="mt-2 font-serif text-[15px] leading-snug text-zinc-800">{q.text}</p>
+                  <p className="mt-2 font-sans text-[14px] font-medium leading-snug text-zinc-900">{q.text}</p>
                   {display ? (
                     <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50/40 px-3 py-2">
-                      <p className="text-[11px] font-medium text-emerald-900">Answer</p>
-                      <p className="mt-1 text-[13px] leading-snug text-emerald-900/90">{display.slice(0, 260)}</p>
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-900/90">Answer</p>
+                      <p className="mt-1 font-sans text-[13px] leading-relaxed text-emerald-950">{display}</p>
                     </div>
                   ) : (
                     <p className="mt-2 text-xs text-zinc-500">No answer excerpt captured yet.</p>
@@ -373,7 +383,7 @@ function LeftSidebarPanel(props: { meetingId: string }) {
                 <span className="rounded-full bg-zinc-100 px-2 py-0.5">{provenanceLabel(q.provenance)}</span>
                 <span className="rounded-full bg-zinc-100 px-2 py-0.5">{q.section}</span>
               </div>
-              <p className="mt-2 font-serif text-[15px] leading-snug text-zinc-800">{q.text}</p>
+              <p className="mt-2 font-sans text-[14px] font-medium leading-snug text-zinc-900">{q.text}</p>
             </li>
           ))}
         </ul>
@@ -492,7 +502,10 @@ function NotesPanel(props: { meetingId: string }) {
     const poll = async () => {
       try {
         const res = await fetch(`/api/meetings/${props.meetingId}/notes`, { method: "GET" });
-        const json = (await res.json().catch(() => null)) as { sections?: NotesSections; error?: string } | null;
+        const json = (await res.json().catch(() => null)) as {
+          sections?: NotesSections;
+          error?: string;
+        } | null;
         if (!res.ok) throw new Error(json?.error || `Failed to load notes (${res.status})`);
         if (!isCancelled) {
           setSections((json?.sections && typeof json.sections === "object" ? json.sections : {}) as NotesSections);
@@ -526,7 +539,7 @@ function NotesPanel(props: { meetingId: string }) {
     <div className="space-y-2">
       <div>
         <p className="text-sm font-semibold text-zinc-900">Notes</p>
-        <p className="text-xs text-zinc-500">Auto-built bullets from classified claims (grouped by section).</p>
+        <p className="text-xs text-zinc-500">Structured bullets per section, refined from live claims (not raw transcript).</p>
       </div>
       {err ? <p className="text-xs text-rose-600">{err}</p> : null}
       {orderedSections.length ? (
@@ -626,8 +639,81 @@ function SupersededFooter(props: {
   return (
     <div className="mt-2 pt-2 border-t border-zinc-100">
       <p className="text-[11px] leading-snug text-emerald-700">
-        <span className="font-medium">Updated to:</span> {text ? `“${text.slice(0, 220)}”` : "guest provided a corrected value"}
+        <span className="font-medium">Updated to:</span>{" "}
+        {text ? `“${formatAssistantPipeLists(text.slice(0, 220))}”` : "guest provided a corrected value"}
       </p>
+    </div>
+  );
+}
+
+type MemoBodySegment =
+  | { kind: "labeled"; label: string; text: string }
+  | { kind: "followup"; text: string }
+  | { kind: "prose"; text: string };
+
+const MEMO_LINE_PREFIXES: Array<{ prefix: string; label: string; followUp?: boolean }> = [
+  { prefix: "Related diligence Q: ", label: "Related diligence Q" },
+  { prefix: "Records: ", label: "Records" },
+  { prefix: "Field: ", label: "Field" },
+  { prefix: "Note: ", label: "Note" },
+  { prefix: "Stated: ", label: "Stated" },
+  { prefix: "Follow-up: ", label: "Follow-up", followUp: true },
+];
+
+/** Snapshot / CRM strings often use `|` as a list delimiter; show commas in the UI instead. */
+function formatAssistantPipeLists(text: string): string {
+  return String(text || "").replace(/\s*\|\s*/g, ", ");
+}
+
+function parseMemoCardBody(body: string): MemoBodySegment[] {
+  const out: MemoBodySegment[] = [];
+  for (const raw of String(body || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    let matched = false;
+    for (const row of MEMO_LINE_PREFIXES) {
+      if (line.startsWith(row.prefix)) {
+        const text = line.slice(row.prefix.length).trim();
+        if (row.followUp) out.push({ kind: "followup", text });
+        else out.push({ kind: "labeled", label: row.label, text });
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) out.push({ kind: "prose", text: line });
+  }
+  return out;
+}
+
+/** Memo-style layout for assistant card bodies (not transcript / dialogue quotes). */
+function MemoFormattedCardBody(props: { body: string }) {
+  const segments = parseMemoCardBody(formatAssistantPipeLists(props.body));
+  if (!segments.length) return null;
+  return (
+    <div className="mt-3 space-y-3 font-sans text-[13px] leading-relaxed text-zinc-800">
+      {segments.map((seg, idx) => {
+        if (seg.kind === "prose") {
+          return (
+            <p key={idx} className="text-zinc-800 leading-snug">
+              {seg.text}
+            </p>
+          );
+        }
+        if (seg.kind === "followup") {
+          return (
+            <div key={idx} className="rounded-lg border border-amber-100 bg-amber-50/60 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-950/80">Follow-up</p>
+              <p className="mt-1 text-[13px] text-zinc-900 leading-snug">{seg.text}</p>
+            </div>
+          );
+        }
+        return (
+          <div key={idx}>
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{seg.label}</p>
+            <p className="mt-0.5 text-[13px] text-zinc-900 leading-snug">{seg.text}</p>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -789,19 +875,6 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
     );
   };
 
-  const renderBody = (body: string) => {
-    const lines = String(body || "").split("\n").filter((l) => l.trim().length > 0);
-    return (
-      <div className="mt-2 space-y-2 font-serif text-[15px] leading-[1.55] text-zinc-800">
-        {lines.map((l, idx) => (
-          <p key={idx} className={l.startsWith("Follow-up:") ? "font-sans font-medium text-zinc-900 text-[14px]" : ""}>
-            {l}
-          </p>
-        ))}
-      </div>
-    );
-  };
-
   const renderLane = (lane: EventLane, title: string, subtitle: string) => (
     <div className="space-y-2">
       <div>
@@ -820,15 +893,23 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
             const researchSummary = String(ver?.research_summary ?? sm.research_summary ?? "").trim();
             const stage = String(ver?.stage ?? "");
             const citations = parseResearchCitations(ver?.research_citations ?? sm.research_citations);
+            const bodyTrim = String(e.body ?? "").trim();
             const quote =
               (ver?.claim_text && String(ver.claim_text).trim()) ||
               String(sm.claim_quote ?? "")
                 .trim()
                 .slice(0, 400) ||
-              String(e.body ?? "")
+              bodyTrim
                 .replace(/^["“]|["”]$/g, "")
                 .trim()
                 .slice(0, 400);
+            const autoSummaryTrim = autoSummary.replace(/\s+/g, " ").trim();
+            const bodyNorm = bodyTrim.replace(/\s+/g, " ");
+            const summaryDupedInBody =
+              Boolean(autoSummaryTrim) &&
+              Boolean(bodyNorm) &&
+              (bodyNorm.includes(autoSummaryTrim.slice(0, Math.min(80, autoSummaryTrim.length))) ||
+                autoSummaryTrim.includes(bodyNorm.slice(0, Math.min(80, bodyNorm.length))));
             // Surface Verify on both `new` (legacy) and `contradicts` (canonical-emitted
             // contradiction cards) when no web research has run yet. This matches the
             // Verify button the legacy `kind: "contradiction"` cards used to render.
@@ -922,16 +1003,21 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
                     </button>
                   </div>
                 </div>
+                <MemoFormattedCardBody body={String(e.body ?? "")} />
                 {quote ? (
-                  <p className="mt-3 font-serif text-[15px] leading-snug text-zinc-800">
-                    <span className="text-zinc-400">“</span>
-                    {quote}
-                    <span className="text-zinc-400">”</span>
-                  </p>
+                  <div className="mt-3 rounded-2xl border border-zinc-200/70 bg-white px-4 py-3 shadow-sm ring-1 ring-zinc-950/[0.04]">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Source utterance</p>
+                    <p className="mt-1 font-sans text-[13px] leading-relaxed text-zinc-800">{formatAssistantPipeLists(quote)}</p>
+                  </div>
                 ) : null}
-                {autoSummary ? <p className="mt-2 text-[13px] leading-snug text-zinc-600">{autoSummary}</p> : null}
+                {autoSummary && !summaryDupedInBody ? (
+                  <div className="mt-2 rounded-lg border border-zinc-100 bg-white px-3 py-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Deal check</p>
+                    <p className="mt-1 font-sans text-[13px] leading-snug text-zinc-700">{formatAssistantPipeLists(autoSummary)}</p>
+                  </div>
+                ) : null}
                 {researchSummary ? (
-                  <p className="mt-2 text-[13px] leading-snug text-zinc-800 font-medium">{researchSummary}</p>
+                  <p className="mt-2 text-[13px] leading-snug text-zinc-800 font-medium">{formatAssistantPipeLists(researchSummary)}</p>
                 ) : null}
                 {!researchSummary && researchVerdict ? (
                   <p className="mt-2 text-[13px] text-zinc-600 capitalize">Web research: {researchVerdict}</p>
@@ -945,7 +1031,7 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
                           <a href={c.url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-700 hover:underline break-all">
                             {c.title || c.url}
                           </a>
-                          {c.snippet ? <p className="mt-0.5 text-zinc-600">{c.snippet}</p> : null}
+                          {c.snippet ? <p className="mt-0.5 text-zinc-600">{formatAssistantPipeLists(c.snippet)}</p> : null}
                         </li>
                       ))}
                     </ul>
@@ -1038,7 +1124,7 @@ function AssistantEventsPanel(props: { meetingId: string; dealId?: string }) {
                   ) : null}
                 </div>
               </div>
-              {renderBody(e.body)}
+              <MemoFormattedCardBody body={String(e.body ?? "")} />
               <AssistantEventCrmLinks sourceMap={e.source_map} dealId={props.dealId} />
               <SupersededFooter sourceMap={e.source_map} supersessions={supersessions} />
             </div>

@@ -20,7 +20,9 @@ import {
 } from "@/lib/live-assistant/deal-intel-grounding";
 import { extractFastSignals } from "@/lib/live-assistant/fast-kpi";
 import { createMeetingAssistantEvent } from "@/lib/live-assistant/tools";
+import { formatMemoClaimVerificationBody } from "@/lib/live-assistant/assistant-card-format";
 import type { DialogueLine, SettledTurn } from "@/lib/live-assistant/guest-turn-tracker";
+import { isDiscourseFragment } from "@/lib/live-assistant/guest-turn-gate";
 
 const FAST = getLiveAssistantModel("fast");
 
@@ -179,6 +181,7 @@ export async function runGuestTurnVerify(
   if (!turn || turn.role !== "guest") return;
   const guestText = turn.text.trim();
   if (!guestText) return;
+  if (isDiscourseFragment(guestText)) return;
 
   const startedAt = Date.now();
 
@@ -210,15 +213,19 @@ ${numericJson}
 Return strict JSON only:
 {
   "verdict": "aligns" | "contradicts" | "new" | "inconclusive",
+  "suppress_card": boolean,
   "answers_question_id": string | null,
+  "answer_excerpt": string | null,
   "summary": "<= 1 short sentence; phrased as the guest answered/stated/contradicted (never 'introduced')",
   "conflicts_with": null | { "fact": string, "record_value": string },
   "evidence": [{ "text": "...", "source": "crm_fact|prior_turn" }]
 }
 
 Rules:
-- If NUMERIC_PRECHECK has verdict "contradicts" or "aligns", verdict MUST match it.
-- Pick "answers_question_id" only when the GUEST_TURN directly answers that tracked question (CEO name question -> guest gives a name, etc.). Otherwise null.
+- Set "suppress_card" to true when GUEST_TURN is not ready to score: mid-sentence cutoff, only a conjunction/discourse marker, filler, or otherwise incomplete — do NOT emit a user-visible card in those cases (set verdict "inconclusive").
+- If NUMERIC_PRECHECK has verdict "contradicts" or "aligns", verdict MUST match it and suppress_card should be false.
+- Pick "answers_question_id" only when the GUEST_TURN clearly and completely answers that tracked question. Otherwise null.
+- When answers_question_id is non-null, set "answer_excerpt" to a short verbatim or tight paraphrase of the answering phrase (max ~400 chars). The server persists the **full guest turn text** for the Questions UI so partial phrases here do not replace the stored answer.
 - "new": substantive factual claim not anchored in CRM facts but still valid (e.g. naming a CEO when CRM lacks that field) — phrase summary as "Guest answered..." when the prior dialogue shows the host asked.
 - "contradicts": the guest figure / fact disagrees with CRM.
 - "aligns": the guest figure / fact matches CRM.
@@ -229,6 +236,8 @@ Rules:
   let summary = "";
   let evidence: EvidenceItem[] = [];
   let answersQuestionId: string | null = null;
+  let answerExcerpt: string | null = null;
+  let suppressCard = false;
   let conflictsWith: { fact: string; record_value: string } | null = null;
   let llmMs = 0;
 
@@ -243,6 +252,9 @@ Rules:
       if (numericPrecheck?.verdict === "contradicts" || numericPrecheck?.verdict === "aligns") {
         verdict = numericPrecheck.verdict;
       }
+      suppressCard =
+        parsed.suppress_card === true ||
+        String(parsed.suppress_card ?? "").toLowerCase() === "true";
       summary = typeof parsed.summary === "string" ? parsed.summary.trim().slice(0, 400) : "";
       evidence = normalizeEvidence(parsed.evidence);
       const aqid = parsed.answers_question_id;
@@ -250,6 +262,8 @@ Rules:
         const known = trackedQuestions.find((q) => q.id === aqid.trim());
         if (known) answersQuestionId = aqid.trim();
       }
+      const ax = parsed.answer_excerpt;
+      if (typeof ax === "string" && ax.trim()) answerExcerpt = ax.trim().slice(0, 800);
       const cw = parsed.conflicts_with;
       if (cw && typeof cw === "object") {
         const o = cw as Record<string, unknown>;
@@ -261,6 +275,10 @@ Rules:
   } catch (e) {
     console.warn("[guest-turn-verify] LLM call failed", e instanceof Error ? e.message : e);
     if (!summary && !numericPrecheck) summary = "Automatic check failed.";
+  }
+
+  if (numericPrecheck?.verdict === "contradicts" || numericPrecheck?.verdict === "aligns") {
+    suppressCard = false;
   }
 
   if (numericPrecheck?.verdict === "contradicts" && !conflictsWith) {
@@ -276,57 +294,93 @@ Rules:
   const dedupeKey = `gturn:${meetingId}:${turn.turnId}`;
   const title = verdict === "contradicts" ? "Possible contradiction" : "Claim check";
 
-  const bodyLines: string[] = [];
-  const priorHost = [...args.recentTurns].reverse().find((r) => r.role === "host" && r.turnId !== turn.turnId);
-  if (priorHost) bodyLines.push(`Host: "${priorHost.text.slice(0, 400)}"`);
-  bodyLines.push(`Guest: "${guestText.slice(0, 400)}"`);
-  if (summary) bodyLines.push(summary);
-  if (verdict === "contradicts" && conflictsWith) {
-    const tail = conflictsWith.record_value || conflictsWith.fact;
-    if (tail) bodyLines.push(`Our records: ${tail.slice(0, 260)}`);
+  // Persist the full finalized guest utterance as the canonical answer so the UI never
+  // shows a partial LLM fragment or a later matcher span instead of the whole reply.
+  const resolvedAnswerExcerpt: string | null = answersQuestionId ? guestText.trim().slice(0, 800) : null;
+
+  if (!suppressCard) {
+    const recordsSnap =
+      verdict === "contradicts" && conflictsWith ? conflictsWith.record_value || conflictsWith.fact || null : null;
+    const matchedTracked =
+      answersQuestionId ? trackedQuestions.find((q) => String(q.id) === String(answersQuestionId)) : null;
+    const body = formatMemoClaimVerificationBody({
+      summary:
+        summary ||
+        (verdict === "contradicts"
+          ? "Possible mismatch between what was stated and CRM snapshot."
+          : verdict === "new"
+            ? "New factual detail vs prior records."
+            : "Claim checked against workspace records."),
+      recordsSnapshot: recordsSnap ? String(recordsSnap).slice(0, 320) : null,
+      relatedQuestion: matchedTracked?.text ?? null,
+    });
+
+    await createMeetingAssistantEvent(admin, {
+      meeting_id: meetingId,
+      kind: "claim_verification",
+      title,
+      severity: severityFor(verdict),
+      body,
+      source_map: {
+        lane: laneFor(verdict),
+        canonical: true,
+        guest_turn: true,
+        dedupe_key: dedupeKey,
+        turn_id: turn.turnId,
+        speaker: turn.speaker,
+        auto_verdict: verdict,
+        auto_summary: summary,
+        auto_evidence: evidence,
+        answers_question_id: answersQuestionId,
+        answer_excerpt: resolvedAnswerExcerpt ?? undefined,
+        conflicts_with: conflictsWith,
+        numeric_precheck: numericPrecheck,
+        guest_text: guestText,
+        suppress_card: false,
+        recent_dialogue: args.recentTurns
+          .filter((r) => r.turnId !== turn.turnId)
+          .map((r) => ({
+            role: r.role,
+            text: r.text.slice(0, 600),
+            t_start_ms: r.tStartMs,
+            t_end_ms: r.tEndMs,
+            in_progress: Boolean(r.inProgress),
+          })),
+      },
+    });
   }
-  const body = bodyLines.join("\n");
 
-  await createMeetingAssistantEvent(admin, {
-    meeting_id: meetingId,
-    kind: "claim_verification",
-    title,
-    severity: severityFor(verdict),
-    body,
-    source_map: {
-      lane: laneFor(verdict),
-      canonical: true,
-      guest_turn: true,
-      dedupe_key: dedupeKey,
-      turn_id: turn.turnId,
-      speaker: turn.speaker,
-      auto_verdict: verdict,
-      auto_summary: summary,
-      auto_evidence: evidence,
-      answers_question_id: answersQuestionId,
-      conflicts_with: conflictsWith,
-      numeric_precheck: numericPrecheck,
-      guest_text: guestText,
-      recent_dialogue: args.recentTurns
-        .filter((r) => r.turnId !== turn.turnId)
-        .map((r) => ({
-          role: r.role,
-          text: r.text.slice(0, 600),
-          t_start_ms: r.tStartMs,
-          t_end_ms: r.tEndMs,
-          in_progress: Boolean(r.inProgress),
-        })),
-    },
-  });
-
-  if (answersQuestionId && verdict !== "inconclusive") {
+  if (answersQuestionId && !suppressCard) {
     try {
+      const prevRes = await admin
+        .schema("deal_intel")
+        .from("meeting_tracked_question")
+        .select("metadata")
+        .eq("id", answersQuestionId)
+        .eq("meeting_id", meetingId)
+        .maybeSingle();
+      const prevMeta =
+        prevRes.data?.metadata && typeof prevRes.data.metadata === "object"
+          ? (prevRes.data.metadata as Record<string, unknown>)
+          : {};
       await admin
         .schema("deal_intel")
         .from("meeting_tracked_question")
-        .update({ state: "answered", updated_at: new Date().toISOString() })
+        .update({
+          state: "answered",
+          metadata: {
+            ...prevMeta,
+            answered_at: new Date().toISOString(),
+            answer_source: "guest_turn_canonical",
+            answer_excerpt: resolvedAnswerExcerpt ?? guestText.slice(0, 800),
+            answer_verdict: verdict,
+          },
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", answersQuestionId)
-        .eq("meeting_id", meetingId);
+        .eq("meeting_id", meetingId)
+        // Do not overwrite a prior canonical answer if this path races or re-runs.
+        .in("state", ["unanswered", "partially_answered", "needs_followup"]);
     } catch (e) {
       console.warn(
         "[guest-turn-verify] tracked-question state update failed",
@@ -339,6 +393,7 @@ Rules:
     meeting_id: meetingId,
     turn_id: turn.turnId,
     verdict,
+    suppress_card: suppressCard,
     answers_question_id: answersQuestionId,
     numeric_precheck: numericPrecheck?.verdict ?? null,
     tracked_q_count: trackedQuestions.length,

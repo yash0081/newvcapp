@@ -5,6 +5,7 @@ import { getLiveAssistantModel } from "@/lib/live-assistant/model-env";
 import { getDealContext, createMeetingAssistantEvent } from "@/lib/live-assistant/tools";
 import { getRecentDealClaims, getActiveSession } from "@/lib/copilot/db";
 import { contradictionFactDedupeKey } from "@/lib/live-assistant/contradiction";
+import { formatMemoClaimVerificationBody } from "@/lib/live-assistant/assistant-card-format";
 import { buildClaimContext, filterCompactFactsByTopic, isBareNumericClaim } from "@/lib/live-assistant/claim-context";
 import { runCanonicalClaimVerify } from "@/lib/live-assistant/claim-verifier";
 
@@ -114,6 +115,7 @@ export async function runMeetingClaimAutoVerify(
     .from("meeting_claim")
     .select("id, text, speaker, confidence, updated_at")
     .eq("meeting_id", meetingId)
+    .is("superseded_by_claim_id", null)
     .order("updated_at", { ascending: false })
     .limit(35);
   const meetingClaimsCompact =
@@ -313,13 +315,11 @@ ${JSON.stringify(promptInputs, null, 2)}`;
       if (matched) continue;
     }
 
-    const cardBodyParts: string[] = [];
-    if (claimContext.answeringQuestion) {
-      cardBodyParts.push(`Answers: "${claimContext.answeringQuestion.text.slice(0, 200)}"`);
-    }
-    if (claimText) cardBodyParts.push(`“${claimText}”`);
-    if (summary) cardBodyParts.push(summary);
-    const cardBody = cardBodyParts.join("\n");
+    const memoBody = formatMemoClaimVerificationBody({
+      summary: summary || claimText.slice(0, 320),
+      recordsSnapshot: null,
+      relatedQuestion: claimContext.answeringQuestion?.text ?? null,
+    });
 
     // Anchor the dedupe key on the source utterance so a later "Possible contradiction" card
     // for the same `meeting_claim_id` collapses with this one inside `createMeetingAssistantEvent`'s
@@ -332,7 +332,7 @@ ${JSON.stringify(promptInputs, null, 2)}`;
       kind: "claim_verification",
       title: "Claim check",
       severity: severityForAutoVerdict(verdict),
-      body: cardBody || claimText,
+      body: memoBody || claimText,
       source_map: {
         lane: laneForAutoVerdict(verdict),
         dedupe_key: cardDk,

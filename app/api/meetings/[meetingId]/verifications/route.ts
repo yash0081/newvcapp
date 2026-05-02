@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { loadMeetingClaimTextsForDisplay } from "@/lib/live-assistant/meeting-claim-display";
 
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
@@ -54,15 +55,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ meetingId: stri
 
   const rows = (vRes.data ?? []) as Array<{ claim_id: string } & Record<string, unknown>>;
   const claimIds = [...new Set(rows.map((r) => String(r.claim_id)))];
-  const claimById = new Map<string, string>();
-  if (claimIds.length) {
-    const cRes = await admin.schema("deal_intel").from("meeting_claim").select("id, text").in("id", claimIds);
-    if (!cRes.error) {
-      for (const r of (cRes.data ?? []) as Array<{ id: string; text: string }>) {
-        claimById.set(String(r.id), String(r.text ?? ""));
-      }
-    }
-  }
+  const claimById =
+    claimIds.length > 0 ? await loadMeetingClaimTextsForDisplay(admin, meetingId, claimIds) : new Map<string, string>();
 
   const verifications = rows.map((r) => ({
     ...r,

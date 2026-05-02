@@ -65,10 +65,10 @@ import { persistClassifiedClaimsForChunk, type PersistedMeetingClaimRow } from "
 import { splitClaimTextOnConjunctions } from "@/lib/live-assistant/claim-segmenter";
 import { runMeetingClaimAutoVerify } from "@/lib/live-assistant/claim-verify-auto";
 import { runSlowReasoningForClaim } from "@/lib/live-assistant/reasoning";
-import { runCanonicalClaimVerifyLite } from "@/lib/live-assistant/claim-verifier-lite";
 import { GuestTurnTracker, type SettledTurn } from "@/lib/live-assistant/guest-turn-tracker";
 import { runGuestTurnVerify } from "@/lib/live-assistant/guest-turn-verify";
 import { dedupeContradictionEventsByFactKey } from "@/lib/live-assistant/dedupe-contradictions";
+import { runMeetingAssistantSurfaceDedupe } from "@/lib/live-assistant/surface-dedupe";
 import {
   fetchDealIntelGroundingPack,
   kpiBufferMsFromEnv,
@@ -731,7 +731,7 @@ async function main() {
       // Notes: enqueue periodic tick (never inline in audio callback).
       if (envFlag("LIVE_ASSISTANT_NOTES", true)) {
         const nowNotes = Date.now();
-        const pollMs = Math.max(3000, Math.min(12_000, Number(process.env.LIVE_ASSISTANT_NOTES_TICK_MS || 5000)));
+        const pollMs = Math.max(2500, Math.min(12_000, Number(process.env.LIVE_ASSISTANT_NOTES_TICK_MS || 4000)));
         if (nowNotes - lastNotesTickAt > pollMs) {
           lastNotesTickAt = nowNotes;
           try {
@@ -759,7 +759,7 @@ async function main() {
       }
 
       const nowTick = Date.now();
-      const qPollMs = Math.max(3000, Math.min(12_000, Number(process.env.LIVE_ASSISTANT_Q_TICK_MS || 5000)));
+      const qPollMs = Math.max(2500, Math.min(12_000, Number(process.env.LIVE_ASSISTANT_Q_TICK_MS || 4000)));
       if (nowTick - lastQuestionEngineTickAt > qPollMs) {
         lastQuestionEngineTickAt = nowTick;
         try {
@@ -1089,11 +1089,19 @@ async function main() {
             p_payload: { meeting_id: meetingId },
             p_priority: 40,
           });
+          await admin.rpc("deal_intel_enqueue_job", {
+            p_job_type: "meeting_assistant_surface_dedupe",
+            p_subject_kind: "meeting",
+            p_subject_id: meetingId,
+            p_payload: { meeting_id: meetingId },
+            p_priority: 38,
+          });
           // Mirror auto-verify / slow-reasoning: when the bg-worker is not draining (dev or
           // stalled prod), run the sweep in-process so duplicate cards collapse without
           // waiting on the queue. Idempotent — DB-level uniques win regardless of who runs it.
           if (envFlag("LIVE_ASSISTANT_BG_JOB_DIRECT", process.env.NODE_ENV !== "production")) {
             void dedupeContradictionEventsByFactKey(admin, meetingId).catch(() => {});
+            void runMeetingAssistantSurfaceDedupe(admin, meetingId).catch(() => {});
           }
         }
       }

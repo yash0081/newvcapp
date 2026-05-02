@@ -16,6 +16,7 @@ import { runMeetingClaimAutoVerify } from "@/lib/live-assistant/claim-verify-aut
 import { runCanonicalClaimVerify } from "@/lib/live-assistant/claim-verifier";
 import { runMeetingClaimResearchVerify } from "@/lib/live-assistant/claim-verify-research";
 import { dedupeContradictionEventsByFactKey } from "@/lib/live-assistant/dedupe-contradictions";
+import { runMeetingAssistantSurfaceDedupe } from "@/lib/live-assistant/surface-dedupe";
 import { runMeetingNotesTick } from "@/lib/live-assistant/notes";
 import { loadLiveAssistantPreferenceSignals } from "@/lib/live-assistant/preferences";
 import { finalizeCopilotSessionToDocument } from "@/lib/copilot/finalize";
@@ -455,6 +456,12 @@ async function handleJob(admin: ReturnType<typeof createAdminClient>, job: JobRo
       const meetingId = String(payload.meeting_id ?? job.subject_id);
       if (!meetingId) return;
       await dedupeContradictionEventsByFactKey(admin, meetingId);
+      return;
+    }
+    case "meeting_assistant_surface_dedupe": {
+      const meetingId = String(payload.meeting_id ?? job.subject_id);
+      if (!meetingId) return;
+      await runMeetingAssistantSurfaceDedupe(admin, meetingId);
       return;
     }
     case "meeting_notes_tick": {

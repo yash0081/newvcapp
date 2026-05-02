@@ -61,7 +61,11 @@ export async function GET(req: Request, ctx: { params: Promise<{ meetingId: stri
 
   if (res.error) return NextResponse.json({ error: res.error.message || "Failed to load events" }, { status: 500 });
 
-  const events = res.data ?? [];
+  const events = (res.data ?? []).filter((e) => {
+    const sm = (e as { source_map?: unknown }).source_map;
+    if (sm && typeof sm === "object" && (sm as Record<string, unknown>).ui_suppressed === true) return false;
+    return true;
+  });
 
   // Resolve supersession state for the cards we're about to render. When a guest later
   // corrects a number ("$20B" → "$215B"), the matcher writes `superseded_by_claim_id` on

@@ -13,6 +13,7 @@ import { normalizeNumberFromText } from "@/lib/live-assistant/fast-crm-compare";
 import { contradictionFactDedupeKey } from "@/lib/live-assistant/contradiction";
 import { assertGroundedNumber, findVerbatimSpan, labelMatchesQuote } from "@/lib/live-assistant/quote-grounding";
 import { buildClaimContext, isBareNumericClaim } from "@/lib/live-assistant/claim-context";
+import { formatMemoKpiMiddleBody } from "@/lib/live-assistant/assistant-card-format";
 
 const MODEL = getLiveAssistantModel("fast");
 
@@ -215,24 +216,27 @@ Rules:
     // Local sub-key kept for source_map analytics (per-value bucket within the family).
     const localKey = `mid:${args.meetingId}:${family}:${canonKey}`;
 
-    const lines: string[] = [];
-    lines.push(`Founder said: "${founderQuote}"`);
-    if (founderNorm != null && Number.isFinite(founderNorm)) lines.push(`Normalized (middle path): ≈ ${founderNorm}`);
-    if (!recordPresent) {
-      lines.push("Our records: we do not have this KPI on file (no matching numeric/value in the snapshot).");
-    } else if (recordQuote) {
-      lines.push(`Our records: ${recordQuote}`);
-    }
-    if (gap) {
-      lines.push("");
-      lines.push(gap);
-    }
-    if (mismatch && recordPresent) {
-      lines.push("");
-      lines.push("Follow-up: Confirm definition, timeframe, and source.");
-    }
-
     const isMismatchCard = mismatch && recordPresent;
+
+    const headline = isMismatchCard
+      ? `${metricLabel} — possible mismatch with CRM`
+      : recordPresent
+        ? `${metricLabel} — vs CRM snapshot`
+        : `${metricLabel} — not in CRM snapshot`;
+    const gapParts = [
+      founderNorm != null && Number.isFinite(founderNorm) ? `Normalized ≈ ${founderNorm}` : "",
+      !recordPresent ? "Records do not show this KPI (no matching value in snapshot)." : "",
+      gap || "",
+    ]
+      .map((s) => String(s).trim())
+      .filter(Boolean);
+    const kpiBody = formatMemoKpiMiddleBody({
+      headline,
+      founderInterpretation: founderQuote.slice(0, 280),
+      recordsSnapshot: recordPresent && recordQuote ? recordQuote : null,
+      gapNote: gapParts.length ? gapParts.join(" ") : null,
+      defaultFollowUp: isMismatchCard,
+    });
 
     // Canonical verifier owns verdicts. The mismatch fact is already encoded in
     // `meeting_kpi_observation` (persisted upstream) and in the chunk text the verifier
@@ -255,7 +259,7 @@ Rules:
       kind,
       severity,
       title,
-      body: lines.join("\n"),
+      body: kpiBody,
       source_map: {
         lane: mismatch && recordPresent ? "attention" : "context",
         fast_lane: true,

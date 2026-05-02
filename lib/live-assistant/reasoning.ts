@@ -6,6 +6,7 @@ import { fetchDealIntelGroundingPack, groundingPackToSyntheticFacts } from "@/li
 import { upsertMeetingTrackedQuestion } from "@/lib/live-assistant/tracked-questions";
 import { normalizeNumberFromText } from "@/lib/live-assistant/fast-crm-compare";
 import { buildClaimContext, filterFactsByTopic, isBareNumericClaim } from "@/lib/live-assistant/claim-context";
+import { formatMemoContradictionBody } from "@/lib/live-assistant/assistant-card-format";
 
 const DISPLAY_MIN_CONF = Number(process.env.LIVE_ASSISTANT_CONTRADICTION_DISPLAY_MIN_CONF ?? 0.72);
 
@@ -148,17 +149,14 @@ export async function runSlowReasoningForClaim(
         f.conflicts_with?.claim_quote ||
         (f.conflicts_with?.fact_path ? `Fact: ${f.conflicts_with.fact_path}` : null) ||
         null;
-      const lines: string[] = [];
-      if (claimContext.answeringQuestion) {
-        lines.push(`Answers: "${claimContext.answeringQuestion.text.slice(0, 200)}"`);
-      }
-      lines.push(`Founder said: "${queryText.slice(0, 280)}"`);
-      if (prior) lines.push(`Our records: ${String(prior).slice(0, 260)}`);
-      if (f.conflicts_with?.fact_path) lines.push(`Field: ${String(f.conflicts_with.fact_path).slice(0, 120)}`);
-      if (f.suggested_followup_question) {
-        lines.push("");
-        lines.push(`Follow-up: ${f.suggested_followup_question}`);
-      }
+      const contraBody = formatMemoContradictionBody({
+        headline: "Possible mismatch between this meeting claim and CRM / records.",
+        recordsSnapshot: prior ? String(prior).slice(0, 260) : null,
+        fieldPath: f.conflicts_with?.fact_path ? String(f.conflicts_with.fact_path).slice(0, 120) : null,
+        whyItMatters: null,
+        followUps: f.suggested_followup_question ? [String(f.suggested_followup_question)] : [],
+        relatedQuestion: claimContext.answeringQuestion?.text ?? null,
+      });
       const parsedNum = normalizeNumberFromText(queryText);
       const factDk = contradictionFactDedupeKey(args.meetingId, {
         // Anchor on the source utterance whenever we have it. This is the strongest cross-path
@@ -178,7 +176,7 @@ export async function runSlowReasoningForClaim(
         kind: "contradiction",
         severity: f.severity,
         title: "Possible contradiction",
-        body: lines.join("\n"),
+        body: contraBody,
         source_map: {
           lane: "attention",
           reasoned: true,
@@ -263,7 +261,7 @@ export async function runSlowReasoningForClaim(
     lines.push(`Claim: "${queryText.slice(0, 280)}"`);
     if (args.preferenceContext?.hints?.length) {
       lines.push("");
-      lines.push(`Preference context: ${args.preferenceContext.hints.slice(0, 2).join(" | ")}`);
+      lines.push(`Preference context: ${args.preferenceContext.hints.slice(0, 2).join(", ")}`);
     }
     if (args.preferenceContext?.preferredDomains?.length) {
       lines.push(`Preferred domains: ${args.preferenceContext.preferredDomains.slice(0, 3).join(", ")}`);

@@ -77,11 +77,20 @@ export async function GET(req: Request, ctx: { params: Promise<{ meetingId: stri
     }
   }
 
-  // Sort within section chronologically (timestamp), but keep overall section ordering stable on server.
+  // Within each section: importance first, then recency (t_ms).
   for (const sec of Object.keys(bySection)) {
-    bySection[sec]!.bullets.sort((a, b) => (b.t_ms ?? 0) - (a.t_ms ?? 0));
+    const score = (r: NoteRow) => Number(r.importance_score ?? 0);
+    bySection[sec]!.bullets.sort((a, b) => {
+      const d = score(b) - score(a);
+      if (d !== 0) return d;
+      return (b.t_ms ?? 0) - (a.t_ms ?? 0);
+    });
     for (const pid of Object.keys(bySection[sec]!.subbullets)) {
-      bySection[sec]!.subbullets[pid]!.sort((a, b) => (b.t_ms ?? 0) - (a.t_ms ?? 0));
+      bySection[sec]!.subbullets[pid]!.sort((a, b) => {
+        const d = score(b) - score(a);
+        if (d !== 0) return d;
+        return (b.t_ms ?? 0) - (a.t_ms ?? 0);
+      });
     }
   }
 

@@ -9,6 +9,7 @@ import { contradictionFactDedupeKey, metricFamily } from "@/lib/live-assistant/c
 import { findVerbatimSpan } from "@/lib/live-assistant/quote-grounding";
 import { normalizeNumberFromText } from "@/lib/live-assistant/fast-crm-compare";
 import { buildClaimContext } from "@/lib/live-assistant/claim-context";
+import { formatMemoContradictionBody } from "@/lib/live-assistant/assistant-card-format";
 
 const BIG_MODEL = getLiveAssistantModel("big");
 
@@ -287,15 +288,6 @@ export async function runDeepContradictionBatch(admin: SupabaseClient, args: { m
       if (deepCount >= deepMaxPerMin) continue;
     }
 
-    const lines: string[] = [];
-    lines.push(`Founder said: \"${founderQuote}\"`);
-    if (recordsQuote) lines.push(`Our records: ${recordsQuote}`);
-    if (why) lines.push(`Why it matters: ${why}`);
-    if (follow) {
-      lines.push("");
-      lines.push(`Follow-up: ${follow}`);
-    }
-
     // Resolve which persisted `meeting_claim` this founder_quote came from. Best-effort:
     // exact equality first (case-insensitive), then substring containment in either direction.
     // When this hits, the dedupe key becomes `cclaim:{meetingId}:{claim_id}` — the same key
@@ -383,12 +375,20 @@ export async function runDeepContradictionBatch(admin: SupabaseClient, args: { m
             founderQuote,
           })
         : contradictionFactDedupeKey(args.meetingId, { founderQuote });
+    const deepBody = formatMemoContradictionBody({
+      headline: "Deep path: possible mismatch with CRM or deal records.",
+      recordsSnapshot: recordsQuote,
+      fieldPath: null,
+      whyItMatters: why,
+      followUps: follow ? [follow] : [],
+      relatedQuestion: resolvedContext?.answeringQuestion?.text ?? null,
+    });
     await createMeetingAssistantEvent(admin, {
       meeting_id: args.meetingId,
       kind: "contradiction",
       severity: severity === "high" ? "high" : severity === "med" ? "med" : "low",
       title: "Deep contradiction",
-      body: lines.join("\n"),
+      body: deepBody,
       source_map: {
         lane: "attention",
         kind: `deep_${kind}`,

@@ -29,7 +29,14 @@ import { loadLiveAssistantPreferenceSignals } from "@/lib/live-assistant/prefere
  */
 
 const MODEL = getLiveAssistantModel("fast");
-const HYDRATE_COOLDOWN_MS = 60_000;
+
+/** Min interval between peer-style question LLM runs (default ~36s — faster cadence than 60s without stacking redundant calls). Override with LIVE_ASSISTANT_QUESTION_HYDRATE_COOLDOWN_MS. */
+function hydrateCooldownMs(): number {
+  const raw = Number(process.env.LIVE_ASSISTANT_QUESTION_HYDRATE_COOLDOWN_MS);
+  if (Number.isFinite(raw)) return Math.max(15_000, Math.min(180_000, raw));
+  return 36_000;
+}
+
 const MAX_NEW_QUESTIONS_PER_TICK = 3;
 
 const STOPWORDS: ReadonlySet<string> = new Set([
@@ -85,6 +92,8 @@ async function loadRecentClaims(admin: SupabaseClient, meetingId: string): Promi
     .from("meeting_claim")
     .select("id, text, section_labels, updated_at")
     .eq("meeting_id", meetingId)
+    // Current claims only — stale rows after in-meeting corrections must not steer examples.
+    .is("superseded_by_claim_id", null)
     .gte("updated_at", new Date(sinceMs).toISOString())
     .order("updated_at", { ascending: false })
     .limit(15);
@@ -155,8 +164,9 @@ export async function runUserStyleQuestionHydrate(
   admin: SupabaseClient,
   args: { meetingId: string; userId: string; dealId: string },
 ): Promise<void> {
+  const cooldownMs = hydrateCooldownMs();
   const lastInMem = lastHydrateAt.get(args.meetingId) ?? 0;
-  if (lastInMem && Date.now() - lastInMem < HYDRATE_COOLDOWN_MS) return;
+  if (lastInMem && Date.now() - lastInMem < cooldownMs) return;
 
   // Defense-in-depth: also respect the persisted last_similar_hydrate_at so a process
   // restart doesn't burst the LLM.
@@ -169,7 +179,7 @@ export async function runUserStyleQuestionHydrate(
   const lastDb = stRes.data?.last_similar_hydrate_at
     ? new Date(String(stRes.data.last_similar_hydrate_at)).getTime()
     : 0;
-  if (lastDb && Date.now() - lastDb < HYDRATE_COOLDOWN_MS) {
+  if (lastDb && Date.now() - lastDb < cooldownMs) {
     lastHydrateAt.set(args.meetingId, lastDb);
     return;
   }
