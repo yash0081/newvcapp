@@ -5,6 +5,8 @@ import { executeResearchStep } from "@/lib/research/executor";
 import { generateResearchPlan } from "@/lib/research/planner";
 import { getUserSitePreferences, recordResearchPreferenceEvents } from "@/lib/research/preferences";
 import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
+import { loadResearchInternalContext } from "@/lib/research/context";
+import { stripMarkdownText } from "@/lib/plain-text";
 
 export type CustomWorkflowStep =
   | {
@@ -187,7 +189,21 @@ async function runResearchWorkflowStep(args: {
   const meta = safeRecord(args.deal.metadata);
   const name = companyName(args.deal);
   const focus = [args.step.prompt, args.input].filter(Boolean).join("\n").trim();
-  const companyContext = JSON.stringify(meta, null, 2);
+  const planningContext = await loadResearchInternalContext({
+    admin: args.admin,
+    userId: args.userId,
+    dealId,
+    query: focus || args.step.title,
+    mode: "planning",
+  }).catch(() => "");
+  const companyContext = JSON.stringify(
+    {
+      metadata: meta,
+      internal_workspace_context: planningContext || null,
+    },
+    null,
+    2
+  );
   const tasks =
     args.step.mode === "single"
       ? [{ website: "web", task: focus || args.step.title, category: "general" }]
@@ -256,13 +272,22 @@ async function runResearchWorkflowStep(args: {
       .single();
     if (runIns.error || !runIns.data) throw runIns.error ?? new Error("Failed to create research run");
     const runId = String(runIns.data.id);
+    const internalContext = await loadResearchInternalContext({
+      admin: args.admin,
+      userId: args.userId,
+      dealId,
+      query: researchStep.task,
+      mode: "execution",
+    }).catch(() => "");
     const result = await executeResearchStep({
       companyName: name,
       companyContext,
       website: researchStep.website,
       task: researchStep.task,
+      internalContext,
     });
     if (result.ok) {
+      const cleanNotes = stripMarkdownText(result.notes);
       const docs = await ingestStepOutputForRun({
         admin: args.admin,
         userId: args.userId,
@@ -272,17 +297,17 @@ async function runResearchWorkflowStep(args: {
         runId,
         website: researchStep.website,
         task: researchStep.task,
-        notes: result.notes,
+        notes: cleanNotes,
         sources: result.sources,
       });
       await args.admin.schema("deal_intel").from("deal_research_step_run").update({
         run_status: "done",
-        output_notes: result.notes,
+        output_notes: cleanNotes,
         sources: result.sources,
-        metadata: { website: researchStep.website, task: researchStep.task, ingestedDocumentIds: docs },
+        metadata: { website: researchStep.website, task: researchStep.task, ingestedDocumentIds: docs, internalContextUsed: Boolean(internalContext) },
       }).eq("id", runId);
-      await args.admin.schema("deal_intel").from("deal_research_step").update({ status: "done", notes: result.notes.slice(0, 5000) }).eq("id", researchStep.id);
-      notes.push(`${researchStep.task}: ${result.notes.replace(/\s+/g, " ").slice(0, 280)}`);
+      await args.admin.schema("deal_intel").from("deal_research_step").update({ status: "done", notes: cleanNotes.slice(0, 5000) }).eq("id", researchStep.id);
+      notes.push(`${researchStep.task}: ${cleanNotes.replace(/\s+/g, " ").slice(0, 280)}`);
       if (researchStep.website && researchStep.website !== "web") {
         await recordResearchPreferenceEvents({
           admin: args.admin,

@@ -2,6 +2,12 @@ import { parseJsonFromResponseOrNull } from "@/lib/gemini";
 import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import type { ResearchSource } from "@/lib/research/types";
+import {
+  DEAL_INTEL_LAYER1A_SCHEMA_GUIDE,
+  DEAL_INTEL_QUALITY_GUARDRAILS,
+  USER_PREFERENCE_GUARDRAILS,
+} from "@/lib/deal-intel/prompt-guidance";
+import { stripMarkdownText } from "@/lib/plain-text";
 
 export type ExecutionOk = {
   ok: true;
@@ -77,7 +83,7 @@ function parseExecution(raw: string): Omit<ExecutionOk, "ok"> | null {
                 .join("\n")
             : "";
     if (!notes && sources.length === 0) return null;
-    return { notes, sources, suggestedStepUpdates: updates };
+    return { notes: stripMarkdownText(notes), sources, suggestedStepUpdates: updates };
   } catch {
     return null;
   }
@@ -106,7 +112,7 @@ function fallbackFromRaw(raw: string): Omit<ExecutionOk, "ok"> | null {
   if (!lines && sources.length === 0) return null;
 
   return {
-    notes: lines || "Execution completed, but model output was unstructured.",
+    notes: stripMarkdownText(lines || "Execution completed, but model output was unstructured."),
     sources,
     suggestedStepUpdates: [],
   };
@@ -117,6 +123,7 @@ export async function executeResearchStep(args: {
   companyContext: string;
   website: string;
   task: string;
+  internalContext?: string;
 }): Promise<ExecutionResult> {
   const sourceConstraint = isBroadWebSource(args.website)
     ? {
@@ -132,7 +139,7 @@ export async function executeResearchStep(args: {
   const prompt = `Execute one public-web research step.
 Return strict JSON only:
 {
-  "notes": "bullet-like concise findings",
+  "notes": "plain text concise findings with no formatting syntax",
   "sources": [{"url":"https://...","title":"...","snippet":"..."}],
   "suggestedStepUpdates": [{"reason":"...","website":"...","task":"..."}]
 }
@@ -142,9 +149,21 @@ Rules:
 - If Source constraint mode is "source_constrained", use the provided source hint as a required target. If the source is inaccessible or has no relevant evidence, say that explicitly in notes.
 - Stay focused on the research task. Do not return adjacent facts that fail to answer it.
 - Use external web evidence where possible.
+- Use the internal workspace context first. If it answers part of the task, incorporate it and use web research to verify, update, or fill missing details. Do not repeat internal context as if it came from the web.
+- Use deterministic database signals when supplied for keyword or SQL-style questions, such as common investors, saved traction, saved competitors, saved customers, and prior document evidence.
 - Include 2-6 sources when available.
+- Return suggestedStepUpdates as an empty array by default.
+- Suggest at most one follow-up step only when this step uncovered a new contradiction, missing source, newly named entity, or unresolved evidence gap that is required to answer the original research task. The reason must state what changed and why the current plan cannot answer it.
+- Do not suggest follow-ups for adjacent company background, generic diligence, repeated competitor searching, repeated investor searching, or broader schema coverage.
 - Suggested follow-up steps should use website "web" unless they truly require a specific source.
-- If evidence is weak, say so explicitly in notes.`;
+- If evidence is weak, say so explicitly in notes.
+- Notes must be clean regular text. Do not use headings, bold markers, bullet characters, numbered lists, code fences, or link markup.
+- Map every finding to the canonical Deal Intel schema when possible:
+${DEAL_INTEL_LAYER1A_SCHEMA_GUIDE}
+
+${DEAL_INTEL_QUALITY_GUARDRAILS}
+
+${USER_PREFERENCE_GUARDRAILS}`;
 
   let raw = "";
   try {
@@ -154,6 +173,7 @@ Rules:
       [
         { label: "Company name", value: args.companyName || "Unknown" },
         { label: "Company context", value: args.companyContext || "No context." },
+        { label: "Internal workspace retrieval and database signals", value: args.internalContext || "No additional internal context was retrieved for this step." },
         { label: "Source constraint", value: sourceConstraint },
         { label: "Research task", value: args.task },
       ],
@@ -168,7 +188,7 @@ Rules:
 
   const parsed = parseExecution(raw);
   if (parsed) {
-    return { ok: true, ...parsed };
+    return { ok: true, ...parsed, notes: stripMarkdownText(parsed.notes) };
   }
 
   if (raw) {

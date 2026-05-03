@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { redirect, notFound } from "next/navigation";
 import { ExternalLink, Search } from "lucide-react";
+import { stripMarkdownText } from "@/lib/plain-text";
 
 type Source = { url: string; title?: string; snippet?: string };
 
@@ -52,7 +53,7 @@ export default async function ResearchDocumentPage(props: { params: Promise<{ do
 
       <div className="crm-panel p-5">
         <p className="crm-kicker mb-3">Output</p>
-        <div className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-800">{pageRes.data.text}</div>
+        <div className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-800">{stripMarkdownText(pageRes.data.text)}</div>
       </div>
 
       <div className="crm-panel p-5">
@@ -65,7 +66,7 @@ export default async function ResearchDocumentPage(props: { params: Promise<{ do
                   <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   {s.title || s.url}
                 </a>
-                {s.snippet ? <p className="text-xs text-zinc-600 mt-1">{s.snippet}</p> : null}
+                {s.snippet ? <p className="text-xs text-zinc-600 mt-1">{stripMarkdownText(s.snippet)}</p> : null}
               </div>
             ))}
           </div>

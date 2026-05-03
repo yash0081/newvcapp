@@ -3,6 +3,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { Download, ExternalLink, FileText } from "lucide-react";
+import { GeneratedDocumentEditor } from "@/components/document-generation/generated-document-editor";
 
 export default async function GeneratedDocumentPage(props: { params: Promise<{ draftId: string }> }) {
   const { draftId } = await props.params;
@@ -73,6 +74,8 @@ export default async function GeneratedDocumentPage(props: { params: Promise<{ d
         <p className="mt-2 whitespace-pre-wrap text-sm text-zinc-700">{draft.prompt}</p>
       </section>
 
+      <GeneratedDocumentEditor draftId={draft.id} initialTitle={draft.title} initialContent={draft.content} />
+
       <section className="crm-panel overflow-hidden">
         <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-2.5">
           <p className="crm-kicker">
@@ -84,6 +87,7 @@ export default async function GeneratedDocumentPage(props: { params: Promise<{ d
           </a>
         </div>
         <iframe
+          data-generated-document-preview="true"
           className="h-[760px] w-full bg-white"
           src={previewHref}
           title={`${draft.title} preview`}

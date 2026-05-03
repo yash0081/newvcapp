@@ -25,8 +25,21 @@ export type ResearchPlanStepInput = {
   dependsOnStepIds?: string[];
 };
 
+export type ResearchPlanScope = {
+  userGoal: string;
+  breadth: "narrow" | "standard" | "broad";
+  requiredTopics: string[];
+  excludedTopics: string[];
+  allowedCategories: WebsiteCategory[];
+  sourceStrategy: string;
+  maxSteps: number;
+  includeRiskCheck: boolean;
+  mustCompare: boolean;
+};
+
 export type ResearchPlanSuggestion = {
   summary: string;
   steps: ResearchPlanStepInput[];
+  intent?: ResearchPlanScope;
+  pruningNotes?: string[];
 };
-

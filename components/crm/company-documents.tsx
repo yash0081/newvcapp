@@ -105,7 +105,9 @@ export function CompanyDocuments(props: { dealId: string; initialDocs: DocRow[] 
       return;
     }
     // Research-step outputs render a specialized view with citations; other non-PDFs use the generic full-text viewer.
-    const isResearchStepOutput = doc?.mime_type === "text/markdown";
+    const isResearchStepOutput =
+      doc?.mime_type === "text/markdown" ||
+      (doc?.mime_type === "text/plain" && doc?.source_kind === "web");
     window.open(isResearchStepOutput ? `/home/research-documents/${documentId}` : `/home/documents/${documentId}`, "_blank", "noopener,noreferrer");
   }
 

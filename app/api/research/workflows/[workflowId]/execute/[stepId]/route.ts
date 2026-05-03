@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server";
+import { parseJsonFromResponseOrNull } from "@/lib/gemini";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getWorkflowForUser } from "@/lib/research/db";
 import { executeResearchStep } from "@/lib/research/executor";
+import { getResearchModel } from "@/lib/research/research-model-env";
 import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
+import { loadResearchInternalContext } from "@/lib/research/context";
+import { stripMarkdownText } from "@/lib/plain-text";
+import { vertexRunWithTextMulti } from "@/lib/vertex";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -20,6 +25,167 @@ function categoryForMeta(meta: unknown): string {
 function isPreferenceSource(website: string): boolean {
   const s = website.trim().toLowerCase();
   return Boolean(s) && s !== "web" && s !== "broad-web" && s !== "general-web";
+}
+
+function normalizeTaskKey(task: string): string {
+  return task
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(research|find|verify|check|current|evidence|source|sources|company)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 140);
+}
+
+type FollowUpUpdate = { reason: string; website: string; task: string };
+
+function clampInt(n: number, lo: number, hi: number): number {
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, Math.round(n)));
+}
+
+function cleanFollowUpUpdates(raw: unknown): FollowUpUpdate[] {
+  if (!Array.isArray(raw)) return [];
+  const out: FollowUpUpdate[] = [];
+  for (const item of raw) {
+    const record = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+    const reason = typeof record.reason === "string" ? stripMarkdownText(record.reason).trim().slice(0, 500) : "";
+    const websiteRaw = typeof record.website === "string" ? record.website.trim().slice(0, 300) : "";
+    const task = typeof record.task === "string" ? stripMarkdownText(record.task).trim().slice(0, 1000) : "";
+    if (!reason || !task) continue;
+    out.push({
+      reason,
+      website: websiteRaw || "web",
+      task,
+    });
+    if (out.length >= 2) break;
+  }
+  return out;
+}
+
+const FOLLOW_UP_STOPWORDS = new Set([
+  "about",
+  "against",
+  "available",
+  "company",
+  "current",
+  "evidence",
+  "from",
+  "research",
+  "search",
+  "source",
+  "sources",
+  "startup",
+  "that",
+  "this",
+  "using",
+  "verify",
+  "with",
+]);
+
+function meaningfulTokens(text: string): Set<string> {
+  return new Set(
+    stripMarkdownText(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]+/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 4 && !FOLLOW_UP_STOPWORDS.has(token))
+      .slice(0, 80),
+  );
+}
+
+function hasFocusOverlap(candidate: FollowUpUpdate, focus: string, parentTask: string): boolean {
+  const scopeTokens = meaningfulTokens(`${focus} ${parentTask}`);
+  if (!scopeTokens.size) return true;
+  const candidateTokens = meaningfulTokens(`${candidate.reason} ${candidate.task}`);
+  for (const token of candidateTokens) {
+    if (scopeTokens.has(token)) return true;
+  }
+  return false;
+}
+
+function hasNoveltyCue(candidate: FollowUpUpdate): boolean {
+  return /\b(new|newly|changed|after finding|after identifying|contradict|contradiction|conflict|discrepancy|missing|not found|unresolved|unclear|uncertain|gap|failed|inaccessible|requires validation|needs validation)\b/i.test(
+    `${candidate.reason} ${candidate.task}`,
+  );
+}
+
+async function reviewFollowUpsForScope(args: {
+  candidates: FollowUpUpdate[];
+  workflowFocus: string;
+  planningIntent: unknown;
+  parentTask: string;
+  parentNotes: string;
+  existingTasks: string[];
+  stepCategory: string;
+  maxFollowUps: number;
+}): Promise<FollowUpUpdate[]> {
+  const maxFollowUps = clampInt(args.maxFollowUps, 0, 2);
+  if (!maxFollowUps || !args.candidates.length) return [];
+
+  const deduped: FollowUpUpdate[] = [];
+  const seen = new Set(args.existingTasks.map(normalizeTaskKey).filter(Boolean));
+  for (const candidate of args.candidates) {
+    const key = normalizeTaskKey(candidate.task);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(candidate);
+  }
+  if (!deduped.length) return [];
+
+  const prompt = `You are the lightweight semantic pruning gate for research follow-up steps.
+
+The research executor may suggest extra work after a step finishes. Most suggestions should be rejected. Keep a follow-up only if it is necessary to answer the original workflow focus and the completed step revealed new evidence, a contradiction, a missing source, or a specific unresolved gap.
+
+Return strict JSON only:
+{
+  "updates": [
+    { "reason": "plain text reason", "website": "web or source hint", "task": "plain text task" }
+  ]
+}
+
+Rules:
+- Keyword and regex checks are only cheap hints. Make the final decision semantically from the workflow focus, planning intent, parent task, and parent notes.
+- Do not expand into full-company diligence or adjacent schema coverage.
+- Reject duplicate searches unless the task clearly states what changed and the new angle.
+- Reject product, founder, market, or technology comparisons for peer companies that are only present for a matrix, benchmark, or common-investor question.
+- Keep at most the requested max follow-ups. Prefer zero.
+- The kept task must be narrower than the parent task and must explain the new angle.
+- Use plain text only inside JSON strings.`;
+
+  try {
+    const raw = await vertexRunWithTextMulti(
+      getResearchModel("flash_lite"),
+      prompt,
+      [
+        { label: "Workflow focus", value: args.workflowFocus || "No explicit focus." },
+        { label: "Planning intent from the planner", value: args.planningIntent ?? null },
+        { label: "Completed parent task", value: args.parentTask },
+        { label: "Parent step category", value: args.stepCategory },
+        { label: "Parent notes", value: args.parentNotes.slice(0, 5000) },
+        {
+          label: "Candidate follow-ups with cheap precheck hints",
+          value: deduped.map((candidate) => ({
+            ...candidate,
+            overlaps_prompt_or_parent_task: hasFocusOverlap(candidate, args.workflowFocus, args.parentTask),
+            states_new_information_or_gap: hasNoveltyCue(candidate),
+          })),
+        },
+        { label: "Existing workflow tasks", value: args.existingTasks.slice(0, 20) },
+        { label: "Maximum follow-ups allowed", value: maxFollowUps },
+      ],
+      false,
+    );
+    const parsed = parseJsonFromResponseOrNull(raw) as { updates?: unknown } | null;
+    const approved = cleanFollowUpUpdates(parsed?.updates).filter((candidate) =>
+      hasFocusOverlap(candidate, args.workflowFocus, args.parentTask),
+    );
+    return approved.slice(0, maxFollowUps);
+  } catch {
+    return deduped
+      .filter((candidate) => hasNoveltyCue(candidate) && hasFocusOverlap(candidate, args.workflowFocus, args.parentTask))
+      .slice(0, maxFollowUps);
+  }
 }
 
 export async function POST(
@@ -44,11 +210,12 @@ export async function POST(
     .maybeSingle();
   if (stepRes.error) return NextResponse.json({ error: stepRes.error.message }, { status: 500 });
   if (!stepRes.data) return NextResponse.json({ error: "Step not found" }, { status: 404 });
+  const stepCategory = categoryForMeta(stepRes.data.metadata);
 
   const allStepsRes = await admin
     .schema("deal_intel")
     .from("deal_research_step")
-    .select("id, status, depends_on_step_ids")
+    .select("id, position, status, website, task, depends_on_step_ids, metadata")
     .eq("workflow_id", workflowId);
   if (allStepsRes.error) return NextResponse.json({ error: allStepsRes.error.message }, { status: 500 });
   const allSteps = allStepsRes.data ?? [];
@@ -74,6 +241,20 @@ export async function POST(
 
   const companyName = asCompanyName(dealRes.data?.metadata);
   const companyContext = JSON.stringify((dealRes.data?.metadata ?? {}) as Record<string, unknown>, null, 2);
+  const workflowMeta = workflow.metadata && typeof workflow.metadata === "object" ? (workflow.metadata as Record<string, unknown>) : {};
+  const workflowFocus = typeof workflowMeta.focus === "string" ? workflowMeta.focus : "";
+  const planningIntent = workflowMeta.planning_intent ?? null;
+  const peerDealIds = Array.isArray(workflowMeta.peer_deal_ids)
+    ? workflowMeta.peer_deal_ids.filter((id): id is string => typeof id === "string").slice(0, 8)
+    : [];
+  const internalContext = await loadResearchInternalContext({
+    admin,
+    userId: user.id,
+    dealId: String(workflow.deal_id),
+    query: `${stepRes.data.task}\n${workflowFocus}`,
+    peerDealIds,
+    mode: "execution",
+  }).catch(() => "");
 
   const runIns = await admin
     .schema("deal_intel")
@@ -101,6 +282,7 @@ export async function POST(
     .eq("workflow_id", workflowId);
 
   let runRow: typeof runIns.data = runIns.data;
+  let createdFollowUpSteps: Array<{ id: string; task: string; website: string; status: string }> = [];
 
   try {
     const result = await executeResearchStep({
@@ -108,9 +290,11 @@ export async function POST(
       companyContext,
       website: stepRes.data.website,
       task: stepRes.data.task,
+      internalContext,
     });
 
     if (result.ok) {
+      const cleanNotes = stripMarkdownText(result.notes);
       const ingestedDocumentIds = await ingestStepOutputForRun({
         admin,
         userId: user.id,
@@ -120,7 +304,7 @@ export async function POST(
         runId,
         website: stepRes.data.website,
         task: stepRes.data.task,
-        notes: result.notes,
+        notes: cleanNotes,
         sources: result.sources,
       });
 
@@ -129,7 +313,7 @@ export async function POST(
         .from("deal_research_step_run")
         .update({
           run_status: "done",
-          output_notes: result.notes,
+          output_notes: cleanNotes,
           sources: result.sources,
           error_message: null,
           metadata: {
@@ -137,6 +321,7 @@ export async function POST(
             website: stepRes.data.website,
             task: stepRes.data.task,
             ingestedDocumentIds,
+            internalContextUsed: Boolean(internalContext),
           },
         })
         .eq("id", runId)
@@ -150,12 +335,87 @@ export async function POST(
         .from("deal_research_step")
         .update({
           status: "done",
-          notes: result.notes.slice(0, 5000),
+          notes: cleanNotes.slice(0, 5000),
           updated_at: new Date().toISOString(),
         })
         .eq("id", stepId)
         .eq("workflow_id", workflowId);
       if (stepUpd.error) throw new Error(stepUpd.error.message);
+
+      const requestedFollowUpLimit = clampInt(Number(workflowMeta.follow_up_step_limit ?? 1), 0, 2);
+      const existingFollowUpCount = Number(workflowMeta.follow_up_step_count ?? 0);
+      const followUpRoom = Math.max(0, requestedFollowUpLimit - existingFollowUpCount);
+      const followUps = await reviewFollowUpsForScope({
+        candidates: cleanFollowUpUpdates(result.suggestedStepUpdates),
+        workflowFocus,
+        planningIntent,
+        parentTask: stepRes.data.task,
+        parentNotes: cleanNotes,
+        existingTasks: (allStepsRes.data ?? []).map((step) => (typeof step.task === "string" ? step.task : "")).filter(Boolean),
+        stepCategory,
+        maxFollowUps: followUpRoom,
+      });
+      if (followUps.length) {
+        const existingKeys = new Set(
+          (allStepsRes.data ?? [])
+            .map((step) => normalizeTaskKey(typeof step.task === "string" ? step.task : ""))
+            .filter(Boolean),
+        );
+        const maxPosition = Math.max(
+          stepRes.data.position ?? 0,
+          ...(allStepsRes.data ?? []).map((step) => Number(step.position ?? 0)),
+        );
+        const rows = followUps
+          .filter((item) => {
+            const key = normalizeTaskKey(item.task);
+            if (!key || existingKeys.has(key)) return false;
+            existingKeys.add(key);
+            return true;
+          })
+          .slice(0, followUpRoom)
+          .map((item, index) => ({
+            workflow_id: workflowId,
+            position: maxPosition + index + 1,
+            status: "todo",
+            website: item.website || "web",
+            task: item.task,
+            depends_on_step_ids: [stepId],
+            metadata: {
+              category: stepCategory,
+              generated: true,
+              source_constrained: isPreferenceSource(item.website),
+              follow_up: true,
+              follow_up_reason: item.reason,
+              parent_step_id: stepId,
+            },
+          }));
+        if (rows.length) {
+          const ins = await admin
+            .schema("deal_intel")
+            .from("deal_research_step")
+            .insert(rows)
+            .select("id, status, website, task");
+          if (ins.error) throw new Error(ins.error.message);
+          createdFollowUpSteps = ((ins.data ?? []) as Array<{ id: string; status: string; website: string; task: string }>).map((step) => ({
+            id: step.id,
+            status: step.status,
+            website: step.website,
+            task: step.task,
+          }));
+          await admin
+            .schema("deal_intel")
+            .from("deal_research_workflow")
+            .update({
+              metadata: {
+                ...workflowMeta,
+                follow_up_step_count: existingFollowUpCount + createdFollowUpSteps.length,
+              },
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", workflowId)
+            .eq("user_id", user.id);
+        }
+      }
 
       if (isPreferenceSource(stepRes.data.website)) {
         try {
@@ -224,5 +484,5 @@ export async function POST(
 
   await recomputeWorkflowStatus({ admin, workflowId, userId: user.id });
 
-  return NextResponse.json({ ok: true, run: runRow });
+  return NextResponse.json({ ok: true, run: runRow, createdFollowUpSteps });
 }

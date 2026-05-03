@@ -54,6 +54,59 @@ function markdownToWordHtml(title: string, content: string): string {
 </html>`;
 }
 
+function documentPreviewHtml(title: string, content: string): string {
+  const body = content
+    .split(/\n{2,}/)
+    .map((block) => {
+      const trimmed = block.trim();
+      if (!trimmed) return "";
+      const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
+      if (heading) {
+        const level = Math.min(3, heading[1]!.length);
+        return `<h${level}>${htmlEscape(stripMarkdown(heading[2] ?? ""))}</h${level}>`;
+      }
+      return `<p>${htmlEscape(stripMarkdown(trimmed)).replaceAll("\n", "<br>")}</p>`;
+    })
+    .join("\n");
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${htmlEscape(title)}</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      padding: 32px;
+      background: #ffffff;
+      color: #18181b;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+    }
+    main { max-width: 860px; margin: 0 auto; }
+    h1, h2, h3 {
+      margin: 22px 0 10px;
+      color: #09090b;
+      font-weight: 650;
+      letter-spacing: 0;
+      line-height: 1.25;
+    }
+    h1 { font-size: 25px; }
+    h2 { font-size: 20px; }
+    h3 { font-size: 17px; }
+    p { margin: 0 0 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${htmlEscape(title)}</h1>
+    ${body}
+  </main>
+</body>
+</html>`;
+}
+
 function pdfEscape(s: string): string {
   return s.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
 }
@@ -185,12 +238,12 @@ export function buildGeneratedDocumentPreview(args: {
   }
   if (format === "text") {
     return {
-      body: stripMarkdown(args.content),
-      contentType: "text/plain; charset=utf-8",
+      body: documentPreviewHtml(args.title, stripMarkdown(args.content)),
+      contentType: "text/html; charset=utf-8",
     };
   }
   return {
-    body: args.content,
-    contentType: "text/markdown; charset=utf-8",
+    body: documentPreviewHtml(args.title, args.content),
+    contentType: "text/html; charset=utf-8",
   };
 }

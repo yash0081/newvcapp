@@ -2,11 +2,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ResearchSource } from "@/lib/research/types";
 import { ingestResearchStepOutputAsDocument } from "@/lib/research/step-output-ingest";
 
-type MinimalAdmin = {
-  schema: (s: string) => { from: (t: string) => unknown };
-  rpc: (fn: string, args: Record<string, unknown>) => unknown;
-};
-
 export async function ingestStepOutputForRun(args: {
   admin: SupabaseClient;
   userId: string;
@@ -21,9 +16,7 @@ export async function ingestStepOutputForRun(args: {
 }): Promise<string[]> {
   try {
     const doc = await ingestResearchStepOutputAsDocument({
-      // SupabaseClient is structurally compatible with our minimal AdminClient typing.
-      // We intentionally avoid importing Next-only modules in the worker path.
-      admin: args.admin as unknown as MinimalAdmin,
+      admin: args.admin,
       userId: args.userId,
       dealId: args.dealId,
       workflowId: args.workflowId,

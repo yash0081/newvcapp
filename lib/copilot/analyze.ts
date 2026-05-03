@@ -5,6 +5,11 @@ import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import { suggestionRepeatKey } from "@/lib/copilot/repeat-key";
 import type { Extracted, Suggestion, SuggestionKind } from "@/lib/copilot/types";
+import {
+  DEAL_INTEL_RESEARCH_FOCUS_GUIDE,
+  DEAL_INTEL_QUALITY_GUARDRAILS,
+  USER_PREFERENCE_GUARDRAILS,
+} from "@/lib/deal-intel/prompt-guidance";
 
 const ANALYZE_MODEL_ENV = "COPILOT_ANALYZE_MODEL";
 const MAX_RECENT_CLAIMS = 12;
@@ -38,6 +43,13 @@ export type DealContext = {
 
 const ANALYZE_PROMPT = `You are the research copilot. Compare the on-screen extraction against what we already know about a deal/company and produce 0-4 high-quality actionable suggestions to log.
 
+Prioritize suggestions that fill, verify, or contradict the canonical Deal Intel schema:
+${DEAL_INTEL_RESEARCH_FOCUS_GUIDE}
+
+${DEAL_INTEL_QUALITY_GUARDRAILS}
+
+${USER_PREFERENCE_GUARDRAILS}
+
 Return strict JSON:
 {
   "suggestions": [
@@ -63,6 +75,8 @@ Rules:
 - "new"        => useful info not present in our context.
 - "aligns"     => corroborates an existing fact only if it materially improves evidence.
 - "contradicts"=> meaningfully disagrees with existing facts; include conflicting value.
+- Prefer schema-aligned snippets: people/team, makeup/origin, problem/customer/market, solution/pricing/defensibility/competitors, traction, or negative aspects.
+- Surface negatives and missing-evidence facts when the page gives concrete support; do not manufacture criticism.
 - For "contradicts", explicitly frame it as a decision between current vs new value.
 - For "contradicts", format summary like "Contradiction: <field>" and snippet as:
   "Current: ... | New: ... | Source: ..."

@@ -23,7 +23,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ threadId: stri
   const role = body?.role === "user" || body?.role === "assistant" ? body.role : null;
   const content = typeof body?.content === "string" ? body.content.trim() : "";
   const dealId = typeof body?.dealId === "string" && body.dealId.trim() ? body.dealId.trim() : null;
-  if (!role || !content) return NextResponse.json({ error: "role and content are required" }, { status: 400 });
+  const actions = Array.isArray(body?.actions) ? (body.actions as ChatAction[]) : [];
+  const citations = Array.isArray(body?.citations) ? (body.citations as ChatCitation[]) : [];
+  if (!role || (!content && !actions.length && !citations.length)) {
+    return NextResponse.json({ error: "role and content, actions, or citations are required" }, { status: 400 });
+  }
 
   try {
     const message = await appendSavedChatMessage({
@@ -33,8 +37,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ threadId: stri
       role,
       content,
       dealId,
-      actions: Array.isArray(body?.actions) ? (body.actions as ChatAction[]) : [],
-      citations: Array.isArray(body?.citations) ? (body.citations as ChatCitation[]) : [],
+      actions,
+      citations,
     });
     return NextResponse.json({ message });
   } catch (e) {

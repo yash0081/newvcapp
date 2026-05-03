@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ChatAction, ChatCitation } from "@/lib/chat/workspace-chat";
+import { stripMarkdownText } from "@/lib/plain-text";
 
 export type SavedChatThread = {
   id: string;
@@ -36,7 +37,7 @@ type MessageRow = {
 };
 
 function titleFromMessage(message: string): string {
-  const compact = message.trim().replace(/\s+/g, " ");
+  const compact = stripMarkdownText(message).trim().replace(/\s+/g, " ");
   if (!compact) return "New chat";
   return compact.length > 48 ? `${compact.slice(0, 45)}...` : compact;
 }
@@ -51,7 +52,7 @@ function asSavedMessage(row: MessageRow): SavedChatMessage | null {
   return {
     id: row.id,
     role: row.role,
-    content: row.content,
+    content: stripMarkdownText(row.content),
     actions: Array.isArray(meta.actions) ? (meta.actions as ChatAction[]) : undefined,
     citations: Array.isArray(meta.citations) ? (meta.citations as ChatCitation[]) : undefined,
     dealId: typeof meta.dealId === "string" ? meta.dealId : null,
@@ -93,7 +94,7 @@ export async function listSavedChatThreads(admin: SupabaseClient, userId: string
       created_at: thread.created_at,
       updated_at: thread.updated_at,
       dealId: typeof meta.dealId === "string" ? meta.dealId : null,
-      preview: latest?.content?.trim().slice(0, 120) ?? "",
+      preview: stripMarkdownText(latest?.content ?? "").trim().slice(0, 120),
     };
   });
 }
@@ -126,7 +127,7 @@ export async function loadSavedChatThread(admin: SupabaseClient, userId: string,
       created_at: thread.created_at,
       updated_at: thread.updated_at,
       dealId: lastDealId,
-      preview: messages[messages.length - 1]?.content?.slice(0, 120) ?? "",
+      preview: stripMarkdownText(messages[messages.length - 1]?.content ?? "").slice(0, 120),
     } satisfies SavedChatThread,
     messages,
   };
@@ -203,7 +204,7 @@ export async function appendSavedChatMessage(args: {
     .insert({
       thread_id: args.threadId,
       role: args.role,
-      content: args.content,
+      content: stripMarkdownText(args.content),
       metadata,
     })
     .select("id, role, content, metadata, created_at")

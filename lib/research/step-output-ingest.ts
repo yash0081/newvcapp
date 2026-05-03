@@ -1,5 +1,6 @@
 import { ingestTextAsDocument, type AdminClient } from "@/lib/research/document-ingest";
 import type { ResearchSource } from "@/lib/research/types";
+import { stripMarkdownText } from "@/lib/plain-text";
 
 function formatSources(sources: ResearchSource[]): string {
   if (!sources.length) return "";
@@ -7,7 +8,7 @@ function formatSources(sources: ResearchSource[]): string {
     const title = s.title?.trim();
     const url = s.url?.trim();
     if (!url) return null;
-    return `- ${title ? `${title} — ` : ""}${url}`;
+    return `Source: ${title ? `${title} - ` : ""}${url}`;
   }).filter(Boolean) as string[];
   return lines.length ? `\n\nSources:\n${lines.join("\n")}` : "";
 }
@@ -24,7 +25,7 @@ export async function ingestResearchStepOutputAsDocument(args: {
   notes: string;
   sources: ResearchSource[];
 }): Promise<{ documentId: string } | null> {
-  const notes = String(args.notes || "").trim();
+  const notes = stripMarkdownText(args.notes).trim();
   const sources = Array.isArray(args.sources) ? args.sources : [];
 
   const docText = `${notes}${formatSources(sources)}`.trim();
@@ -49,8 +50,8 @@ export async function ingestResearchStepOutputAsDocument(args: {
     text: docText,
     sourceKind: "web",
     docType: "research_step_output",
-    originalFilename: `Research step — ${args.website}: ${args.task}`.slice(0, 180),
-    mimeType: "text/markdown",
+    originalFilename: `Research step - ${args.website}: ${stripMarkdownText(args.task)}`.slice(0, 180),
+    mimeType: "text/plain",
     storageBucket: "web",
     storagePathPrefix: `web/${args.userId}`,
     folderPath: "Web research",
@@ -69,4 +70,3 @@ export async function ingestResearchStepOutputAsDocument(args: {
     chunkTextsOverride,
   });
 }
-

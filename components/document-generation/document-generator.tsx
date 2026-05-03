@@ -254,7 +254,7 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
               <p className="text-sm font-semibold text-zinc-950">{types.length}</p>
             </div>
             <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
-              <p className="text-[11px] font-medium text-zinc-500">References</p>
+              <p className="text-[11px] font-medium text-zinc-500">Guidance</p>
               <p className="text-sm font-semibold text-zinc-950">{references.length}</p>
             </div>
             <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
@@ -306,8 +306,8 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
           </section>
 
           <section className="crm-panel p-4">
-            <p className="crm-kicker">References</p>
-            <p className="mt-1 text-xs text-zinc-500">Reusable examples or instructions for the selected type.</p>
+            <p className="crm-kicker">Type guidance</p>
+            <p className="mt-1 text-xs text-zinc-500">Saved templates, samples, or writing rules that shape this document type.</p>
             <div className="mt-3 space-y-2">
               <SelectBox value={refKind} onChange={(e) => setRefKind(e.target.value)}>
                 <option value="description">Description</option>
@@ -420,7 +420,7 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
                   Open document
                 </a>
               </div>
-              <div className="mt-4 max-h-[640px] overflow-auto rounded-xl border border-zinc-200 bg-zinc-50 p-4 font-mono text-sm leading-relaxed text-zinc-900 whitespace-pre-wrap">
+              <div className="mt-4 max-h-[640px] overflow-auto rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm leading-relaxed text-zinc-900 whitespace-pre-wrap">
                 {draft.content}
               </div>
               <div className="mt-3 grid gap-2">

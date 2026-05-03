@@ -22,7 +22,11 @@ export type ResearchGap = { field: string; synonyms: string[] };
 /** Canonical fields we want to learn about a deal, with link-text synonyms used for gap detection. */
 export const RESEARCH_GAP_FIELDS: ReadonlyArray<ResearchGap> = [
   { field: "founders", synonyms: ["founder", "founders", "ceo", "cto", "co-founder", "leadership", "executives", "team", "about us"] },
+  { field: "founder_education", synonyms: ["education", "university", "college", "degree", "major", "gpa", "alma mater"] },
+  { field: "founder_experience", synonyms: ["experience", "previous company", "past employer", "worked at", "career", "prior role"] },
+  { field: "founder_achievements", synonyms: ["award", "honor", "olympiad", "fellowship", "patent", "research", "publication", "project", "github"] },
   { field: "team_size", synonyms: ["team size", "employees", "headcount", "staff", "people"] },
+  { field: "team_cohesion", synonyms: ["cohesion", "worked together", "co-founded", "lab mate", "classmate", "founding story", "origin"] },
   { field: "headquarters", synonyms: ["headquarters", "hq", "office", "location", "based in", "address"] },
   { field: "founded_year", synonyms: ["founded", "founding year", "incorporated", "established"] },
   { field: "funding", synonyms: ["funding", "raised", "series", "round", "seed", "investors", "valuation", "crunchbase"] },
@@ -30,12 +34,19 @@ export const RESEARCH_GAP_FIELDS: ReadonlyArray<ResearchGap> = [
   { field: "business_model", synonyms: ["business model", "how we make money", "monetization", "go-to-market", "gtm"] },
   { field: "pricing", synonyms: ["pricing", "plans", "subscription", "cost", "tiers"] },
   { field: "customers", synonyms: ["customers", "clients", "case studies", "logos", "users"] },
+  { field: "economic_buyer", synonyms: ["buyer", "persona", "budget owner", "decision maker", "economic buyer"] },
+  { field: "urgency", synonyms: ["urgency", "priority", "must have", "pain", "cost of inaction", "cost of doing nothing"] },
+  { field: "market_size", synonyms: ["tam", "sam", "som", "market size", "market opportunity"] },
   { field: "competitors", synonyms: ["competitors", "alternatives", "vs", "comparison", "competition"] },
+  { field: "defensibility", synonyms: ["moat", "defensibility", "patent", "ip", "proprietary", "switching cost", "network effect"] },
+  { field: "customer_benefit", synonyms: ["benefit", "roi", "10x", "saves", "faster", "cheaper", "better"] },
   { field: "revenue", synonyms: ["revenue", "arr", "mrr", "sales", "growth"] },
   { field: "traction", synonyms: ["traction", "metrics", "growth", "milestones"] },
+  { field: "product_stage", synonyms: ["product stage", "beta", "pilot", "ga", "launched", "prototype", "mvp"] },
   { field: "product", synonyms: ["product", "features", "platform", "docs", "documentation", "how it works"] },
   { field: "tech_stack", synonyms: ["tech stack", "engineering", "architecture", "open source", "github", "api"] },
   { field: "security_certifications", synonyms: ["security", "compliance", "soc 2", "soc2", "iso 27001", "gdpr", "hipaa", "trust", "certifications"] },
+  { field: "negative_aspects", synonyms: ["risk", "risks", "red flag", "negative", "weakness", "concern", "contradiction", "reason to pass"] },
 ];
 
 /** Returns gaps still open after considering deal metadata, recent claims, and accepted snippets. */

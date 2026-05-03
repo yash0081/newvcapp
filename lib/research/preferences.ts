@@ -2,11 +2,28 @@ import "server-only";
 import { embedTexts } from "@/lib/vertex-embeddings";
 import { vectorParam } from "@/lib/data-layer/shared/vector";
 
+type QueryError = { message?: string } | null;
+type QueryResult<T> = { data: T; error: QueryError };
+type QueryBuilder<T = Array<Record<string, unknown>> | null> = PromiseLike<QueryResult<T>> & {
+  select: (...args: unknown[]) => QueryBuilder<T>;
+  eq: (...args: unknown[]) => QueryBuilder<T>;
+  order: (...args: unknown[]) => QueryBuilder<T>;
+  limit: (...args: unknown[]) => QueryBuilder<T>;
+  maybeSingle: () => Promise<QueryResult<Record<string, unknown> | null>>;
+  upsert: (...args: unknown[]) => QueryBuilder<Record<string, unknown> | null>;
+  update: (...args: unknown[]) => QueryBuilder<Record<string, unknown> | null>;
+  insert: (...args: unknown[]) => QueryBuilder<Record<string, unknown> | null>;
+};
+
 type AdminClient = {
   schema: (s: string) => {
     from: (t: string) => unknown;
   };
 };
+
+function dealIntelTable(admin: AdminClient, table: string): QueryBuilder {
+  return admin.schema("deal_intel").from(table) as QueryBuilder;
+}
 
 type PreferenceEvent = {
   domain: string;
@@ -22,6 +39,9 @@ export type UserSitePreference = {
   preference_score: number;
   category: string;
   usage_count: number;
+  focus_guidance?: string;
+  confidence?: number;
+  recency_weight?: number;
 };
 
 function clamp(n: number, lo: number, hi: number) {
@@ -41,9 +61,7 @@ function asDomain(raw: string): string {
 }
 
 async function getDealCentroidEmbedding(admin: AdminClient, dealId: string, userId: string): Promise<string | null> {
-  const res = await admin
-    .schema("deal_intel")
-    .from("deal")
+  const res = await dealIntelTable(admin, "deal")
     .select("centroid_embedding")
     .eq("id", dealId)
     .eq("user_id", userId)
@@ -71,9 +89,7 @@ export async function recordResearchPreferenceEvents(args: {
 
   // 1) Lightweight preference learning for planner ranking.
   for (const ev of events) {
-    const sel = await args.admin
-      .schema("deal_intel")
-      .from("user_research_site_preference")
+    const sel = await dealIntelTable(args.admin, "user_research_site_preference")
       .select("id, preference_score, usage_count, success_rate, metadata")
       .eq("user_id", args.userId)
       .eq("domain", ev.domain)
@@ -102,9 +118,7 @@ export async function recordResearchPreferenceEvents(args: {
       ],
     };
 
-    await args.admin
-      .schema("deal_intel")
-      .from("user_research_site_preference")
+    await dealIntelTable(args.admin, "user_research_site_preference")
       .upsert(
         {
           id: sel.data?.id,
@@ -152,9 +166,7 @@ export async function recordResearchPreferenceEvents(args: {
     const situationVec = embeds[i * 2] ?? null;
     const purposeVec = embeds[i * 2 + 1] ?? null;
 
-    const existing = await args.admin
-      .schema("deal_intel")
-      .from("website_preference")
+    const existing = await dealIntelTable(args.admin, "website_preference")
       .select("id, preference_score, frequency_score, quality_score, confidence, recency_weight, task_types")
       .eq("user_id", args.userId)
       .eq("website_domain", ev.domain)
@@ -168,9 +180,7 @@ export async function recordResearchPreferenceEvents(args: {
     const nextTaskTypes = taskTypes.includes(ev.category) ? taskTypes : [...taskTypes, ev.category].slice(0, 12);
 
     if (existing.data?.id) {
-      await args.admin
-        .schema("deal_intel")
-        .from("website_preference")
+      await dealIntelTable(args.admin, "website_preference")
         .update({
           situation_description: toEmbed[i]!.situation,
           focus_guidance: toEmbed[i]!.purpose,
@@ -186,7 +196,7 @@ export async function recordResearchPreferenceEvents(args: {
         .eq("id", existing.data.id)
         .eq("user_id", args.userId);
     } else {
-      await args.admin.schema("deal_intel").from("website_preference").insert({
+      await dealIntelTable(args.admin, "website_preference").insert({
         user_id: args.userId,
         website_domain: ev.domain,
         situation_description: toEmbed[i]!.situation,
@@ -216,21 +226,26 @@ export async function getUserSitePreferences(args: {
   disliked: UserSitePreference[];
 }> {
   const lim = Math.max(10, Math.min(200, args.limit ?? 80));
-  const res = await args.admin
-    .schema("deal_intel")
-    .from("user_research_site_preference")
-    .select("domain, preference_score, category, usage_count")
-    .eq("user_id", args.userId)
-    .order("preference_score", { ascending: false })
-    .limit(lim);
-  if (res.error) return { preferred: [], disliked: [] };
-  const rows = (res.data ?? []) as Array<{
+  const [siteRes, richRes] = await Promise.all([
+    dealIntelTable(args.admin, "user_research_site_preference")
+      .select("domain, preference_score, category, usage_count")
+      .eq("user_id", args.userId)
+      .order("preference_score", { ascending: false })
+      .limit(lim),
+    dealIntelTable(args.admin, "website_preference")
+      .select("website_domain, task_types, focus_guidance, preference_score, confidence, recency_weight")
+      .eq("user_id", args.userId)
+      .order("updated_at", { ascending: false })
+      .limit(Math.min(80, lim)),
+  ]);
+  if (siteRes.error && richRes.error) return { preferred: [], disliked: [] };
+  const siteRows = (siteRes.data ?? []) as Array<{
     domain: string | null;
     preference_score: number | null;
     category: string | null;
     usage_count: number | null;
   }>;
-  const normalized = rows
+  const normalized: UserSitePreference[] = siteRows
     .map((r) => ({
       domain: typeof r.domain === "string" ? asDomain(r.domain) : "",
       preference_score: Number(r.preference_score ?? 0),
@@ -238,9 +253,47 @@ export async function getUserSitePreferences(args: {
       usage_count: Number(r.usage_count ?? 0),
     }))
     .filter((r) => !!r.domain);
+  const richRows = ((richRes.data ?? []) as Array<Record<string, unknown>>).flatMap((r): UserSitePreference[] => {
+    const domain = typeof r.website_domain === "string" ? asDomain(r.website_domain) : "";
+    if (!domain) return [];
+    const taskTypes = Array.isArray(r.task_types) && r.task_types.length ? r.task_types : ["general"];
+    const pref01 = Number(r.preference_score ?? 0.5);
+    const confidence = Number(r.confidence ?? 0.5);
+    const recency = Number(r.recency_weight ?? 1);
+    const score = clamp((pref01 - 0.5) * 2 + (confidence - 0.5) * 0.25 + Math.min(0.12, Math.max(0, recency - 0.5) * 0.12), -1, 1);
+    const focus = typeof r.focus_guidance === "string" ? r.focus_guidance.trim().slice(0, 220) : "";
+    return taskTypes.slice(0, 5).map((taskType) => ({
+      domain,
+      preference_score: score,
+      category: String(taskType || "general"),
+      usage_count: 0,
+      focus_guidance: focus || undefined,
+      confidence,
+      recency_weight: recency,
+    }));
+  });
+
+  const byKey = new Map<string, UserSitePreference>();
+  for (const row of [...normalized, ...richRows]) {
+    if (!row.domain) continue;
+    const key = `${row.domain}:${row.category || "general"}`;
+    const prev = byKey.get(key);
+    if (!prev || Math.abs(row.preference_score) > Math.abs(prev.preference_score)) {
+      byKey.set(key, row);
+    } else if (prev && row.focus_guidance && !prev.focus_guidance) {
+      byKey.set(key, { ...prev, focus_guidance: row.focus_guidance, confidence: row.confidence, recency_weight: row.recency_weight });
+    }
+  }
+
+  const combined = Array.from(byKey.values());
   return {
-    preferred: normalized.filter((r) => r.preference_score >= 0.05).slice(0, 40),
-    disliked: normalized.filter((r) => r.preference_score <= -0.05).slice(0, 40),
+    preferred: combined
+      .filter((r) => r.preference_score >= 0.05)
+      .sort((a, b) => b.preference_score - a.preference_score)
+      .slice(0, 40),
+    disliked: combined
+      .filter((r) => r.preference_score <= -0.05)
+      .sort((a, b) => a.preference_score - b.preference_score)
+      .slice(0, 40),
   };
 }
-

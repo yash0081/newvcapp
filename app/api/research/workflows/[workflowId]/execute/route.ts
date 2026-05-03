@@ -5,6 +5,8 @@ import { executeResearchStep } from "@/lib/research/executor";
 import { mapWithConcurrency } from "@/lib/async/concurrency";
 import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
+import { loadResearchInternalContext } from "@/lib/research/context";
+import { stripMarkdownText } from "@/lib/plain-text";
 
 function asCompanyName(meta: unknown): string {
   if (!meta || typeof meta !== "object") return "Company";
@@ -58,8 +60,10 @@ async function runOneStep(args: {
   step: StepRow;
   companyName: string;
   companyContext: string;
+  peerDealIds: string[];
+  workflowFocus: string;
 }) {
-  const { admin, userId, workflowId, dealId, step, companyName, companyContext } = args;
+  const { admin, userId, workflowId, dealId, step, companyName, companyContext, peerDealIds, workflowFocus } = args;
 
   // Mark running.
   const runIns = await admin
@@ -90,14 +94,24 @@ async function runOneStep(args: {
   let runRow: typeof runIns.data = runIns.data;
 
   try {
+    const internalContext = await loadResearchInternalContext({
+      admin,
+      userId,
+      dealId,
+      query: `${step.task}\n${workflowFocus}`,
+      peerDealIds,
+      mode: "execution",
+    }).catch(() => "");
     const result = await executeResearchStep({
       companyName,
       companyContext,
       website: step.website,
       task: step.task,
+      internalContext,
     });
 
     if (result.ok) {
+      const cleanNotes = stripMarkdownText(result.notes);
       const ingestedDocumentIds = await ingestStepOutputForRun({
         admin,
         userId,
@@ -107,7 +121,7 @@ async function runOneStep(args: {
         runId,
         website: step.website,
         task: step.task,
-        notes: result.notes,
+        notes: cleanNotes,
         sources: result.sources,
       });
 
@@ -116,7 +130,7 @@ async function runOneStep(args: {
         .from("deal_research_step_run")
         .update({
           run_status: "done",
-          output_notes: result.notes,
+          output_notes: cleanNotes,
           sources: result.sources,
           error_message: null,
           metadata: {
@@ -124,6 +138,7 @@ async function runOneStep(args: {
             website: step.website,
             task: step.task,
             ingestedDocumentIds,
+            internalContextUsed: Boolean(internalContext),
           },
         })
         .eq("id", runId)
@@ -137,7 +152,7 @@ async function runOneStep(args: {
         .from("deal_research_step")
         .update({
           status: "done",
-          notes: result.notes.slice(0, 5000),
+          notes: cleanNotes.slice(0, 5000),
           updated_at: new Date().toISOString(),
         })
         .eq("id", step.id)
@@ -247,6 +262,11 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
   if (dealRes.error) return NextResponse.json({ error: dealRes.error.message }, { status: 500 });
   const companyName = asCompanyName(dealRes.data?.metadata);
   const companyContext = JSON.stringify((dealRes.data?.metadata ?? {}) as Record<string, unknown>, null, 2);
+  const workflowMeta = workflow.metadata && typeof workflow.metadata === "object" ? (workflow.metadata as Record<string, unknown>) : {};
+  const peerDealIds = Array.isArray(workflowMeta.peer_deal_ids)
+    ? workflowMeta.peer_deal_ids.filter((id): id is string => typeof id === "string").slice(0, 8)
+    : [];
+  const workflowFocus = typeof workflowMeta.focus === "string" ? workflowMeta.focus : "";
 
   const runs = await mapWithConcurrency(toRun, concurrency, (step) =>
     runOneStep({
@@ -257,6 +277,8 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
       step,
       companyName,
       companyContext,
+      peerDealIds,
+      workflowFocus,
     })
   );
 

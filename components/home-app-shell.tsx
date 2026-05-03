@@ -21,7 +21,7 @@ function navActive(href: string, pathname: string): boolean {
   if (href === "/home/research") return pathname === "/home/research";
   if (href === "/home/chat") return pathname === "/home/chat";
   if (href === "/home/workflows") return pathname === "/home/workflows";
-  if (href === "/home/matrix") return pathname === "/home/matrix";
+  if (href === "/home/matrix") return pathname === "/home/matrix" || pathname.startsWith("/home/matrix/");
   if (href === "/home/document-generator") return pathname === "/home/document-generator";
   if (href === "/home/deals") return pathname === "/home/deals" || pathname.startsWith("/home/deal/");
   return false;
@@ -48,21 +48,28 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [openingCopilot, setOpeningCopilot] = useState(false);
   const [copilotError, setCopilotError] = useState<string | null>(null);
+  const visibleNav = COPILOT_EXTENSION_ID ? nav : nav.filter((item) => item.action !== "copilot");
   const chatRoute = pathname === "/home/chat";
   const gridRoute = pathname === "/home/deals/grid";
-  const matrixRoute = pathname === "/home/matrix";
-  const wideContent =
+  const matrixRoute = pathname === "/home/matrix" || pathname.startsWith("/home/matrix/");
+  const researchRoute = pathname === "/home/research";
+  const compactContent =
     pathname === "/home/deals" ||
     pathname.startsWith("/home/deal/") ||
     pathname.startsWith("/home/deal-intel/") ||
     pathname === "/home/document-generator" ||
     pathname === "/home/workflows" ||
     pathname === "/home/deals/grid";
+  const framedMaxWidth = chatRoute ? "max-w-[1680px]" : "max-w-[1180px]";
+  const contentMaxWidth = researchRoute
+    ? "max-w-5xl"
+    : compactContent
+      ? "max-w-[1120px]"
+      : "max-w-4xl";
 
   function openCopilot() {
     setCopilotError(null);
     if (!COPILOT_EXTENSION_ID) {
-      setCopilotError("Set NEXT_PUBLIC_COPILOT_EXTENSION_ID to enable the Copilot tab.");
       return;
     }
     const sendMessage = window.chrome?.runtime?.sendMessage;
@@ -95,7 +102,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
             Workroom
           </Link>
           <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-            {nav.map((item) => {
+            {visibleNav.map((item) => {
               if (item.action === "copilot") {
                 return (
                   <button
@@ -130,8 +137,8 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
           </nav>
           <SignOutButton className="hidden shrink-0 rounded-full px-3 py-2 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 sm:block" />
         </div>
-        {copilotError ? (
-          <div className="border-t border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-900">
+        {copilotError && COPILOT_EXTENSION_ID ? (
+          <div className="border-t border-zinc-200 bg-zinc-50 px-5 py-2 text-xs text-zinc-700">
             {copilotError}
           </div>
         ) : null}
@@ -148,14 +155,14 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
           }
         >
           {chatRoute || gridRoute || matrixRoute ? (
-            <div className="mx-auto flex min-h-0 w-full max-w-[1680px] flex-1 flex-col overflow-hidden border-zinc-200 bg-white shadow-sm md:rounded-b-2xl md:border-x md:border-b">
+            <div className={cn("mx-auto flex min-h-0 w-full flex-1 flex-col overflow-hidden border-zinc-200 bg-white shadow-sm md:rounded-b-2xl md:border-x md:border-b", framedMaxWidth)}>
               {children}
             </div>
           ) : (
             <div
               className={cn(
                 "mx-auto w-full space-y-5",
-                wideContent ? "max-w-[1600px]" : "max-w-4xl"
+                contentMaxWidth
               )}
             >
               {children}

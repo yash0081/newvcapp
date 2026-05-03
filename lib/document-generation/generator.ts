@@ -165,7 +165,7 @@ export async function buildGenerationContext(args: {
 }) {
   const [deal, references] = await Promise.all([
     loadDeal(args.admin, args.userId, args.dealId),
-    loadTypeReferences(args.admin, args.userId, args.type.id),
+    args.type.id ? loadTypeReferences(args.admin, args.userId, args.type.id) : Promise.resolve([]),
   ]);
   const [snapshot, documentChunks] = await Promise.all([
     loadDealSnapshot(args.admin, deal?.id ?? null),
@@ -278,18 +278,19 @@ export async function generateDocumentContent(args: {
   const ctx = await buildGenerationContext(args);
   const raw = await vertexRunWithTextMulti(
     getResearchModel("flash"),
-    `Draft a high-quality business document.
-Return strict JSON:
-{
-  "title": "short document title",
-  "content": "complete Markdown document"
-}
-Rules:
-- Follow the saved document type instructions, examples, and learned preferences.
-- The requested output format for this document type is in Document type.output_format. Use Markdown as the editable preview representation, but structure the content for that final format.
-- Use the available company facts and cited source context. Do not invent precise facts.
-- If important information is missing, include a short "Open questions" section instead of fabricating.
-- Keep the output directly usable, polished, and specific to the user's prompt.
+	    `Draft a high-quality business document.
+	Return strict JSON:
+	{
+	  "title": "short document title",
+	  "content": "complete plain text document"
+	}
+	Rules:
+	- Follow the saved document type instructions, examples, and learned preferences.
+	- The requested output format for this document type is in Document type.output_format. Use regular plain text as the editable preview representation, but structure the content for that final format.
+	- Do not use Markdown syntax, markdown headings, bold markers, code fences, or link markup.
+	- Use the available company facts and cited source context. Do not invent precise facts.
+	- If important information is missing, include a short "Open questions" section instead of fabricating.
+	- Keep the output directly usable, polished, and specific to the user's prompt.
 - Do not include commentary outside the document.`,
     [
       { label: "Document type", value: args.type },
@@ -328,17 +329,18 @@ export async function reviseDocumentContent(args: {
 
   const raw = await vertexRunWithTextMulti(
     getResearchModel("flash"),
-    `Revise this generated document.
-Return strict JSON:
-{
-  "title": "updated title",
-  "content": "full revised Markdown document",
-  "savePreference": true,
-  "preference": "general reusable preference if relevant, otherwise blank"
-}
-Rules:
-- Apply the requested modification to the full document.
-- savePreference should be true only when the instruction is reusable for future documents of this type.
+	    `Revise this generated document.
+	Return strict JSON:
+	{
+	  "title": "updated title",
+	  "content": "full revised plain text document",
+	  "savePreference": true,
+	  "preference": "general reusable preference if relevant, otherwise blank"
+	}
+	Rules:
+	- Apply the requested modification to the full document.
+	- Do not use Markdown syntax, markdown headings, bold markers, code fences, or link markup.
+	- savePreference should be true only when the instruction is reusable for future documents of this type.
 - The preference must be concise and format/style/content guidance, not deal-specific facts.`,
     [
       { label: "Document type", value: type },

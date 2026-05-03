@@ -1,7 +1,18 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { parseJsonFromResponseOrNull, parseJsonFromResponseWithRepair } from "@/lib/gemini";
+import {
+  DEAL_INTEL_LAYER1A_SCHEMA_GUIDE,
+  DEAL_INTEL_QUALITY_GUARDRAILS,
+  USER_PREFERENCE_GUARDRAILS,
+} from "@/lib/deal-intel/prompt-guidance";
 import { executeResearchStep } from "@/lib/research/executor";
+import { loadResearchInternalContext } from "@/lib/research/context";
+import {
+  getUserSitePreferences,
+  recordResearchPreferenceEvents,
+  type UserSitePreference,
+} from "@/lib/research/preferences";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import { vertexRunWithTextMulti } from "@/lib/vertex";
 
@@ -107,6 +118,48 @@ function parseCell(raw: string): ParsedCell | null {
 
 async function parseCellWithRepair(raw: string): Promise<ParsedCell | null> {
   return parseCell(raw) ?? parseCell(JSON.stringify((await parseJsonFromResponseWithRepair(raw).catch(() => null)) ?? null));
+}
+
+function matrixResearchCategory(column: MatrixColumn): string {
+  const text = `${column.label} ${column.description} ${column.prompt}`.toLowerCase();
+  if (/(founder|team|people|education|school|olympiad|fellowship|award|patent|researcher)/.test(text)) return "founder";
+  if (/(revenue|arr|growth|funding|raised|investor|customer|partner|traction|stage|pilot|usage)/.test(text)) return "traction";
+  if (/(solution|product|price|pricing|cost|defensib|ip|patent|technology|technical|novel|unique)/.test(text)) return "product";
+  if (/(market|tam|sam|som|competitor|customer|buyer|problem|urgency|pain|incumbent)/.test(text)) return "market";
+  if (/(legal|compliance|security|privacy|regulat|risk)/.test(text)) return "legal";
+  return "general";
+}
+
+function choosePreferredResearchWebsite(prefs: { preferred: UserSitePreference[]; disliked: UserSitePreference[] }, category: string): string {
+  const disliked = new Set(prefs.disliked.map((p) => p.domain));
+  const candidates = prefs.preferred
+    .filter((p) => !disliked.has(p.domain))
+    .filter((p) => p.category === category || p.category === "general")
+    .sort((a, b) => (b.preference_score - a.preference_score) || (b.usage_count - a.usage_count));
+  return candidates[0]?.domain || "web";
+}
+
+function preferenceSummary(prefs: { preferred: UserSitePreference[]; disliked: UserSitePreference[] }, category: string): string {
+  const preferred = prefs.preferred
+    .filter((p) => p.category === category || p.category === "general")
+    .slice(0, 8)
+    .map((p) => `${p.domain} (${p.category}, score ${p.preference_score.toFixed(2)})`);
+  const disliked = prefs.disliked
+    .filter((p) => p.category === category || p.category === "general")
+    .slice(0, 6)
+    .map((p) => `${p.domain} (${p.category}, score ${p.preference_score.toFixed(2)})`);
+  return [
+    preferred.length ? `Preferred sources: ${preferred.join(", ")}` : "",
+    disliked.length ? `Avoid/deprioritize: ${disliked.join(", ")}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function sourceDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
 export async function listMatrixDeals(admin: SupabaseClient, userId: string): Promise<Array<{ id: string; name: string }>> {
@@ -259,6 +312,14 @@ async function inferFromContext(args: {
   const raw = await vertexRunWithTextMulti(
     getResearchModel("flash"),
     `Fill one diligence matrix cell.
+
+Use the canonical Deal Intel schema as the default extraction map:
+${DEAL_INTEL_LAYER1A_SCHEMA_GUIDE}
+
+${DEAL_INTEL_QUALITY_GUARDRAILS}
+
+${USER_PREFERENCE_GUARDRAILS}
+
 Return strict JSON:
 {
   "status": "filled" | "needs_research",
@@ -269,12 +330,15 @@ Return strict JSON:
   "citations": [{"label":"internal fact or source title","snippet":"supporting quote","href":"optional url"}],
   "researchTask": "specific web research task if status is needs_research"
 }
-Rules:
-- Answer the exact column for the company. Do not fill adjacent metrics.
-- Prefer concise spreadsheet-style values, e.g. "32%", "$18M ARR", "Beat Q3 revenue goal by 12%", or "Not found".
-- If the evidence does not actually answer the column, return status "needs_research" and explain what is missing.
+	Rules:
+	- Answer the exact column for the company. Do not fill adjacent metrics.
+	- Prefer concise spreadsheet-style values, e.g. "32%", "$18M ARR", "Beat Q3 revenue goal by 12%", or "Not found".
+	- For cross-company fields such as common investors, overlap, peer comparisons, shared backers, relative funding amounts, or competitor overlap, use the crossCompanyAndDatabaseSignals section when present. If that section and research notes do not directly support the answer, return needs_research.
+	- If the evidence does not actually answer the column, return status "needs_research" and explain what is missing.
 - If research notes are provided, use them only when they directly answer the column.
 - For confidence, use 0.85+ only when supported by direct evidence.
+- Preserve literal numbers, dates, named customers, investors, schools, and source wording.
+- Keep user preferences out of the factual answer unless the column explicitly asks for preference fit.
 - Do not invent values.`,
     [
       { label: "Company", value: args.companyName },
@@ -352,6 +416,7 @@ export async function fillMatrixCell(args: {
   dealId: string;
   columnId: string;
   allowResearch: boolean;
+  peerDealIds?: string[];
 }): Promise<MatrixCell> {
   const [deal, column] = await Promise.all([
     loadDeal(args.admin, args.userId, args.dealId),
@@ -359,7 +424,23 @@ export async function fillMatrixCell(args: {
   ]);
   const name = companyName(deal);
   const query = `${column.label} ${column.description} ${column.prompt} ${name}`;
-  const internalContext = await loadInternalContext(args.admin, args.userId, deal.id, query);
+  const [baseInternalContext, crossCompanyContext] = await Promise.all([
+    loadInternalContext(args.admin, args.userId, deal.id, query),
+    args.peerDealIds?.length
+      ? loadResearchInternalContext({
+          admin: args.admin,
+          userId: args.userId,
+          dealId: deal.id,
+          query,
+          peerDealIds: args.peerDealIds,
+          mode: "execution",
+        }).catch(() => "")
+      : Promise.resolve(""),
+  ]);
+  const internalContext = {
+    currentCompany: baseInternalContext,
+    crossCompanyAndDatabaseSignals: crossCompanyContext || null,
+  };
   const internal = await inferFromContext({ companyName: name, column, internalContext });
   if (internal.status === "filled" || !args.allowResearch || !column.research_enabled) {
     return upsertCell(args.admin, {
@@ -380,11 +461,28 @@ export async function fillMatrixCell(args: {
     internal.researchTask ||
     column.prompt ||
     `Find ${column.label} for ${name}. Return only evidence that directly answers the metric.`;
+  const researchCategory = matrixResearchCategory(column);
+  const sitePrefs = await getUserSitePreferences({ admin: args.admin, userId: args.userId, limit: 80 }).catch(() => ({
+    preferred: [],
+    disliked: [],
+  }));
+  const preferredWebsite = choosePreferredResearchWebsite(sitePrefs, researchCategory);
+  const sourcePreferences = preferenceSummary(sitePrefs, researchCategory);
   const research = await executeResearchStep({
     companyName: name,
-    companyContext: JSON.stringify({ metadata: deal.metadata, internalContext }).slice(0, 16000),
-    website: "web",
-    task: researchTask,
+    companyContext: JSON.stringify({
+      metadata: deal.metadata,
+      internalContext,
+      userWebsitePreferences: sitePrefs,
+    }).slice(0, 16000),
+    website: preferredWebsite,
+    task: [
+      researchTask,
+      `Matrix column: ${column.label}`,
+      `Research category: ${researchCategory}`,
+      sourcePreferences,
+      "Use the user's source preferences when helpful, but cite only sources that directly support the cell value.",
+    ].filter(Boolean).join("\n"),
   });
   if (!research.ok) {
     return upsertCell(args.admin, {
@@ -407,6 +505,26 @@ export async function fillMatrixCell(args: {
     href: s.url,
     snippet: s.snippet,
   }));
+  const preferenceEvents = research.sources
+    .map((s) => sourceDomain(s.url))
+    .filter(Boolean)
+    .slice(0, 5)
+    .map((domain) => ({
+      domain,
+      category: researchCategory,
+      deltaPreferenceScore: 0.01,
+      deltaUsageCount: 1,
+      reason: "Diligence matrix auto-fill used this source successfully.",
+      task: researchTask,
+    }));
+  if (preferenceEvents.length) {
+    await recordResearchPreferenceEvents({
+      admin: args.admin,
+      userId: args.userId,
+      dealId: deal.id,
+      events: preferenceEvents,
+    }).catch(() => null);
+  }
   const grounded = await inferFromContext({
     companyName: name,
     column,

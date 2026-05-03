@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { Check, GripVertical, Loader2, Play, Plus, Search, Sparkles, Trash2 } from "lucide-react";
+import { stripMarkdownText } from "@/lib/plain-text";
 
 type Workflow = {
   id: string;
@@ -104,6 +105,12 @@ export function ResearchPlanner(props: {
     const all = getSuggestedUpdates(runs);
     return all.filter((s) => !dismissedSuggestionKeys[suggestionKey(s)]);
   }, [runs, dismissedSuggestionKeys]);
+  const stepStats = useMemo(() => {
+    const running = steps.filter((step) => step.status === "running" || step.status === "queued").length;
+    const done = steps.filter((step) => step.status === "done").length;
+    const failed = steps.filter((step) => step.status === "failed").length;
+    return { running, done, failed, remaining: Math.max(0, steps.length - running - done - failed) };
+  }, [steps]);
 
   async function refresh(): Promise<{ steps: Step[] } | null> {
     const res = await fetch(`/api/research/workflows/by-deal/${props.dealId}`);
@@ -393,14 +400,15 @@ export function ResearchPlanner(props: {
   return (
     <div className="space-y-5">
       <div className="crm-panel overflow-hidden">
-        <div className="flex flex-col gap-4 border-b border-zinc-200 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex flex-col gap-4 border-b border-zinc-200 bg-white px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-zinc-200 bg-zinc-50">
               <Search className="h-4 w-4 text-zinc-700" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold tracking-tight text-zinc-950">{props.companyName} research</h2>
-              <p className="text-sm text-zinc-500">Plan, edit, and execute web research steps.</p>
+              <p className="crm-kicker">Research planner</p>
+              <h2 className="mt-1 text-lg font-semibold tracking-tight text-zinc-950">{props.companyName}</h2>
+              <p className="text-sm text-zinc-500">Build focused tasks, run them, and fold in evidence as the plan changes.</p>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -422,7 +430,7 @@ export function ResearchPlanner(props: {
             </button>
           </div>
         </div>
-        <div className="grid gap-4 px-5 py-4 lg:grid-cols-[1fr_220px]">
+        <div className="grid gap-4 bg-zinc-50/70 px-5 py-4 lg:grid-cols-[1fr_360px]">
           <label className="grid gap-1">
             <span className="text-xs font-medium text-zinc-600">Research focus</span>
             <textarea
@@ -434,14 +442,22 @@ export function ResearchPlanner(props: {
               disabled={busy}
             />
           </label>
-          <div className="grid grid-cols-2 gap-2 lg:grid-cols-1">
-            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2">
               <p className="text-[11px] font-medium text-zinc-500">Workflow</p>
               <p className="mt-1 text-sm font-semibold text-zinc-950">{workflow?.status ?? "Not generated"}</p>
             </div>
-            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
-              <p className="text-[11px] font-medium text-zinc-500">Steps</p>
-              <p className="mt-1 text-sm font-semibold text-zinc-950">{steps.length}</p>
+            <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">Done</p>
+              <p className="mt-1 text-sm font-semibold text-zinc-950">{stepStats.done} of {steps.length}</p>
+            </div>
+            <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">Running</p>
+              <p className="mt-1 text-sm font-semibold text-zinc-950">{stepStats.running}</p>
+            </div>
+            <div className="rounded-xl border border-zinc-200 bg-white px-3 py-2">
+              <p className="text-[11px] font-medium text-zinc-500">Needs action</p>
+              <p className="mt-1 text-sm font-semibold text-zinc-950">{stepStats.remaining + stepStats.failed}</p>
             </div>
           </div>
         </div>
@@ -449,8 +465,8 @@ export function ResearchPlanner(props: {
         {error ? <p className="mx-5 mb-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
-        <div className="space-y-3">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="space-y-2">
           {steps.length ? (
             steps.map((step) => (
               <div
@@ -459,15 +475,18 @@ export function ResearchPlanner(props: {
                 onDragStart={() => setDragId(step.id)}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => onDrop(step.id)}
-                className="crm-panel p-4"
+                className="rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm"
               >
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div className="flex items-center gap-2">
-                    <GripVertical className="h-4 w-4 text-zinc-300" />
-                    <p className="text-xs font-medium text-zinc-500">Step {step.position + 1}</p>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <GripVertical className="h-4 w-4 shrink-0 text-zinc-300" />
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-zinc-50 text-xs font-semibold text-zinc-700">
+                      {step.position + 1}
+                    </span>
                     <span className={`inline-flex items-center rounded-xl px-2 py-0.5 text-[11px] font-medium ${statusClass(step.status)}`}>
                       {step.status}
                     </span>
+                    <span className="truncate text-xs font-medium text-zinc-500">{step.website || "web"}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -496,13 +515,13 @@ export function ResearchPlanner(props: {
                     />
                   </label>
                   <textarea
-                    className="crm-input min-h-20"
+                    className="crm-input min-h-16"
                     value={step.task}
                     onChange={(e) => updateStep(step.id, { task: e.target.value })}
                   />
                 </div>
                 {step.notes ? (
-                  <p className="mt-3 whitespace-pre-wrap rounded-xl border border-zinc-200 bg-zinc-50 p-2 text-xs text-zinc-600">{step.notes}</p>
+                  <p className="mt-3 whitespace-pre-wrap rounded-xl border border-zinc-200 bg-zinc-50 p-2 text-xs text-zinc-600">{stripMarkdownText(step.notes)}</p>
                 ) : null}
               </div>
             ))
@@ -514,16 +533,19 @@ export function ResearchPlanner(props: {
         </div>
 
         <div className="space-y-3">
-          <div className="crm-panel p-4">
-            <p className="text-sm font-semibold text-zinc-950">Suggested plan updates</p>
+          <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-zinc-950">Suggested updates</p>
+              <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] font-medium text-zinc-500">{suggestions.length}</span>
+            </div>
             {!suggestions.length ? (
-              <p className="mt-2 text-xs text-zinc-500">No suggestions yet. Run steps to get adaptive updates.</p>
+              <p className="mt-2 text-xs leading-relaxed text-zinc-500">Run steps to get adaptive updates when the agent finds a useful follow-up.</p>
             ) : (
               <div className="mt-3 space-y-2">
                 {suggestions.slice(0, 5).map((s, idx) => (
                   <div key={`${s.website}_${idx}`} className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">
-                    <p className="text-xs text-zinc-700">{s.reason}</p>
-                    <p className="mt-1 text-xs text-zinc-500">{s.website} / {s.task}</p>
+                    <p className="text-xs text-zinc-700">{stripMarkdownText(s.reason)}</p>
+                    <p className="mt-1 text-xs text-zinc-500">{stripMarkdownText(`${s.website} / ${s.task}`)}</p>
                     <div className="mt-2 flex gap-2">
                       <button className="crm-button-secondary" onClick={() => acceptSuggestions([s])} disabled={busy} type="button">
                         Accept
@@ -546,10 +568,13 @@ export function ResearchPlanner(props: {
             )}
           </div>
 
-          <div className="crm-panel p-4">
-            <p className="text-sm font-semibold text-zinc-950">Evidence</p>
+          <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-zinc-950">Evidence</p>
+              <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] font-medium text-zinc-500">{runs.length}</span>
+            </div>
             {!runs.length ? (
-              <p className="mt-2 text-xs text-zinc-500">No step runs yet.</p>
+              <p className="mt-2 text-xs leading-relaxed text-zinc-500">Completed research runs and sources appear here.</p>
             ) : (
               <div className="mt-3 max-h-96 space-y-2 overflow-auto">
                 {runs.map((r) => (
@@ -561,11 +586,11 @@ export function ResearchPlanner(props: {
                       </span>
                     </div>
                     {r.run_status === "failed" ? (
-                      <p className="mt-2 whitespace-pre-wrap text-xs text-rose-700">{r.error_message || "Run failed without an error message."}</p>
+                      <p className="mt-2 whitespace-pre-wrap text-xs text-rose-700">{stripMarkdownText(r.error_message || "Run failed without an error message.")}</p>
                     ) : r.run_status === "running" ? (
                       <p className="mt-2 text-xs italic text-zinc-500">Running...</p>
                     ) : (
-                      <p className="mt-2 whitespace-pre-wrap text-xs text-zinc-700">{r.output_notes || "No notes"}</p>
+                      <p className="mt-2 whitespace-pre-wrap text-xs text-zinc-700">{stripMarkdownText(r.output_notes || "No notes")}</p>
                     )}
                     {r.run_status !== "failed" && Array.isArray(r.sources) && r.sources.length ? (
                       <div className="mt-2 space-y-1">

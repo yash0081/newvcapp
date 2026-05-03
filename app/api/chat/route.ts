@@ -35,6 +35,10 @@ function parsePermissions(raw: unknown): Partial<ChatToolPermissions> {
   return out;
 }
 
+function sse(event: unknown): Uint8Array {
+  return new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+}
+
 export async function POST(req: Request) {
   const supabase = await createClient();
   const {
@@ -50,6 +54,62 @@ export async function POST(req: Request) {
 
   try {
     const admin = createAdminClient();
+    if (req.headers.get("accept")?.includes("text/event-stream")) {
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          try {
+            const thread = await ensureSavedChatThread({
+              admin,
+              userId: user.id,
+              threadId: requestedThreadId,
+              firstMessage: message,
+            });
+            await appendSavedChatMessage({
+              admin,
+              userId: user.id,
+              threadId: thread.id,
+              role: "user",
+              content: message,
+              dealId,
+            });
+            controller.enqueue(sse({ type: "start", threadId: thread.id }));
+            const result = await runWorkspaceChat({
+              admin,
+              userId: user.id,
+              message,
+              dealId,
+              history: parseHistory(body?.history),
+              permissions: parsePermissions(body?.permissions),
+              onAssistantDelta: (text) => controller.enqueue(sse({ type: "delta", text })),
+            });
+            await appendSavedChatMessage({
+              admin,
+              userId: user.id,
+              threadId: thread.id,
+              role: "assistant",
+              content: result.message || "",
+              dealId: result.dealId ?? dealId,
+              actions: result.actions ?? [],
+              citations: result.citations ?? [],
+            });
+            controller.enqueue(sse({ type: "done", result: { ...result, threadId: thread.id } }));
+            controller.close();
+          } catch (e) {
+            console.error("[workspace-chat-stream]", e);
+            controller.enqueue(sse({ type: "error", error: e instanceof Error ? e.message : "Chat failed" }));
+            controller.close();
+          }
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "Content-Type": "text/event-stream; charset=utf-8",
+        },
+      });
+    }
+
     const thread = await ensureSavedChatThread({
       admin,
       userId: user.id,

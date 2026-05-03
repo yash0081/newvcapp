@@ -11,6 +11,10 @@ import {
   summarizeAgendaForPrompt,
   validateAgendaPatch,
 } from "@/lib/copilot/research-agenda";
+import {
+  DEAL_INTEL_RESEARCH_FOCUS_GUIDE,
+  USER_PREFERENCE_GUARDRAILS,
+} from "@/lib/deal-intel/prompt-guidance";
 
 export type NextAction =
   | { action: "navigate"; url: string; rationale: string }
@@ -353,6 +357,11 @@ Each tick you receive:
 
 Choose ONE action and update your agenda.
 
+Your research objective is to fill and pressure-test the canonical Deal Intel schema:
+${DEAL_INTEL_RESEARCH_FOCUS_GUIDE}
+
+${USER_PREFERENCE_GUARDRAILS}
+
 Strict JSON output:
 {
   "action": "navigate" | "scroll" | "stop",
@@ -389,6 +398,8 @@ Rules (structural — no topical denylists):
 - Never propose a URL listed in agenda.visited or in agenda.intent.avoid_urls or whose host is in agenda.intent.avoid_hosts.
 - Hosts already at the visit cap are pre-filtered from candidates — don't re-add them.
 - Prefer hosts whose recent visited outcome is "yielded"; demote hosts whose last visits were "empty".
+- Prefer sources that match learned website preferences for this situation; avoid disliked hosts unless the candidate list has no credible alternative for an open gap.
+- learned_add facts should use schema-aligned field names where possible, such as founder_education, founder_experience, team_cohesion, urgency, market_size, defensibility, product_stage, traction, or negative_aspects.
 - Do NOT return action "stop" just because founders/HQ/founding-year-style basics look filled. Deal research continues across funding, product, traction, competitors, security, etc. If **Open research gaps** is non-empty, you must usually **navigate** to the best candidate that targets a remaining gap (or scroll if defer hint says so).
 - Return action "stop" ONLY when: (1) defer hint is effectively "wait" on pending on-page suggestions, OR (2) the candidate list truly offers no reasonable next URL for any remaining gap and you need the user to steer or change tabs — say so clearly in rationale.
 - agenda_patch.intent.candidate_urls is your top 1-5 next moves in priority order. Use it to remember plans across ticks.

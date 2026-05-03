@@ -229,15 +229,10 @@ export async function parseJsonFromResponseWithRepair(text: string): Promise<unk
   if (first !== null) return first;
 
   const snippet = text.trim().slice(0, 28_000);
-  console.warn(
-    "parseJsonFromResponseWithRepair: primary parse failed; attempting LLM repair. Head:",
-    snippet.slice(0, 400)
-  );
-
   const model = geminiEnv().flashLite;
-  const repairPrompt = `The text below is model output that should contain one JSON object or array for a downstream parser. It may include markdown fences, commentary, or minor JSON syntax errors.
+  const repairPrompt = `The text below is model output that should contain one JSON object or array for a downstream parser. It may include formatting fences, commentary, or minor JSON syntax errors.
 
-Extract exactly one JSON value (object or array). Output ONLY valid JSON — no markdown, no backticks, no explanation.
+Extract exactly one JSON value (object or array). Output ONLY valid JSON, with no formatting fences, no backticks, and no explanation.
 
 ---BEGIN---
 ${snippet}

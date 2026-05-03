@@ -4,6 +4,7 @@ import { getAuthedUser, getDealForUser } from "@/lib/research/db";
 import { generateResearchPlan } from "@/lib/research/planner";
 import { getRecentDealClaims } from "@/lib/copilot/db";
 import { getUserSitePreferences, recordResearchPreferenceEvents } from "@/lib/research/preferences";
+import { loadResearchInternalContext } from "@/lib/research/context";
 
 function isPreferenceSource(website: string): boolean {
   const s = website.trim().toLowerCase();
@@ -14,9 +15,15 @@ export async function POST(req: Request) {
   const user = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as { dealId?: string; focus?: string } | null;
+  const body = (await req.json().catch(() => null)) as { dealId?: string; focus?: string; peerDealIds?: unknown; peerDealNames?: unknown } | null;
   const dealId = typeof body?.dealId === "string" ? body.dealId : "";
-  const focus = typeof body?.focus === "string" ? body.focus.trim().slice(0, 600) : "";
+  const focus = typeof body?.focus === "string" ? body.focus.trim().slice(0, 1800) : "";
+  const peerDealIds = Array.isArray(body?.peerDealIds)
+    ? body.peerDealIds.filter((id): id is string => typeof id === "string" && id !== dealId).slice(0, 8)
+    : [];
+  const peerDealNames = Array.isArray(body?.peerDealNames)
+    ? body.peerDealNames.filter((name): name is string => typeof name === "string").slice(0, 8)
+    : [];
   if (!dealId) return NextResponse.json({ error: "dealId is required" }, { status: 400 });
 
   const { data: deal, error: dealErr } = await getDealForUser(dealId, user.id);
@@ -26,7 +33,15 @@ export async function POST(req: Request) {
   const admin = createAdminClient();
   const meta = (deal.metadata && typeof deal.metadata === "object" ? deal.metadata : {}) as Record<string, unknown>;
   const companyName = typeof meta.company_name === "string" ? meta.company_name : "Company";
-  const companyContext = JSON.stringify(meta, null, 2);
+  const internalContext = await loadResearchInternalContext({
+    admin,
+    userId: user.id,
+    dealId,
+    query: focus || companyName,
+    peerDealIds,
+    mode: "planning",
+  }).catch(() => "");
+  const companyContext = JSON.stringify({ metadata: meta, internal_workspace_context: internalContext || null }, null, 2);
 
   const [sitePrefs, recentClaims] = await Promise.all([
     getUserSitePreferences({ admin, userId: user.id, limit: 80 }),
@@ -80,6 +95,13 @@ export async function POST(req: Request) {
       metadata: {
         summary: suggestion.summary,
         focus: focus || null,
+        peer_deal_ids: peerDealIds,
+        peer_deal_names: peerDealNames,
+        planning_intent: suggestion.intent ?? null,
+        pruning_notes: suggestion.pruningNotes ?? [],
+        follow_up_step_limit: suggestion.intent?.breadth === "broad" ? 2 : 1,
+        initial_step_count: suggestion.steps.length,
+        internal_context_used: Boolean(internalContext),
         generated_at: new Date().toISOString(),
         generated_by: "planner",
         archived_predecessor_id: existing.data?.id ?? null,
@@ -103,6 +125,7 @@ export async function POST(req: Request) {
       category: s.category ?? "general",
       generated: true,
       source_constrained: isPreferenceSource(s.website),
+      planning_intent_user_goal: suggestion.intent?.userGoal ?? (focus || null),
     },
   }));
   const stepIns = await admin

@@ -6,7 +6,7 @@
 export const PLACEHOLDER_PROMPT_PHASE1_JSON = `You extract startup facts into a strict JSON schema.
 
 Rules:
-- Return STRICT JSON ONLY (no markdown, no extra text).
+- Return STRICT JSON ONLY (no formatting fences, no extra text).
 - Match the schema exactly.
 - Use null for unknown scalar fields.
 - Use [] for unknown/empty arrays.

@@ -119,7 +119,7 @@ Data type for "value" field: ${def.data_type}
 Deal context:
 ${brief}
 
-Respond with a single JSON object only, no markdown: {"value": ...}`;
+Respond with a single JSON object only, no formatting fences: {"value": ...}`;
 
     try {
       const raw = await vertexRunWithText(opts.model, userPrompt, false);

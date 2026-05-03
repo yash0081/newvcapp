@@ -24,7 +24,7 @@ function isChatTask(s: string): s is ChatTask {
  * Gemma/Gemini router: classify user message into a ChatTask. Falls back to heuristics on failure.
  */
 export async function classifyChatTaskWithGemma(userMessage: string): Promise<ChatTask> {
-  const prompt = `You are a classifier for a VC deal workspace. Read the user message and respond with ONLY a JSON object, no markdown, no extra text:
+  const prompt = `You are a classifier for a VC deal workspace. Read the user message and respond with ONLY a JSON object, no formatting fences, no extra text:
 {"task":"filtering"|"similar_deal"|"deep_reasoning"|"why"|"questions"}
 
 Definitions:
