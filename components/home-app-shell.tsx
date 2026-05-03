@@ -48,7 +48,6 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [openingCopilot, setOpeningCopilot] = useState(false);
   const [copilotError, setCopilotError] = useState<string | null>(null);
-  const visibleNav = COPILOT_EXTENSION_ID ? nav : nav.filter((item) => item.action !== "copilot");
   const chatRoute = pathname === "/home/chat";
   const gridRoute = pathname === "/home/deals/grid";
   const matrixRoute = pathname === "/home/matrix" || pathname.startsWith("/home/matrix/");
@@ -70,6 +69,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
   function openCopilot() {
     setCopilotError(null);
     if (!COPILOT_EXTENSION_ID) {
+      setCopilotError("Copilot extension id is not configured. Set NEXT_PUBLIC_COPILOT_EXTENSION_ID, restart the web app, then reload this page.");
       return;
     }
     const sendMessage = window.chrome?.runtime?.sendMessage;
@@ -102,7 +102,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
             Workroom
           </Link>
           <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-            {visibleNav.map((item) => {
+            {nav.map((item) => {
               if (item.action === "copilot") {
                 return (
                   <button
@@ -137,7 +137,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
           </nav>
           <SignOutButton className="hidden shrink-0 rounded-full px-3 py-2 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 sm:block" />
         </div>
-        {copilotError && COPILOT_EXTENSION_ID ? (
+        {copilotError ? (
           <div className="border-t border-zinc-200 bg-zinc-50 px-5 py-2 text-xs text-zinc-700">
             {copilotError}
           </div>

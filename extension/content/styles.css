@@ -106,6 +106,40 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.company-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  background: rgba(99, 102, 241, 0.1);
+  border-bottom: 1px solid rgba(99, 102, 241, 0.18);
+}
+
+.company-status.in-body {
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.company-status-label {
+  color: #a1a1aa;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.company-status-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e0e7ff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .tab {
   flex: 1;
   background: transparent;

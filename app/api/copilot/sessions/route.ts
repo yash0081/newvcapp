@@ -4,6 +4,12 @@ import { getAuthedUser, getDealForUser } from "@/lib/research/db";
 import { getActiveSession, markSessionsAbandonedForDeal } from "@/lib/copilot/db";
 import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
 
+function companyNameFromDeal(deal: { metadata?: unknown } | null): string | null {
+  const meta = deal?.metadata && typeof deal.metadata === "object" ? deal.metadata as Record<string, unknown> : {};
+  const name = typeof meta.company_name === "string" ? meta.company_name.trim() : "";
+  return name || null;
+}
+
 export async function OPTIONS(req: Request) {
   return copilotPreflight(req);
 }
@@ -23,6 +29,7 @@ export async function POST(req: Request) {
   const admin = createAdminClient();
 
   await markSessionsAbandonedForDeal({ admin, dealId, userId: user.id });
+  const companyName = companyNameFromDeal(deal);
 
   const ins = await admin
     .schema("deal_intel")
@@ -33,6 +40,7 @@ export async function POST(req: Request) {
       status: "active",
       metadata: {
         acceptedSnippets: [],
+        company_name: companyName,
         tab_hint: typeof body?.tabHint === "string" ? body.tabHint.slice(0, 240) : null,
       },
     })

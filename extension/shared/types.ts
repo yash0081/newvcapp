@@ -34,6 +34,7 @@ export type CopilotSession = {
   finalized_document_id: string | null;
   metadata: {
     acceptedSnippets?: AcceptedSnippet[];
+    company_name?: string | null;
     tab_hint?: string | null;
     [k: string]: unknown;
   } | null;

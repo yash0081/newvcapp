@@ -114,6 +114,11 @@ function PopupApp() {
     () => deals.find((d) => d.id === selectedDealId) ?? null,
     [deals, selectedDealId],
   );
+  const sessionCompanyName = useMemo(() => {
+    const metaName = session?.metadata?.company_name;
+    if (typeof metaName === "string" && metaName.trim()) return metaName.trim();
+    return deals.find((d) => d.id === session?.deal_id)?.company_name || activeDeal?.name || null;
+  }, [activeDeal?.name, deals, session?.deal_id, session?.metadata?.company_name]);
 
   if (loading) {
     return (
@@ -155,10 +160,7 @@ function PopupApp() {
 
       {session ? (
         <div className="banner info">
-          Active session for{" "}
-          <strong>
-            {deals.find((d) => d.id === session.deal_id)?.company_name || activeDeal?.name || "deal"}
-          </strong>
+          Currently researching <strong>{sessionCompanyName || "selected company"}</strong>
         </div>
       ) : null}
 

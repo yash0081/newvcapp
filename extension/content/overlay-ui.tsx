@@ -31,6 +31,12 @@ function steeringNoteFromSession(s: CopilotSession | null): string {
   const v = meta?.auto_steering_note;
   return typeof v === "string" ? v : "";
 }
+
+function companyNameFromSession(s: CopilotSession | null): string | null {
+  const meta = s?.metadata as Record<string, unknown> | undefined;
+  const v = meta?.company_name;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
 const FINGERPRINT_SUPPRESSION_MS = 5000;
 const MAX_VISIBLE_SUGGESTIONS = 8;
 const FIRST_ANALYZE_DEBOUNCE_MS = 800;
@@ -838,7 +844,8 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   }, [session, mode]);
 
   const headerLabel = useMemo(() => {
-    if (session && activeDeal) return `${activeDeal.name} • watching`;
+    const sessionCompany = companyNameFromSession(session);
+    if (session) return `${sessionCompany || activeDeal?.name || "Selected company"} • researching`;
     if (activeDeal) return `${activeDeal.name} • idle`;
     return "VCApp copilot";
   }, [session, activeDeal]);
@@ -919,6 +926,13 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       {!collapsed ? (
         <>
           {mode !== "auto" ? (
+            <div className="company-status">
+              <span className="company-status-label">Researching</span>
+              <span className="company-status-name">{companyNameFromSession(session) || activeDeal?.name || "Selected company"}</span>
+            </div>
+          ) : null}
+
+          {mode !== "auto" ? (
             <div className="tabs">
               <button
                 className={`tab${tab === "suggestions" ? " active" : ""}`}
@@ -933,9 +947,13 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             </div>
           ) : null}
 
-          <div className="body">
+            <div className="body">
             {mode === "auto" && session ? (
               <>
+                <div className="company-status in-body">
+                  <span className="company-status-label">Researching</span>
+                  <span className="company-status-name">{companyNameFromSession(session) || activeDeal?.name || "Selected company"}</span>
+                </div>
                 <div className="agent-banner">
                   Auto mode — runs until you pause. No accept/reject prompts; use Manual for that.
                 </div>
