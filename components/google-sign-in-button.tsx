@@ -17,7 +17,7 @@ export function GoogleSignInButton() {
   return (
     <button
       onClick={signInWithGoogle}
-      className="rounded-full border-2 border-blue-600 bg-white text-blue-600 text-lg px-8 py-5 font-bold hover:bg-blue-50 active:scale-95 transition-all duration-200 shadow-sm hover:shadow-md w-full max-w-[320px]"
+      className="inline-flex h-12 w-full items-center justify-center rounded-full bg-zinc-950 px-5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-zinc-800 active:scale-[0.99]"
     >
       Sign in with Google
     </button>

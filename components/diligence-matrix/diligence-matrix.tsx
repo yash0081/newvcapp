@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Columns3,
   ExternalLink,
+  FileText,
   Loader2,
   PanelRightClose,
   PanelRightOpen,
@@ -17,6 +18,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  UploadCloud,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SelectBox } from "@/components/ui/select-box";
@@ -137,12 +139,14 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
   const [activeSelection, setActiveSelection] = useState<ActiveSelection>(null);
   const [matrixViews, setMatrixViews] = useState<MatrixView[]>([]);
   const [viewName, setViewName] = useState("");
-  const [setupCollapsed, setSetupCollapsed] = useState(focusMode);
+  const [setupCollapsed, setSetupCollapsed] = useState(false);
+  const [matrixFiles, setMatrixFiles] = useState<File[]>([]);
   const [companyQuery, setCompanyQuery] = useState("");
   const [columnQuery, setColumnQuery] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newType, setNewType] = useState<Column["data_type"]>("text");
   const [newPrompt, setNewPrompt] = useState("");
+  const [matrixQuestion, setMatrixQuestion] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
   const [detailsCollapsed, setDetailsCollapsed] = useState(true);
@@ -384,6 +388,79 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
     setMessage(view ? `Deleted ${view.name}.` : "Deleted matrix view.");
   }
 
+  async function uploadMatrixDocuments() {
+    const dealIds = [...selectedDeals];
+    if (!dealIds.length || !matrixFiles.length) {
+      setError("Select at least one company and choose one or more PDFs.");
+      return;
+    }
+    setBusy("matrix-doc-upload");
+    setError(null);
+    setMessage(null);
+    try {
+      let uploaded = 0;
+      for (const dealId of dealIds) {
+        for (const file of matrixFiles) {
+          const fd = new FormData();
+          fd.append("file", file);
+          fd.append("folderPath", "Matrix evidence");
+          const upload = await fetch(`/api/crm/companies/${dealId}/documents/upload`, { method: "POST", body: fd });
+          const uploadJson = (await upload.json().catch(() => null)) as { documentId?: string; error?: string } | null;
+          if (!upload.ok || !uploadJson?.documentId) throw new Error(uploadJson?.error || `Failed to upload ${file.name}`);
+          await jsonFetch(`/api/crm/documents/${uploadJson.documentId}/parse`, { method: "POST" });
+          await jsonFetch(`/api/crm/documents/${uploadJson.documentId}/chunk`, { method: "POST" });
+          await jsonFetch(`/api/crm/documents/${uploadJson.documentId}/ingest-deal-intel`, { method: "POST" });
+          uploaded += 1;
+        }
+      }
+      setMatrixFiles([]);
+      autoAttemptedRef.current.clear();
+      setMessage(`Uploaded and indexed ${uploaded} document${uploaded === 1 ? "" : "s"} for matrix extraction.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function extractFromDocumentsOnly() {
+    const pairs = visibleDeals.flatMap((deal) => visibleColumns.map((column) => ({ dealId: deal.id, columnId: column.id }))).slice(0, 80);
+    if (!pairs.length) {
+      setError("Select at least one company and one column.");
+      return;
+    }
+    setBusy("document-extract");
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await jsonFetch<{ cells: Cell[]; errors: Array<{ error: string }> }>("/api/diligence-matrix/fill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pairs, allowResearch: false }),
+      });
+      setData((prev) => {
+        const byKey = new Map(prev.cells.map((c) => [`${c.deal_id}:${c.column_id}`, c]));
+        for (const cell of res.cells) byKey.set(`${cell.deal_id}:${cell.column_id}`, cell);
+        return { ...prev, cells: [...byKey.values()] };
+      });
+      setMessage(`Extracted ${res.cells.length} cell${res.cells.length === 1 ? "" : "s"} from available documents${res.errors.length ? `; ${res.errors.length} need attention` : ""}.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function askMatrixQuestion() {
+    const question = matrixQuestion.trim();
+    if (!question) return;
+    const label = question.length > 48 ? `${question.slice(0, 45).trim()}...` : question;
+    await addColumn({ label, dataType: "text", prompt: question });
+    setMatrixQuestion("");
+    autoAttemptedRef.current.clear();
+    setAutoMessage("Added the question as a matrix column. Smart fill will answer it across the selected companies.");
+  }
+
   function toggleDeal(id: string) {
     setSelectedDeals((prev) => {
       const next = new Set(prev);
@@ -444,6 +521,53 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        {!focusMode ? (
+        <aside className="flex max-h-[32svh] shrink-0 flex-col border-b border-zinc-200 bg-white lg:max-h-none lg:w-[264px] lg:border-b-0 lg:border-r">
+          <div className="border-b border-zinc-200 px-4 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-zinc-950">Matrix history</h2>
+              <button type="button" className="text-xs font-medium text-zinc-600 hover:text-zinc-950" onClick={saveCurrentMatrixView}>
+                Save
+              </button>
+            </div>
+            <input
+              className="mt-2 h-8 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-xs outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:bg-white"
+              value={viewName}
+              onChange={(e) => setViewName(e.target.value)}
+              placeholder="Name this matrix"
+            />
+          </div>
+          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedDeals(new Set(data.deals.slice(0, 8).map((deal) => deal.id)));
+                setSelectedColumns(new Set(data.columns.map((column) => column.id)));
+                setMessage("Opened current matrix.");
+              }}
+              className="flex w-full items-start gap-2 rounded-xl bg-zinc-900 px-3 py-2 text-left text-white"
+            >
+              <BarChart3 className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold">Current matrix</span>
+                <span className="block truncate text-xs text-white/65">{selectedDeals.size} companies / {selectedColumns.size} columns</span>
+              </span>
+            </button>
+            {matrixViews.map((view) => (
+              <div key={view.id} className="group flex items-center gap-1 rounded-xl border border-zinc-200 bg-white p-1 hover:bg-zinc-50">
+                <button type="button" onClick={() => applyMatrixView(view)} className="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left">
+                  <span className="block truncate text-sm font-semibold text-zinc-900">{view.name}</span>
+                  <span className="block truncate text-xs text-zinc-500">{view.dealIds.length} companies / {view.columnIds.length} columns</span>
+                </button>
+                <button type="button" onClick={() => deleteMatrixView(view.id)} className="rounded-lg p-1.5 text-zinc-400 hover:bg-white hover:text-rose-600" aria-label={`Delete ${view.name}`}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+            {!matrixViews.length ? <p className="px-2 py-3 text-xs leading-relaxed text-zinc-500">Saved matrix layouts will appear here.</p> : null}
+          </div>
+        </aside>
+        ) : null}
         {!setupCollapsed ? (
         <aside className="flex max-h-[44svh] shrink-0 flex-col border-b border-zinc-200 bg-white lg:max-h-none lg:w-[344px] lg:border-b-0 lg:border-r">
           <div className="border-b border-zinc-200 px-4 py-3">
@@ -463,56 +587,6 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <section className="border-b border-zinc-200 p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Matrix views</h3>
-                <button type="button" className="text-xs font-medium text-zinc-600 hover:text-zinc-950" onClick={saveCurrentMatrixView}>
-                  Save
-                </button>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  className="h-9 min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-900/10"
-                  value={viewName}
-                  onChange={(e) => setViewName(e.target.value)}
-                  placeholder="View name"
-                />
-                <button
-                  className="inline-flex h-9 items-center justify-center rounded-xl bg-zinc-900 px-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  type="button"
-                  disabled={!selectedDeals.size || !selectedColumns.size}
-                  onClick={saveCurrentMatrixView}
-                >
-                  Save
-                </button>
-              </div>
-              <div className="mt-3 max-h-36 space-y-1 overflow-y-auto pr-1">
-                {matrixViews.map((view) => (
-                  <div key={view.id} className="flex items-center gap-1 rounded-xl border border-zinc-200 bg-zinc-50 p-1">
-                    <button
-                      type="button"
-                      onClick={() => applyMatrixView(view)}
-                      className="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left hover:bg-white"
-                    >
-                      <span className="block truncate text-xs font-semibold text-zinc-900">{view.name}</span>
-                      <span className="block text-[11px] text-zinc-500">
-                        {view.dealIds.length} companies / {view.columnIds.length} columns
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => deleteMatrixView(view.id)}
-                      className="rounded-lg p-1.5 text-zinc-400 hover:bg-white hover:text-rose-600"
-                      aria-label={`Delete ${view.name}`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                ))}
-                {!matrixViews.length ? <p className="px-2 py-2 text-xs text-zinc-500">Save a view to reopen or delete it later.</p> : null}
-              </div>
-            </section>
-
             <section className="border-b border-zinc-200 p-4">
               <div className="mb-3 flex items-center justify-between">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">New metric</h3>
@@ -568,6 +642,67 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
                   </button>
                 ))}
               </div>
+            </section>
+
+            <section className="border-b border-zinc-200 p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <FileText className="h-4 w-4 text-zinc-500" />
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Document extraction</h3>
+              </div>
+              <p className="text-xs leading-relaxed text-zinc-500">
+                Upload PDFs to the selected companies, then extract the selected columns from indexed document evidence.
+              </p>
+              <label className="mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-white">
+                <UploadCloud className="h-4 w-4" />
+                <span className="truncate">{matrixFiles.length ? `${matrixFiles.length} PDF${matrixFiles.length === 1 ? "" : "s"} selected` : "Choose PDFs"}</span>
+                <input
+                  type="file"
+                  accept="application/pdf"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => setMatrixFiles(Array.from(e.target.files ?? []))}
+                />
+              </label>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={busy === "matrix-doc-upload" || !matrixFiles.length || !selectedDeals.size}
+                  onClick={uploadMatrixDocuments}
+                  className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-zinc-900 px-3 text-xs font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {busy === "matrix-doc-upload" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  Upload
+                </button>
+                <button
+                  type="button"
+                  disabled={busy === "document-extract" || !visibleDeals.length || !visibleColumns.length}
+                  onClick={extractFromDocumentsOnly}
+                  className="inline-flex h-9 items-center justify-center rounded-xl border border-zinc-200 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Extract
+                </button>
+              </div>
+            </section>
+
+            <section className="border-b border-zinc-200 p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-zinc-500" />
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Ask matrix</h3>
+              </div>
+              <textarea
+                value={matrixQuestion}
+                onChange={(e) => setMatrixQuestion(e.target.value)}
+                className="min-h-20 w-full resize-y rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:bg-white focus:ring-2 focus:ring-zinc-900/10"
+                placeholder="Ask a question to answer for every selected company"
+              />
+              <button
+                type="button"
+                disabled={!matrixQuestion.trim() || Boolean(busy)}
+                onClick={askMatrixQuestion}
+                className="mt-2 inline-flex h-9 w-full items-center justify-center rounded-xl bg-zinc-900 px-3 text-xs font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Add as column
+              </button>
             </section>
 
             <section className="border-b border-zinc-200 p-4">
@@ -747,7 +882,7 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
                       Company
                     </th>
                     {visibleColumns.map((column) => (
-                      <th key={column.id} className="min-w-64 border-r border-zinc-200 bg-white px-3 py-2.5 text-left align-bottom">
+                      <th key={column.id} className="w-72 min-w-72 max-w-72 border-r border-zinc-200 bg-white px-3 py-2.5 text-left align-bottom">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-xs font-semibold text-zinc-950">{column.label}</div>
@@ -779,12 +914,16 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
                         const cell = cellsByKey.get(`${deal.id}:${column.id}`) ?? null;
                         const active = activeSelection?.dealId === deal.id && activeSelection.columnId === column.id;
                         return (
-                          <td key={column.id} className="border-r border-t border-zinc-200 p-0 align-top">
+                          <td key={column.id} className="w-72 min-w-72 max-w-72 border-r border-t border-zinc-200 p-0 align-top">
                             <button
                               type="button"
                               onClick={() => setActiveSelection({ dealId: deal.id, columnId: column.id })}
+                              onDoubleClick={() => {
+                                setActiveSelection({ dealId: deal.id, columnId: column.id });
+                                setDetailsCollapsed(false);
+                              }}
                               className={cn(
-                                "h-32 w-full border-l-2 bg-white px-3 py-2.5 text-left transition-colors hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-zinc-900/15",
+                                "h-32 w-full overflow-hidden border-l-2 bg-white px-3 py-2.5 text-left transition-colors hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-zinc-900/15",
                                 cellAccent(cell),
                                 active && "bg-zinc-50 ring-2 ring-inset ring-zinc-900/15",
                               )}
@@ -795,7 +934,7 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
                                 </span>
                                 <span className="shrink-0 text-[11px] font-medium text-zinc-400">{sourceLabel(cell)}</span>
                               </div>
-                              <p className={cn("mt-2 line-clamp-3 min-h-[48px] text-xs leading-relaxed", cell ? "text-zinc-900" : "text-zinc-400")}>
+                              <p className={cn("mt-2 line-clamp-3 min-h-[48px] max-w-full break-words text-xs leading-relaxed", cell ? "text-zinc-900" : "text-zinc-400")}>
                                 {cell?.value_text || cell?.error_message || "Not filled"}
                               </p>
                               <div className="mt-2 flex items-center justify-between gap-2">

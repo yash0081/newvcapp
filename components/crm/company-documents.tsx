@@ -118,6 +118,13 @@ export function CompanyDocuments(props: { dealId: string; initialDocs: DocRow[] 
     return "processing";
   }
 
+  function isResearchArtifact(doc: DocRow): boolean {
+    const folder = (doc.folder_path || "").toLowerCase();
+    const source = (doc.source_kind || "").toLowerCase();
+    const mime = (doc.mime_type || "").toLowerCase();
+    return folder === "web/research" || source === "web" || mime === "text/markdown";
+  }
+
   async function deleteDoc(documentId: string) {
     setErr(null);
     const ok = window.confirm("Delete this PDF? This removes it from storage and the database.");
@@ -135,16 +142,15 @@ export function CompanyDocuments(props: { dealId: string; initialDocs: DocRow[] 
     }
   }
 
+  const libraryDocs = docs.filter((doc) => !isResearchArtifact(doc));
+
   const folders = Array.from(
     new Set(
-      (docs ?? [])
+      (libraryDocs ?? [])
         .map((d) => d.folder_path || "")
         .filter(Boolean)
     )
   ).sort((a, b) => a.localeCompare(b));
-
-  // Normalize legacy folder paths that may have been created earlier (e.g. "web/research").
-  const normalizedFolders = folders.map((f) => (f === "web/research" ? "Web research" : f));
 
   function ensureFolderPath(raw: string): string {
     const s = raw.trim().replaceAll(/\/+/g, "/").replaceAll(/^\/|\/$/g, "");
@@ -170,8 +176,8 @@ export function CompanyDocuments(props: { dealId: string; initialDocs: DocRow[] 
     await refreshDocs();
   }
 
-  const visibleDocs = docs.filter((d) => {
-    const fp = d.folder_path === "web/research" ? "Web research" : (d.folder_path || "Company documents");
+  const visibleDocs = libraryDocs.filter((d) => {
+    const fp = d.folder_path || "Company documents";
     return fp === activeFolder;
   });
 
@@ -233,15 +239,7 @@ export function CompanyDocuments(props: { dealId: string; initialDocs: DocRow[] 
             <Folder className="h-4 w-4 shrink-0 opacity-70" />
             <span className="block truncate">Company documents</span>
           </button>
-          <button
-            type="button"
-            className={folderButtonClass("Web research")}
-            onClick={() => setActiveFolder("Web research")}
-          >
-            <Folder className="h-4 w-4 shrink-0 opacity-70" />
-            <span className="block truncate">Web research</span>
-          </button>
-          {normalizedFolders.filter((f) => f !== "Company documents" && f !== "Web research").map((f) => (
+          {folders.filter((f) => f !== "Company documents").map((f) => (
             <button
               key={f}
               type="button"

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { Check, GripVertical, Loader2, Play, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 import { stripMarkdownText } from "@/lib/plain-text";
 
@@ -10,6 +11,8 @@ type Workflow = {
   status: string;
   version: number;
   metadata: Record<string, unknown> | null;
+  created_at?: string;
+  updated_at?: string;
 };
 
 type Step = {
@@ -85,10 +88,12 @@ export function ResearchPlanner(props: {
   dealId: string;
   companyName: string;
   initialWorkflow: Workflow | null;
+  initialWorkflows?: Workflow[];
   initialSteps: Step[];
   initialRuns: Run[];
 }) {
   const [workflow, setWorkflow] = useState<Workflow | null>(props.initialWorkflow);
+  const [workflows, setWorkflows] = useState<Workflow[]>(props.initialWorkflows ?? (props.initialWorkflow ? [props.initialWorkflow] : []));
   const [steps, setSteps] = useState<Step[]>(props.initialSteps);
   const [runs, setRuns] = useState<Run[]>(props.initialRuns);
   const [busy, setBusy] = useState(false);
@@ -112,17 +117,31 @@ export function ResearchPlanner(props: {
     return { running, done, failed, remaining: Math.max(0, steps.length - running - done - failed) };
   }, [steps]);
 
-  async function refresh(): Promise<{ steps: Step[] } | null> {
-    const res = await fetch(`/api/research/workflows/by-deal/${props.dealId}`);
+  async function refresh(workflowId?: string): Promise<{ steps: Step[] } | null> {
+    const res = await fetch(`/api/research/workflows/by-deal/${props.dealId}${workflowId ? `?workflowId=${workflowId}` : ""}`);
     const json = (await res.json().catch(() => null)) as
-      | { workflow?: Workflow | null; steps?: Step[]; runs?: Run[]; error?: string }
+      | { workflow?: Workflow | null; workflows?: Workflow[]; steps?: Step[]; runs?: Run[]; error?: string }
       | null;
     if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
     const nextSteps = (json?.steps ?? []) as Step[];
     setWorkflow((json?.workflow ?? null) as Workflow | null);
+    setWorkflows((json?.workflows ?? []) as Workflow[]);
     setSteps(nextSteps);
     setRuns((json?.runs ?? []) as Run[]);
     return { steps: nextSteps };
+  }
+
+  async function openWorkflow(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await refresh(id);
+      setDirty(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function pollUntilSettled(maxTicks = 6, intervalMs = 1500) {
@@ -157,6 +176,7 @@ export function ResearchPlanner(props: {
       if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
       setWorkflow((json?.workflow ?? null) as Workflow | null);
       setSteps((json?.steps ?? []) as Step[]);
+      await refresh(json?.workflow?.id);
       setDirty(false);
       setMessage("Research plan generated.");
     } catch (e) {
@@ -398,7 +418,41 @@ export function ResearchPlanner(props: {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
+      <aside className="crm-panel overflow-hidden self-start">
+        <div className="border-b border-zinc-200 px-4 py-3">
+          <Link
+            href={`/home/deal-intel/${props.dealId}`}
+            className="inline-flex h-9 items-center justify-center rounded-xl bg-zinc-950 px-3 text-sm font-semibold text-white shadow-sm hover:bg-zinc-800"
+          >
+            Back to company
+          </Link>
+          <p className="mt-1 text-xs text-zinc-500">Research plan history</p>
+        </div>
+        <div className="max-h-[70svh] space-y-1 overflow-y-auto p-2">
+          {workflows.map((item) => {
+            const active = workflow?.id === item.id;
+            const focusText = typeof item.metadata?.focus === "string" && item.metadata.focus ? item.metadata.focus : item.title;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => openWorkflow(item.id)}
+                disabled={busy}
+                className={`w-full rounded-xl px-3 py-2 text-left transition-colors ${active ? "bg-zinc-900 text-white" : "text-zinc-700 hover:bg-zinc-100"}`}
+              >
+                <span className="block truncate text-sm font-semibold">{focusText}</span>
+                <span className={`mt-0.5 block text-xs ${active ? "text-white/65" : "text-zinc-500"}`}>
+                  {item.status} / {item.updated_at ? new Date(item.updated_at).toLocaleDateString() : "saved"}
+                </span>
+              </button>
+            );
+          })}
+          {!workflows.length ? <p className="px-2 py-3 text-xs text-zinc-500">Generated plans will appear here.</p> : null}
+        </div>
+      </aside>
+
+      <main className="min-w-0 space-y-5">
       <div className="crm-panel overflow-hidden">
         <div className="flex flex-col gap-4 border-b border-zinc-200 bg-white px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex items-center gap-3">
@@ -608,6 +662,7 @@ export function ResearchPlanner(props: {
           </div>
         </div>
       </div>
+      </main>
     </div>
   );
 }

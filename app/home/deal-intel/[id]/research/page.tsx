@@ -9,6 +9,8 @@ type Workflow = {
   status: string;
   version: number;
   metadata: Record<string, unknown> | null;
+  created_at?: string;
+  updated_at?: string;
 };
 
 type Step = {
@@ -84,8 +86,19 @@ export default async function DealResearchPage(props: { params: Promise<{ id: st
     .maybeSingle();
 
   let workflow: Workflow | null = null;
+  let workflows: Workflow[] = [];
   let steps: Step[] = [];
   let runs: Run[] = [];
+
+  const historyRes = await admin
+    .schema("deal_intel")
+    .from("deal_research_workflow")
+    .select("id, title, status, version, metadata, created_at, updated_at")
+    .eq("deal_id", dealId)
+    .eq("user_id", user.id)
+    .order("updated_at", { ascending: false })
+    .limit(30);
+  if (!historyRes.error) workflows = (historyRes.data ?? []) as Workflow[];
 
   if (wfRes.data) {
     workflow = wfRes.data as Workflow;
@@ -122,6 +135,7 @@ export default async function DealResearchPage(props: { params: Promise<{ id: st
         dealId={dealId}
         companyName={companyName}
         initialWorkflow={workflow}
+        initialWorkflows={workflows}
         initialSteps={steps}
         initialRuns={runs}
       />

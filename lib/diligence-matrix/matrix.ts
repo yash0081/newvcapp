@@ -333,6 +333,7 @@ Return strict JSON:
 	Rules:
 	- Answer the exact column for the company. Do not fill adjacent metrics.
 	- Prefer concise spreadsheet-style values, e.g. "32%", "$18M ARR", "Beat Q3 revenue goal by 12%", or "Not found".
+	- If the available internal documents and facts do not contain the requested value, set answer to "Not present in available documents" and status to "needs_research".
 	- For cross-company fields such as common investors, overlap, peer comparisons, shared backers, relative funding amounts, or competitor overlap, use the crossCompanyAndDatabaseSignals section when present. If that section and research notes do not directly support the answer, return needs_research.
 	- If the evidence does not actually answer the column, return status "needs_research" and explain what is missing.
 - If research notes are provided, use them only when they directly answer the column.

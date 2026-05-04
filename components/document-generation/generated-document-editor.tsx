@@ -59,6 +59,7 @@ export function GeneratedDocumentEditor({
   async function applyEditInstruction() {
     const instruction = editInstruction.trim();
     if (!instruction) return;
+    setEditInstruction("");
     setEditStatus("applying");
     setError("");
     setEditMessages((prev) => [...prev, { role: "user", text: instruction }]);
@@ -74,7 +75,6 @@ export function GeneratedDocumentEditor({
       if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
       setTitle(json?.result?.title || title);
       setContent(json?.result?.content || content);
-      setEditInstruction("");
       refreshPreview();
       setEditMessages((prev) => [
         ...prev,

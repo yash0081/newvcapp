@@ -4,6 +4,8 @@ import { getAuthedUser, getDealForUser } from "@/lib/research/db";
 
 export async function GET(_req: Request, ctx: { params: Promise<{ dealId: string }> }) {
   const { dealId } = await ctx.params;
+  const url = new URL(_req.url);
+  const workflowId = url.searchParams.get("workflowId") || "";
   const user = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
@@ -12,18 +14,30 @@ export async function GET(_req: Request, ctx: { params: Promise<{ dealId: string
   if (!deal) return NextResponse.json({ error: "Deal not found" }, { status: 404 });
 
   const admin = createAdminClient();
-  const wfRes = await admin
+  const historyRes = await admin
     .schema("deal_intel")
     .from("deal_research_workflow")
     .select("id, deal_id, user_id, title, status, version, metadata, created_at, updated_at")
     .eq("deal_id", dealId)
     .eq("user_id", user.id)
-    .neq("status", "archived")
+    .order("updated_at", { ascending: false })
+    .limit(30);
+  if (historyRes.error) return NextResponse.json({ error: historyRes.error.message }, { status: 500 });
+
+  let wfQuery = admin
+    .schema("deal_intel")
+    .from("deal_research_workflow")
+    .select("id, deal_id, user_id, title, status, version, metadata, created_at, updated_at")
+    .eq("deal_id", dealId)
+    .eq("user_id", user.id);
+  if (workflowId) wfQuery = wfQuery.eq("id", workflowId);
+  else wfQuery = wfQuery.neq("status", "archived");
+  const wfRes = await wfQuery
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (wfRes.error) return NextResponse.json({ error: wfRes.error.message }, { status: 500 });
-  if (!wfRes.data) return NextResponse.json({ workflow: null, steps: [], runs: [] });
+  if (!wfRes.data) return NextResponse.json({ workflow: null, steps: [], runs: [], workflows: historyRes.data ?? [] });
 
   const workflow = wfRes.data;
 
@@ -49,6 +63,6 @@ export async function GET(_req: Request, ctx: { params: Promise<{ dealId: string
     workflow,
     steps: stepRes.data ?? [],
     runs: runRes.data ?? [],
+    workflows: historyRes.data ?? [],
   });
 }
-
