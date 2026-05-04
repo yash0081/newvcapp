@@ -19,14 +19,11 @@ export async function POST(req: Request) {
   const name = typeof body?.name === "string" ? body.name.trim().slice(0, 140) : "";
   if (!name) return NextResponse.json({ error: "name is required" }, { status: 400 });
   const steps = cleanWorkflowSteps(body?.steps);
-  if (!steps.length) return NextResponse.json({ error: "Add at least one workflow step." }, { status: 400 });
   const row = {
-    user_id: user.id,
     name,
     description: typeof body?.description === "string" ? body.description.trim().slice(0, 2000) : "",
     trigger_hint: typeof body?.triggerHint === "string" ? body.triggerHint.trim().slice(0, 1000) : "",
     steps,
-    metadata: {},
   };
   const admin = createAdminClient();
   const existingId = typeof body?.id === "string" && body.id.trim() ? body.id.trim() : null;
@@ -42,7 +39,7 @@ export async function POST(req: Request) {
     : await admin
         .schema("deal_intel")
         .from("custom_workflow_definition")
-        .insert(row)
+        .insert({ ...row, user_id: user.id, metadata: {} })
         .select("id")
         .single();
   if (res.error) return NextResponse.json({ error: res.error.message }, { status: 500 });

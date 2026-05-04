@@ -64,6 +64,9 @@ function PopupApp() {
       try {
         const s = await send<SessionResponse>({ type: "GET_ACTIVE_SESSION" });
         setSession(s.session);
+        if (s.session?.status === "active") {
+          void send({ type: "ENSURE_OVERLAY" }).catch(() => {});
+        }
       } catch {
         setSession(null);
       }
@@ -86,6 +89,9 @@ function PopupApp() {
         dealId: selectedDealId,
       });
       setSession(res.session);
+      if (res.session?.status === "active") {
+        void send({ type: "ENSURE_OVERLAY" }).catch(() => {});
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {

@@ -90,6 +90,7 @@ export async function setCopilotSteering(
 export async function observeText(
   sessionId: string,
   snapshot: DomSnapshot,
+  clientMode?: "manual" | "auto",
   signal?: AbortSignal,
 ): Promise<{ suggestions: Suggestion[]; observationEventId?: string }> {
   return apiFetch(`/api/copilot/sessions/${sessionId}/observe`, {
@@ -105,6 +106,7 @@ export async function observeText(
       },
       urlHint: snapshot.url,
       hostnameHint: snapshot.hostname,
+      clientMode,
     }),
   });
 }
@@ -215,11 +217,29 @@ export async function decide(
   sessionId: string,
   suggestionEventId: string,
   action: "accept" | "reject",
+  sourceUrl?: string,
   snippet?: Omit<AcceptedSnippet, "accepted_at">,
 ): Promise<void> {
   await apiFetch(`/api/copilot/sessions/${sessionId}/decision`, {
     method: "POST",
-    body: JSON.stringify({ suggestionEventId, action, snippet }),
+    body: JSON.stringify({ suggestionEventId, action, sourceUrl, snippet }),
+  });
+}
+
+export async function recordPreferenceSignal(
+  sessionId: string,
+  body: {
+    action: "manual_visit" | "open_link";
+    url?: string;
+    domain?: string;
+    task?: string;
+    summary?: string;
+    snippet?: string;
+  },
+): Promise<void> {
+  await apiFetch(`/api/copilot/sessions/${sessionId}/preference`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 

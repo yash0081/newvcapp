@@ -9,6 +9,7 @@ import {
   observeText,
   planNext,
   promptCopilot,
+  recordPreferenceSignal,
   setCopilotSteering,
   startSession,
 } from "@shared/api";
@@ -81,6 +82,35 @@ async function broadcastToTabs(msg: { type: "SESSION_STARTED"; session: CopilotS
   }
 }
 
+function overlayContentScriptFiles(): string[] {
+  const manifest = chrome.runtime.getManifest();
+  const scripts = manifest.content_scripts?.[0]?.js ?? [];
+  return scripts.filter((file): file is string => typeof file === "string" && file.trim().length > 0);
+}
+
+async function ensureOverlayInActiveTab(session?: CopilotSession | null): Promise<void> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id == null) return;
+  const url = tab.url ?? "";
+  if (!/^https?:\/\//i.test(url)) return;
+  if (url.startsWith(APP_ORIGIN)) return;
+
+  const files = overlayContentScriptFiles();
+  if (files.length) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files });
+    } catch {
+      // Already injected, restricted page, or not available in this context.
+    }
+  }
+
+  const state = await loadState();
+  const activeSession = session ?? state.activeSession;
+  if (activeSession?.status === "active") {
+    chrome.tabs.sendMessage(tab.id, { type: "SESSION_STARTED", session: activeSession }).catch(() => {});
+  }
+}
+
 async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
   if (!req || typeof req !== "object" || typeof (req as { type?: string }).type !== "string") {
     return { ok: false, error: "Invalid request" };
@@ -96,6 +126,10 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
         const deals = await listDeals();
         const payload: ListDealsResponse = { deals };
         return { ok: true, payload };
+      }
+      case "ENSURE_OVERLAY": {
+        await ensureOverlayInActiveTab();
+        return { ok: true };
       }
       case "GET_ACTIVE_SESSION": {
         const state = await loadState();
@@ -154,6 +188,7 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
           lastObserveAt: 0,
         });
         await broadcastToTabs({ type: "SESSION_STARTED", session });
+        await ensureOverlayInActiveTab(session);
         const payload: SessionResponse = { session };
         return { ok: true, payload };
       }
@@ -168,7 +203,7 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
         const controller = new AbortController();
         pendingObserveAbort = controller;
         try {
-          const res = await observeText(state.activeSessionId, req.snapshot, controller.signal);
+          const res = await observeText(state.activeSessionId, req.snapshot, req.clientMode, controller.signal);
           if (pendingObserveAbort === controller) pendingObserveAbort = null;
           const payload: ObserveResponse = res;
           await saveState({ ...(await loadState()), lastObserveAt: Date.now() });
@@ -232,7 +267,7 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
       case "DECISION": {
         const state = await loadState();
         if (!state.activeSessionId) return { ok: false, error: "No active session" };
-        await decide(state.activeSessionId, req.suggestionEventId, req.action);
+        await decide(state.activeSessionId, req.suggestionEventId, req.action, req.sourceUrl);
         const activeDeal = await readActiveDealCookie();
         if (activeDeal) {
           try {
@@ -250,10 +285,25 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
         }
         return { ok: true };
       }
+      case "PREFERENCE_SIGNAL": {
+        const state = await loadState();
+        if (!state.activeSessionId) return { ok: false, error: "No active session" };
+        await recordPreferenceSignal(state.activeSessionId, {
+          action: req.action,
+          url: req.url,
+          domain: req.domain,
+          task: req.task,
+          summary: req.summary,
+          snippet: req.snippet,
+        });
+        return { ok: true };
+      }
       case "END_SESSION":
       case "FINALIZE": {
         const state = await loadState();
         if (!state.activeSessionId) return { ok: false, error: "No active session" };
+        pendingObserveAbort?.abort();
+        pendingObserveAbort = null;
         try {
           await endCopilotSession(state.activeSessionId);
         } catch (e) {

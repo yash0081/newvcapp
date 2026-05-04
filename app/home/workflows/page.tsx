@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { listCustomWorkflowDefinitions } from "@/lib/custom-workflows";
+import { listCustomWorkflowDefinitions, listCustomWorkflowRuns } from "@/lib/custom-workflows";
 import { listChatDeals } from "@/lib/chat/workspace-chat";
 import { WorkflowBuilder } from "@/components/workflows/workflow-builder";
 
@@ -13,8 +13,9 @@ export default async function WorkflowsPage() {
   if (!user) redirect("/");
 
   const admin = createAdminClient();
-  const [workflows, deals, docTypesRes] = await Promise.all([
+  const [workflows, runs, deals, docTypesRes] = await Promise.all([
     listCustomWorkflowDefinitions(admin, user.id),
+    listCustomWorkflowRuns(admin, user.id),
     listChatDeals(admin, user.id).catch(() => []),
     admin
       .schema("deal_intel")
@@ -27,6 +28,7 @@ export default async function WorkflowsPage() {
   return (
     <WorkflowBuilder
       initialWorkflows={workflows}
+      initialRuns={runs}
       deals={deals}
       documentTypes={(docTypesRes.data ?? []) as Array<{ id: string; name: string; output_format: string | null }>}
     />

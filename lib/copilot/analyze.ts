@@ -10,6 +10,8 @@ import {
   DEAL_INTEL_QUALITY_GUARDRAILS,
   USER_PREFERENCE_GUARDRAILS,
 } from "@/lib/deal-intel/prompt-guidance";
+import { isLowValueSaveSuggestion } from "@/lib/copilot/preference-signals";
+import type { ResearchGap } from "@/lib/copilot/research-agenda";
 
 const ANALYZE_MODEL_ENV = "COPILOT_ANALYZE_MODEL";
 const MAX_RECENT_CLAIMS = 12;
@@ -37,7 +39,9 @@ export type DealContext = {
   recentSuggestionKeys?: string[];
   /** URLs already visited by auto-research in this session. */
   visitedUrls?: string[];
-  preferredHostnames?: Array<{ domain: string; score: number; category?: string }>;
+  /** Canonical fields still missing or weak after metadata + claims + session snippets. */
+  openGaps?: ResearchGap[];
+  preferredHostnames?: Array<{ domain: string; score: number; category?: string; focus_guidance?: string }>;
   dislikedHostnames?: string[];
 };
 
@@ -67,6 +71,7 @@ Rules:
 - Return at most 4 suggestions; prefer quality over quantity.
 - When "Outbound links visible on page" lists several URLs, include explore suggestions for distinct useful follow-ups (e.g. team, pricing, security, docs) when the current screen does not already answer the question—up to 2 explore items if justified, each with a different link_url.
 - Prefer one strong suggestion over several weak ones; do not pad with low-value items.
+- Treat "Open research gaps" as the main save target. Also treat a non-empty "Auto steering note" or user prompt as the user's live priority. A high-quality suggestion should fill, verify, or contradict either an open gap or that explicit focus.
 - Resolve conflicts against this priority order:
   1) Accepted snippets from the current session (newest source of truth) — if a fact appears here, it wins over "Known company metadata" and "Recent recorded claims" even when they disagree (session may be ahead of the CRM until background sync runs).
   2) Existing CRM/deal claims
@@ -77,6 +82,8 @@ Rules:
 - "contradicts"=> meaningfully disagrees with existing facts; include conflicting value.
 - Prefer schema-aligned snippets: people/team, makeup/origin, problem/customer/market, solution/pricing/defensibility/competitors, traction, or negative aspects.
 - Surface negatives and missing-evidence facts when the page gives concrete support; do not manufacture criticism.
+- Saved snippets for "new", "aligns", and "contradicts" must be concrete company facts. Never save meta-notes like "this page contains useful information about stock price" or "the source has good details about funding."
+- If a page is useful but the current screen does not expose an actual fact/value, return an "explore" suggestion or no suggestion. For market/stock pages, save the actual ticker, price, market cap, date, or other stated value if present; otherwise do not save a generic stock-information note.
 - For "contradicts", explicitly frame it as a decision between current vs new value.
 - For "contradicts", format summary like "Contradiction: <field>" and snippet as:
   "Current: ... | New: ... | Source: ..."
@@ -131,6 +138,7 @@ export async function analyzeAgainstDeal(args: {
     { label: "Company name", value: args.deal.companyName || "Unknown" },
     { label: "Known company metadata", value: args.deal.metadata ?? {} },
     { label: "Accepted snippets in current session (highest precedence)", value: sessionAccepted },
+    { label: "Open research gaps (prioritize filling or verifying these)", value: (args.deal.openGaps ?? []).slice(0, 20) },
     { label: "Recently surfaced suggestion keys", value: (args.deal.recentSuggestionKeys ?? []).slice(0, 40) },
     { label: "Recent recorded claims (subset)", value: compactClaims },
     { label: "On-screen extracted text", value: visibleText },
@@ -169,6 +177,7 @@ export async function analyzeAgainstDeal(args: {
     if (!summary || !snippet || !kind) continue;
     if (confidence < MIN_CONFIDENCE) continue;
     if (kind === "explore" && !link_url) continue;
+    if (isLowValueSaveSuggestion({ kind, summary, snippet })) continue;
     const repeatKey = suggestionRepeatKey(summary, snippet);
     if (seenKeys.has(repeatKey)) continue;
     seenKeys.add(repeatKey);

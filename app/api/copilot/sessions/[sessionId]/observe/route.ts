@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser } from "@/lib/research/db";
 import {
+  appendVisitedUrl,
   getAutoSteeringNote,
   getRecentDealClaims,
   getSessionForUser,
@@ -13,7 +14,13 @@ import { analyzeAgainstDeal } from "@/lib/copilot/analyze";
 import { normalizeExtractedSnapshot } from "@/lib/copilot/extracted-snapshot";
 import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
 import { suggestionRepeatKey } from "@/lib/copilot/repeat-key";
-import { getUserSitePreferences } from "@/lib/research/preferences";
+import { computeOpenGaps } from "@/lib/copilot/research-agenda";
+import {
+  buildCopilotPreferenceTask,
+  inferCopilotPreferenceCategory,
+  normalizePreferenceUrl,
+} from "@/lib/copilot/preference-signals";
+import { getUserSitePreferences, recordResearchPreferenceEvents } from "@/lib/research/preferences";
 
 const MIN_TEXT_CHARS = 40;
 
@@ -55,6 +62,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   const body = (await req.json().catch(() => null)) as
     | {
         capturedAt?: string;
+        clientMode?: "manual" | "auto";
         hostnameHint?: string;
         urlHint?: string;
         extracted?: {
@@ -124,6 +132,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   const sessionAcceptedSnippets = getSessionAcceptedSnippets(session.metadata);
   const visitedUrls = getVisitedUrls(session.metadata);
   const autoSteeringNote = getAutoSteeringNote(session.metadata);
+  const openGaps = computeOpenGaps({
+    metadata: dealMeta,
+    recentClaims: claims,
+    sessionAcceptedSnippets,
+  });
   const recentSuggestionKeys = (recentSuggestionsRes.data ?? [])
     .map((r) => {
       const payload = (r.payload ?? {}) as Record<string, unknown>;
@@ -132,6 +145,37 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       return summary && snippet ? suggestionRepeatKey(summary, snippet) : null;
     })
     .filter((v): v is string => Boolean(v));
+
+  const normalizedUrlHint = normalizePreferenceUrl(typeof body?.urlHint === "string" ? body.urlHint : null);
+  const alreadyVisited = normalizedUrlHint
+    ? visitedUrls.some((u) => normalizePreferenceUrl(u) === normalizedUrlHint)
+    : true;
+  if (body?.clientMode === "manual" && normalizedUrlHint && hostname && !alreadyVisited) {
+    void appendVisitedUrl({ admin, sessionId: session.id, userId: user.id, url: normalizedUrlHint }).catch(() => {});
+    void recordResearchPreferenceEvents({
+      admin,
+      userId: user.id,
+      dealId: session.deal_id,
+      events: [
+        {
+          domain: normalizedUrlHint,
+          category: inferCopilotPreferenceCategory({
+            task: extracted.page_title ?? normalizedUrlHint,
+            focus: autoSteeringNote,
+            openGapFields: openGaps.map((g) => g.field),
+          }),
+          deltaPreferenceScore: 0.02,
+          deltaUsageCount: 1,
+          reason: "User manually visited this site during a copilot research session.",
+          task: buildCopilotPreferenceTask({
+            companyName,
+            focus: autoSteeringNote,
+            pageTitle: extracted.page_title ?? null,
+          }),
+        },
+      ],
+    }).catch(() => {});
+  }
 
   // Run observation insert in parallel with analyze; analyze does not need
   // the inserted observation row (we only need its id when persisting
@@ -165,7 +209,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       sessionAcceptedSnippets,
       recentSuggestionKeys,
       visitedUrls,
-      preferredHostnames: sitePrefs.preferred.map((p) => ({ domain: p.domain, score: p.preference_score, category: p.category })),
+      openGaps,
+      preferredHostnames: sitePrefs.preferred.map((p) => ({
+        domain: p.domain,
+        score: p.preference_score,
+        category: p.category,
+        focus_guidance: p.focus_guidance,
+      })),
       dislikedHostnames: sitePrefs.disliked.map((d) => d.domain),
     },
   });

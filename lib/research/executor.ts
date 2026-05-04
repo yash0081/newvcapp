@@ -28,6 +28,25 @@ function isBroadWebSource(website: string): boolean {
   return !s || s === "web" || s === "broad-web" || s === "general-web";
 }
 
+function formatExecutionError(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const parts = [record.message, record.details, record.hint, record.code]
+      .map((part) => (typeof part === "string" || typeof part === "number" ? String(part).trim() : ""))
+      .filter(Boolean);
+    if (parts.length) return parts.join(" ");
+    try {
+      const json = JSON.stringify(error);
+      if (json && json !== "{}") return json.slice(0, 1000);
+    } catch {
+      // Fall through to generic copy.
+    }
+  }
+  return "Unknown research execution error";
+}
+
 function parseExecution(raw: string): Omit<ExecutionOk, "ok"> | null {
   const normalizeSource = (s: unknown): ResearchSource | null => {
     if (!s || typeof s !== "object") return null;
@@ -182,7 +201,7 @@ ${USER_PREFERENCE_GUARDRAILS}`;
   } catch (e) {
     return {
       ok: false,
-      errorMessage: `Execution failed while running this step: ${e instanceof Error ? e.message : String(e)}`,
+      errorMessage: `Execution failed while running this step: ${formatExecutionError(e)}`,
     };
   }
 

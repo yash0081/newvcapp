@@ -4,7 +4,7 @@ import { classifyChatTaskWithGemma, chatModelForTask, retrieveLimitForTask } fro
 import { retrieveContextNodesForQuery, type ContextChunk } from "@/lib/retrieval-orchestrator";
 import { vectorParam } from "@/lib/data-layer/shared/vector";
 import { embedText } from "@/lib/vertex-embeddings";
-import { vertexRunWithText, vertexStreamText } from "@/lib/vertex";
+import { vertexRunWithText, vertexRunWithTextAndGroundingSources, vertexStreamText } from "@/lib/vertex";
 import { fetchSimilarDealsFromDealId } from "@/lib/similar-deals/fetch-from-deal";
 import { fetchSimilarDealsHybrid } from "@/lib/similar-deals/fetch-hybrid";
 import type { SimilarPeerForPrompt } from "@/lib/similar-deals/types";
@@ -191,6 +191,11 @@ type DocumentRow = {
   mime_type: string | null;
   status: string | null;
   created_at: string | null;
+};
+
+type QuickLookupResult = {
+  text: string;
+  citations: ChatCitation[];
 };
 
 type DocumentTypeSummary = {
@@ -1059,7 +1064,7 @@ Reasoning rules:
 - Use researchDealIds for the companies that actually need research. If another named company is only a matrix row, benchmark row, peer reference, or common-investor counterpart, include it in targetDealIds for matrix/comparison work but leave it out of researchDealIds unless the user explicitly asks to research that company too.
 - When runResearch.enabled is true, researchDealIds should normally be non-empty and narrower than targetDealIds when some target companies are only needed for matrix output.
 - If the user asks for missing schema coverage, evidence quality, negatives, or "what do we know", prefer the schema buckets above when choosing answer vs research vs update.
-- Use customWorkflow when the user asks to run a saved/reusable workflow, playbook, process, or their request clearly matches a workflow trigger/description. Choose exactly one workflow id from Available workflows. This workflow will run automatically.
+- Use customWorkflow when the user asks to run a saved/reusable workflow, playbook, process, or their request clearly matches one workflow's name, description, or step instructions. Choose exactly one workflow id only when the match is clear. If multiple workflows plausibly match, leave customWorkflow disabled and ask which workflow to run by name.
 - Do not set both quickLookup and runResearch unless the user asks for a direct answer now plus deeper follow-up research.
 - When the user explicitly asks for multiple outputs or tools in one prompt, set every requested tool field. For example, research plus a matrix should run research and fill the matrix; a workflow plus a document should run both if both are requested.
 - Tools are not mutually exclusive. If the user explicitly asks for workflow, document, research, matrix, database-backed lookup, or analysis outputs in the same prompt, return all requested tool actions. Avoid only exact duplicate tool work.
@@ -1087,8 +1092,16 @@ ${args.docTypes.map((d) => `- ${d.name} (${d.id}) format=${d.output_format ?? "u
 
 Available workflows:
 ${args.customWorkflows.map((w) => {
-  const steps = w.steps.map((s, i) => `${i + 1}. ${s.type}: ${s.title}`).join("; ");
-  return `- ${w.name} (${w.id}) description=${w.description || ""} trigger=${w.trigger_hint || ""} steps=${steps}`;
+  const steps = w.steps.map((s, i) => {
+    const prompt =
+      "prompt" in s && typeof s.prompt === "string"
+        ? s.prompt
+        : s.type === "record_update"
+          ? `${s.target}: ${s.value}`
+          : "";
+    return `${i + 1}. ${s.type}: ${s.title}${prompt ? ` - ${prompt.slice(0, 180)}` : ""}`;
+  }).join("; ");
+  return `- ${w.name} (${w.id}) description=${w.description || ""} steps=${steps}`;
 }).join("\n").slice(0, 5000) || "(none)"}
 
 Available matrix columns:
@@ -1333,25 +1346,99 @@ function formatDocChunks(chunks: Array<{ document_id: string; page_start: number
     .join("\n\n");
 }
 
-function citationsFromContext(
+function citationCandidatesFromContext(
   factChunks: ContextChunk[],
   docChunks: Array<{ document_id: string; page_start: number; page_end: number; text: string }>,
   docs: DocumentRow[],
-): ChatCitation[] {
-  const out: ChatCitation[] = [];
+): Array<{ citation: ChatCitation; evidence: string }> {
+  const out: Array<{ citation: ChatCitation; evidence: string }> = [];
   for (const [i, c] of factChunks.slice(0, 5).entries()) {
-    out.push({ label: `Fact ${i + 1}: ${c.node_type}`, snippet: (c.raw_text ?? "").slice(0, 240) });
+    const evidence = c.raw_text ?? "";
+    out.push({
+      citation: { label: `Fact ${i + 1}: ${c.node_type}`, snippet: evidence.slice(0, 240) },
+      evidence: evidence.slice(0, 1200),
+    });
   }
   const docById = new Map(docs.map((d) => [d.id, d]));
   for (const [i, c] of docChunks.slice(0, 5).entries()) {
     const d = docById.get(c.document_id);
     out.push({
-      label: `Document ${i + 1}: ${d?.original_filename ?? c.document_id}`,
-      href: hrefForDocument(c.document_id, d?.source_kind),
-      snippet: c.text.slice(0, 240),
+      citation: {
+        label: `Document ${i + 1}: ${d?.original_filename ?? c.document_id}`,
+        href: hrefForDocument(c.document_id, d?.source_kind),
+        snippet: c.text.slice(0, 240),
+      },
+      evidence: c.text.slice(0, 1200),
     });
   }
   return out;
+}
+
+async function citationsActuallyUsedInAnswer(args: {
+  answer: string;
+  userMessage: string;
+  factChunks: ContextChunk[];
+  docChunks: Array<{ document_id: string; page_start: number; page_end: number; text: string }>;
+  docs: DocumentRow[];
+  webCitations?: ChatCitation[];
+}): Promise<ChatCitation[]> {
+  const candidates = [
+    ...citationCandidatesFromContext(args.factChunks, args.docChunks, args.docs),
+    ...(args.webCitations ?? []).map((citation) => ({
+      citation,
+      evidence: [citation.label, citation.href, citation.snippet].filter(Boolean).join("\n"),
+    })),
+  ];
+  const answer = cleanAssistantResponse(args.answer);
+  if (!answer || !candidates.length) return [];
+
+  const candidateText = candidates
+    .map((c, i) =>
+      [
+        `[${i + 1}] ${c.citation.label}`,
+        c.citation.href ? `href: ${c.citation.href}` : "",
+        `evidence: ${c.evidence.slice(0, 900)}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+    .join("\n\n");
+
+  const prompt = `Decide which retrieved CRM sources were actually used to support the assistant's answer.
+
+Return strict JSON only:
+{"used":[1,2]}
+
+Rules:
+- Include a source only if its snippet directly supports a concrete claim in the assistant answer.
+- Do not include sources that are merely about the same company, same person, or same topic.
+- Do not include sources that were retrieved but not needed for the answer.
+- If the answer appears to rely on general model knowledge or says the saved CRM does not contain the answer without providing a web-backed fact, return {"used":[]}.
+- If the answer only mentions that documents exist or can be opened, include only documents explicitly named in that answer.
+- Be conservative. When unsure, exclude the source.
+
+User message:
+${args.userMessage.slice(0, 1200)}
+
+Assistant answer:
+${answer.slice(0, 5000)}
+
+Candidate CRM sources:
+${candidateText.slice(0, 9000)}`;
+
+  try {
+    const raw = await vertexRunWithText(chatModelForTask("filtering"), prompt, false);
+    const parsed = parseJsonFromResponseOrNull(raw) as { used?: unknown } | null;
+    const used = Array.isArray(parsed?.used)
+      ? parsed.used
+          .map((n) => Number(n))
+          .filter((n) => Number.isInteger(n) && n >= 1 && n <= candidates.length)
+      : [];
+    const unique = Array.from(new Set(used));
+    return unique.map((n) => candidates[n - 1]?.citation).filter((c): c is ChatCitation => Boolean(c));
+  } catch {
+    return [];
+  }
 }
 
 function formatSimilarPeers(peers: SimilarPeerForPrompt[]): string {
@@ -1397,7 +1484,7 @@ async function runQuickLookup(args: {
   message: string;
   focusCompanyName: string | null;
   savedContext: string;
-}): Promise<string> {
+}): Promise<QuickLookupResult> {
   const prompt = `Answer one quick public-web lookup for a VC workspace chat.
 
 Use Google Search grounding. Keep the answer short and direct.
@@ -1424,7 +1511,20 @@ ${args.query}
 
 Original user message:
 ${args.message}`;
-  return vertexRunWithText(chatModelForTask("why"), prompt, true).catch(() => "");
+  try {
+    const result = await vertexRunWithTextAndGroundingSources(chatModelForTask("why"), prompt, true);
+    const text = cleanAssistantResponse(result.text);
+    return {
+      text,
+      citations: result.sources.slice(0, 5).map((source, i) => ({
+        label: `Web ${i + 1}: ${source.title}`,
+        href: source.uri,
+        snippet: text.slice(0, 240) || source.title,
+      })),
+    };
+  } catch {
+    return { text: "", citations: [] };
+  }
 }
 
 function actionSummary(action: ChatAction): string {
@@ -1851,7 +1951,7 @@ export async function runWorkspaceChat(args: {
           focusCompanyName: primaryDeal ? companyName(primaryDeal) : null,
           savedContext: savedLookupContext,
         })
-      : Promise.resolve(""),
+      : Promise.resolve({ text: "", citations: [] }),
   ]);
   const recentHistory = (args.history ?? [])
     .slice(-8)
@@ -1909,7 +2009,7 @@ Investment criteria and thesis context:
 ${criteriaContext || "(not requested or no uploaded criteria found)"}
 
 Quick web lookup result:
-${quickLookupResult || "(not requested or no quick lookup result)"}
+${quickLookupResult.text || "(not requested or no quick lookup result)"}
 
 Actions already taken or prepared:
 ${actions.length ? actions.map((a) => `- ${a.label}: ${actionSummary(a)}`).join("\n") : "(none)"}
@@ -1928,19 +2028,35 @@ Respond conversationally and directly. If you used context, mention the basis br
       response += chunk;
       args.onAssistantDelta(chunk);
     }
+    const finalMessage = cleanAssistantResponse(response || "I could not produce a response.");
     return {
-      message: cleanAssistantResponse(response || "I could not produce a response."),
+      message: finalMessage,
       actions,
-      citations: citationsFromContext(factChunks, docChunks, docs),
+      citations: await citationsActuallyUsedInAnswer({
+        answer: finalMessage,
+        userMessage: message,
+        factChunks,
+        docChunks,
+        docs,
+        webCitations: quickLookupResult.citations,
+      }),
       dealId: focusDealId,
     };
   }
 
   const response = await vertexRunWithText(chatModelForTask(task), prompt, false);
+  const finalMessage = await polishPlainTextResponse(response || "I could not produce a response.", message);
   return {
-    message: await polishPlainTextResponse(response || "I could not produce a response.", message),
+    message: finalMessage,
     actions,
-    citations: citationsFromContext(factChunks, docChunks, docs),
+    citations: await citationsActuallyUsedInAnswer({
+      answer: finalMessage,
+      userMessage: message,
+      factChunks,
+      docChunks,
+      docs,
+      webCitations: quickLookupResult.citations,
+    }),
     dealId: focusDealId,
   };
 }

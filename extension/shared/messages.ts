@@ -6,9 +6,10 @@ import type { ActiveDealHint, CopilotSession, DealListItem, DomSnapshot, Suggest
 export type ExtensionRequest =
   | { type: "GET_ACTIVE_DEAL" }
   | { type: "LIST_DEALS" }
+  | { type: "ENSURE_OVERLAY" }
   | { type: "START_SESSION"; dealId: string; tabHint?: string }
   | { type: "GET_ACTIVE_SESSION" }
-  | { type: "OBSERVE"; snapshot: DomSnapshot }
+  | { type: "OBSERVE"; snapshot: DomSnapshot; clientMode?: "manual" | "auto" }
   | {
       type: "PLAN_NEXT";
       snapshot: DomSnapshot;
@@ -45,7 +46,16 @@ export type ExtensionRequest =
   | { type: "PROMPT"; text: string; snapshot?: DomSnapshot }
   /** Save natural-language focus for auto mode (observe + plan-next read from session metadata). */
   | { type: "SET_AUTO_STEERING"; note: string }
-  | { type: "DECISION"; suggestionEventId: string; action: "accept" | "reject" }
+  | { type: "DECISION"; suggestionEventId: string; action: "accept" | "reject"; sourceUrl?: string }
+  | {
+      type: "PREFERENCE_SIGNAL";
+      action: "manual_visit" | "open_link";
+      url?: string;
+      domain?: string;
+      task?: string;
+      summary?: string;
+      snippet?: string;
+    }
   /** Ends the research session (sync runs in background). Prefer over FINALIZE. */
   | { type: "END_SESSION" }
   /** @deprecated Use END_SESSION — same handler */

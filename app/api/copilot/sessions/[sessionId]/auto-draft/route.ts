@@ -6,6 +6,7 @@ import {
   appendAutoDraftSnippet,
   editAutoDraftSnippet,
   getAutoDraft,
+  getAutoSteeringNote,
   getSessionForUser,
   mergeResearchAgenda,
   promoteAutoDraftToAccepted,
@@ -14,6 +15,12 @@ import {
 } from "@/lib/copilot/db";
 import { bumpVisitedYieldOnAgenda } from "@/lib/copilot/research-agenda";
 import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
+import {
+  buildCopilotPreferenceTask,
+  inferCopilotPreferenceCategory,
+  normalizePreferenceDomain,
+} from "@/lib/copilot/preference-signals";
+import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 
 export async function OPTIONS(req: Request) {
   return copilotPreflight(req);
@@ -27,6 +34,41 @@ export async function GET(req: Request, ctx: { params: Promise<{ sessionId: stri
   const session = await getSessionForUser({ admin, sessionId, userId: user.id });
   if (!session) return withCopilotCors(req, NextResponse.json({ error: "Session not found" }, { status: 404 }));
   return withCopilotCors(req, NextResponse.json({ ok: true, draft: getAutoDraft(session.metadata) }));
+}
+
+function preferenceEventForSnippet(args: {
+  session: { deal_id: string; metadata: unknown };
+  snippet: {
+    text?: string;
+    source_label?: string;
+    hostname?: string | null;
+    source_url?: string | null;
+    kind?: string | null;
+  };
+  deltaPreferenceScore: number;
+  deltaUsageCount: number;
+  reason: string;
+}) {
+  const domain = normalizePreferenceDomain(args.snippet.source_url) ?? normalizePreferenceDomain(args.snippet.hostname);
+  if (!domain) return null;
+  const focus = getAutoSteeringNote(args.session.metadata);
+  return {
+    domain,
+    category: inferCopilotPreferenceCategory({
+      focus,
+      snippet: args.snippet.text,
+      summary: args.snippet.source_label,
+      kind: args.snippet.kind,
+    }),
+    deltaPreferenceScore: args.deltaPreferenceScore,
+    deltaUsageCount: args.deltaUsageCount,
+    reason: args.reason,
+    task: buildCopilotPreferenceTask({
+      focus,
+      summary: args.snippet.source_label,
+      snippet: args.snippet.text,
+    }),
+  };
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ sessionId: string }> }) {
@@ -102,9 +144,38 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   } else if (op === "remove") {
     const id = typeof body?.id === "string" ? body.id : "";
     if (!id) return withCopilotCors(req, NextResponse.json({ error: "id is required" }, { status: 400 }));
+    const draft = getAutoDraft(session.metadata);
+    const removed = draft.snippets.find((s) => s.id === id);
     await removeAutoDraftSnippet({ admin, session, id });
+    const event = removed
+      ? preferenceEventForSnippet({
+          session,
+          snippet: removed,
+          deltaPreferenceScore: -0.08,
+          deltaUsageCount: 0,
+          reason: "User removed an auto-saved copilot draft snippet.",
+        })
+      : null;
+    if (event) {
+      void recordResearchPreferenceEvents({ admin, userId: user.id, dealId: session.deal_id, events: [event] }).catch(() => {});
+    }
   } else if (op === "discard") {
+    const draft = getAutoDraft(session.metadata);
     await setAutoDraftStatus({ admin, session, status: "discarded" });
+    const events = draft.snippets
+      .map((snippet) =>
+        preferenceEventForSnippet({
+          session,
+          snippet,
+          deltaPreferenceScore: -0.05,
+          deltaUsageCount: 0,
+          reason: "User discarded an auto-saved copilot draft.",
+        }),
+      )
+      .filter((event): event is NonNullable<typeof event> => Boolean(event));
+    if (events.length) {
+      void recordResearchPreferenceEvents({ admin, userId: user.id, dealId: session.deal_id, events }).catch(() => {});
+    }
   } else if (op === "approve") {
     const result = await promoteAutoDraftToAccepted({
       admin,
@@ -119,6 +190,20 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         userId: user.id,
         transform: (a) => bumpVisitedYieldOnAgenda(a, { sourceUrls: promotedUrls }),
       });
+    }
+    const events = result.promoted
+      .map((snippet) =>
+        preferenceEventForSnippet({
+          session,
+          snippet,
+          deltaPreferenceScore: 0.10,
+          deltaUsageCount: 1,
+          reason: "User approved an auto-saved copilot draft snippet.",
+        }),
+      )
+      .filter((event): event is NonNullable<typeof event> => Boolean(event));
+    if (events.length) {
+      void recordResearchPreferenceEvents({ admin, userId: user.id, dealId: session.deal_id, events }).catch(() => {});
     }
   } else {
     return withCopilotCors(req, NextResponse.json({ error: "Unsupported op" }, { status: 400 }));

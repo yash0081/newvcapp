@@ -4,11 +4,20 @@ import { getAuthedUser } from "@/lib/research/db";
 import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 import {
   appendAcceptedSnippet,
+  getAutoSteeringNote,
   getSessionForUser,
   insertCopilotEvent,
+  mergeResearchAgenda,
 } from "@/lib/copilot/db";
 import type { AcceptedSnippet } from "@/lib/copilot/types";
+import { bumpVisitedYieldOnAgenda } from "@/lib/copilot/research-agenda";
 import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
+import {
+  buildCopilotPreferenceTask,
+  inferCopilotPreferenceCategory,
+  normalizePreferenceDomain,
+  normalizePreferenceUrl,
+} from "@/lib/copilot/preference-signals";
 
 const ACCEPT_DELTA = 0.10;
 const REJECT_DELTA = -0.10;
@@ -27,10 +36,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   if (!user) return withCopilotCors(req, NextResponse.json({ error: "Unauthorized" }, { status: 401 }));
 
   const body = (await req.json().catch(() => null)) as
-    | { suggestionEventId?: string; action?: "accept" | "reject" }
+    | { suggestionEventId?: string; action?: "accept" | "reject"; sourceUrl?: string }
     | null;
   const suggestionEventId = asString(body?.suggestionEventId);
   const action = body?.action === "accept" || body?.action === "reject" ? body.action : null;
+  const sourceUrl = normalizePreferenceUrl(asString(body?.sourceUrl));
   if (!suggestionEventId || !action) {
     return withCopilotCors(req, NextResponse.json({ error: "suggestionEventId and action are required" }, { status: 400 }));
   }
@@ -58,7 +68,15 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   const summary = asString(payload.summary).slice(0, 200) || "research suggestion";
   const snippet = asString(payload.snippet);
   const sourceLabel = asString(payload.source_label) || (suggestion.hostname ?? "screen");
-  const hostname = (suggestion.hostname || asString(payload.source_label) || "").toLowerCase() || null;
+  const hostname = normalizePreferenceDomain(sourceUrl) ?? normalizePreferenceDomain(suggestion.hostname) ?? null;
+  const focus = getAutoSteeringNote(session.metadata);
+  const category = inferCopilotPreferenceCategory({
+    summary,
+    snippet,
+    task: summary,
+    focus,
+    kind: asString(payload.kind),
+  });
 
   if (action === "accept") {
     if (!snippet) {
@@ -68,7 +86,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       text: snippet,
       source_label: sourceLabel,
       hostname: hostname,
-      source_url: null,
+      source_url: sourceUrl,
       accepted_at: new Date().toISOString(),
       suggestion_event_id: suggestion.id,
     };
@@ -81,10 +99,18 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
           kind: "accepted",
           hostname,
           parent_event_id: suggestion.id,
-          payload: { summary, snippet, source_label: sourceLabel },
+          payload: { summary, snippet, source_label: sourceLabel, source_url: sourceUrl },
         },
       }),
     ]);
+    if (sourceUrl) {
+      void mergeResearchAgenda({
+        admin,
+        sessionId,
+        userId: user.id,
+        transform: (a) => bumpVisitedYieldOnAgenda(a, { sourceUrls: [sourceUrl] }),
+      }).catch(() => {});
+    }
   } else {
     await insertCopilotEvent({
       admin,
@@ -93,7 +119,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         kind: "rejected",
         hostname,
         parent_event_id: suggestion.id,
-        payload: { summary, source_label: sourceLabel },
+        payload: { summary, source_label: sourceLabel, source_url: sourceUrl },
       },
     });
   }
@@ -107,11 +133,15 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       events: [
         {
           domain: hostname,
-          category: "general",
+          category,
           deltaPreferenceScore: action === "accept" ? ACCEPT_DELTA : REJECT_DELTA,
           deltaUsageCount: action === "accept" ? 1 : 0,
           reason: action === "accept" ? "Copilot snippet accepted by user." : "Copilot snippet rejected by user.",
-          task: summary,
+          task: buildCopilotPreferenceTask({
+            focus,
+            summary,
+            snippet,
+          }),
         },
       ],
     }).catch(() => {});

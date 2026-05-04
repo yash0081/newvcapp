@@ -209,6 +209,13 @@ type ResearchExecuteResponse = {
 };
 
 type WorkflowRunResponse = {
+  run?: {
+    id: string;
+    status: string;
+    workflowName?: string | null;
+    dealName?: string | null;
+    summary?: string;
+  };
   result?: {
     runId: string;
     summary: string;
@@ -1555,8 +1562,30 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
           body: JSON.stringify({ dealId: action.dealId, input: action.input }),
         });
         const json = (await res.json().catch(() => null)) as WorkflowRunResponse | null;
-        if (!res.ok || !json?.result) throw new Error(json?.error || `Failed (${res.status})`);
-        const stepLines = json.result.stepResults
+        if (!res.ok || (!json?.run && !json?.result)) throw new Error(json?.error || `Failed (${res.status})`);
+        if (json.run) {
+          const message: ChatMessage = {
+            id: newId(),
+            role: "assistant",
+            content: `Started ${action.workflowName}${action.dealName ? ` for ${action.dealName}` : ""}. It will keep running if you leave this page, and you can monitor it from Workflows.`,
+            actions: [
+              {
+                type: "open_link",
+                label: "Open workflow runs",
+                href: "/home/workflows",
+                detail: json.run.summary || "Running",
+              },
+            ],
+          };
+          clearTransientMessage();
+          setMessages((prev) => [...prev, message]);
+          void saveAssistantMessage(message, threadIdForSave);
+          markToolRun(runKey, { status: "done", label: action.label, detail: "Workflow started" });
+          return;
+        }
+        const result = json.result;
+        if (!result) throw new Error("Workflow did not return a run result.");
+        const stepLines = result.stepResults
           .map((step) => `${step.title} (${step.status}): ${compactResearchNotes(step.detail)}`)
           .join("\n");
         const message: ChatMessage = {
@@ -1564,10 +1593,10 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
           role: "assistant",
           content: [
             `Finished ${action.workflowName}${action.dealName ? ` for ${action.dealName}` : ""}.`,
-            json.result.summary ? `Summary:\n${json.result.summary}` : "",
+            result.summary ? `Summary:\n${result.summary}` : "",
             stepLines ? `Details:\n${stepLines}` : "",
           ].filter(Boolean).join("\n\n"),
-          actions: json.result.artifacts
+          actions: result.artifacts
             .filter((artifact) => artifact.href)
             .map((artifact) => ({
               type: "open_link",

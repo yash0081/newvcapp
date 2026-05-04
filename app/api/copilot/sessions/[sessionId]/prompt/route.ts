@@ -13,6 +13,7 @@ import { normalizeExtractedSnapshot } from "@/lib/copilot/extracted-snapshot";
 import { copilotPreflight, withCopilotCors } from "@/lib/copilot/cors";
 import { suggestionRepeatKey } from "@/lib/copilot/repeat-key";
 import type { Extracted, ExtractedKeyValue } from "@/lib/copilot/types";
+import { computeOpenGaps } from "@/lib/copilot/research-agenda";
 import { getUserSitePreferences } from "@/lib/research/preferences";
 
 function asCompanyName(meta: unknown): string {
@@ -165,6 +166,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   // Session metadata is the live source of truth for accepts (may be ahead of company_* until background sync).
   const sessionAcceptedSnippets = getSessionAcceptedSnippets(session.metadata);
   const visitedUrls = getVisitedUrls(session.metadata);
+  const openGaps = computeOpenGaps({
+    metadata: dealMeta,
+    recentClaims,
+    sessionAcceptedSnippets,
+  });
   const recentSuggestionKeys = (recentSuggestionsRes.data ?? [])
     .map((r) => {
       const payload = (r.payload ?? {}) as Record<string, unknown>;
@@ -187,7 +193,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         sessionAcceptedSnippets,
         recentSuggestionKeys,
         visitedUrls,
-        preferredHostnames: sitePrefs.preferred.map((p) => ({ domain: p.domain, score: p.preference_score, category: p.category })),
+        openGaps,
+        preferredHostnames: sitePrefs.preferred.map((p) => ({
+          domain: p.domain,
+          score: p.preference_score,
+          category: p.category,
+          focus_guidance: p.focus_guidance,
+        })),
         dislikedHostnames: sitePrefs.disliked.map((d) => d.domain),
       },
     });

@@ -182,19 +182,24 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const [autoDraft, setAutoDraft] = useState<AutoDraftSnippet[]>([]);
   const [showReview, setShowReview] = useState(false);
   const [reviewState, setReviewState] = useState<DraftReview>({});
-  /** Short sentence shown in Auto mode so long steps feel responsive (aria-live). */
+  /** Short responsive status sentence for long-running steps (aria-live). */
   const [researchActivity, setResearchActivity] = useState("Watching this page — updates will show here.");
   /** Re-runs auto planner after agent scroll (observe alone often doesn’t bump React deps). */
   const [postScrollPlannerKick, setPostScrollPlannerKick] = useState(0);
   const lastSnapshotRef = useRef<{ fingerprint: string; at: number } | null>(null);
   const analyzeAbortRef = useRef<AbortController | null>(null);
   const scrollKickTimerRef = useRef<number | null>(null);
+  const pendingNavTimerRef = useRef<number | null>(null);
   /** Count consecutive PLAN_NEXT scroll actions to avoid infinite scroll loops. */
   const agentScrollStreakRef = useRef(0);
   /** Last time /observe returned OK (drives idle auto-end). */
   const lastObserveSuccessAtRef = useRef<number>(Date.now());
   /** Mirrors `paused` for async loops / callbacks that can’t close over fresh state. */
   const pausedRef = useRef(false);
+  /** Mirrors `mode` for async loops / delayed navigation callbacks. */
+  const modeRef = useRef<CopilotMode>("manual");
+  /** Incremented whenever automation is interrupted so stale async work cannot mutate UI. */
+  const automationGenerationRef = useRef(0);
   const sessionRef = useRef<CopilotSession | null>(session);
   const autoSteeringDirtyRef = useRef(false);
   /** Ensures we merge chrome.storage steering draft once per active session id. */
@@ -209,6 +214,10 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     if (scrollKickTimerRef.current != null) {
       window.clearTimeout(scrollKickTimerRef.current);
       scrollKickTimerRef.current = null;
+    }
+    if (pendingNavTimerRef.current != null) {
+      window.clearTimeout(pendingNavTimerRef.current);
+      pendingNavTimerRef.current = null;
     }
   }, [sessionId]);
 
@@ -226,6 +235,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
 
   sessionRef.current = session;
   pausedRef.current = paused;
+  modeRef.current = mode;
   autoSteeringDirtyRef.current = autoSteeringDirty;
 
   useEffect(() => {
@@ -280,13 +290,21 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   /** Pause immediately cancels in-flight analyze noise and pending scroll-kick without waiting on UI locks. */
   useEffect(() => {
     if (!paused) return;
+    automationGenerationRef.current += 1;
     analyzeAbortRef.current?.abort();
     analyzeAbortRef.current = null;
     setBusy(null);
+    setPendingNav(null);
     if (scrollKickTimerRef.current != null) {
       window.clearTimeout(scrollKickTimerRef.current);
       scrollKickTimerRef.current = null;
     }
+    if (pendingNavTimerRef.current != null) {
+      window.clearTimeout(pendingNavTimerRef.current);
+      pendingNavTimerRef.current = null;
+    }
+    agentScrollStreakRef.current = 0;
+    setResearchActivity("Paused — resume when you're ready to continue.");
   }, [paused]);
 
   // Hydrate persisted preferences (autoMode) once on mount.
@@ -320,23 +338,53 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     }
   }, []);
 
+  const haltAutomation = useCallback((activity = "Paused — resume when you're ready to continue.", opts?: { pause?: boolean }) => {
+    automationGenerationRef.current += 1;
+    analyzeAbortRef.current?.abort();
+    analyzeAbortRef.current = null;
+    if (scrollKickTimerRef.current != null) {
+      window.clearTimeout(scrollKickTimerRef.current);
+      scrollKickTimerRef.current = null;
+    }
+    if (pendingNavTimerRef.current != null) {
+      window.clearTimeout(pendingNavTimerRef.current);
+      pendingNavTimerRef.current = null;
+    }
+    agentScrollStreakRef.current = 0;
+    if (opts?.pause) {
+      pausedRef.current = true;
+      setPausedState(true);
+    }
+    setPendingNav(null);
+    setBusy(null);
+    setResearchActivity(activity);
+  }, []);
+
   const setPaused = useCallback((next: boolean | ((prev: boolean) => boolean)) => {
-    setPausedState((prev) => {
-      const value = typeof next === "function" ? (next as (p: boolean) => boolean)(prev) : next;
-      persistPrefs(value, scope, mode);
-      return value;
-    });
-  }, [persistPrefs, scope, mode]);
+    const value = typeof next === "function" ? (next as (p: boolean) => boolean)(pausedRef.current) : next;
+    pausedRef.current = value;
+    persistPrefs(value, scope, modeRef.current);
+    if (value) {
+      haltAutomation("Paused — queued navigation and page analysis were stopped.", { pause: true });
+      return;
+    }
+    setPausedState(false);
+    setResearchActivity("Resuming on this page…");
+  }, [haltAutomation, persistPrefs, scope]);
 
   const setScope = useCallback((next: SnapshotScope) => {
     setScopeState(next);
-    persistPrefs(paused, next, mode);
-  }, [persistPrefs, paused, mode]);
+    persistPrefs(pausedRef.current, next, modeRef.current);
+  }, [persistPrefs]);
 
   const setMode = useCallback((next: CopilotMode) => {
+    modeRef.current = next;
+    if (next !== "auto") {
+      haltAutomation("Manual mode — auto navigation stopped.");
+    }
     setModeState(next);
-    persistPrefs(paused, scope, next);
-  }, [persistPrefs, paused, scope]);
+    persistPrefs(pausedRef.current, scope, next);
+  }, [haltAutomation, persistPrefs, scope]);
 
   // Listen for SESSION_STARTED broadcasts from popup → service worker → tabs.
   useEffect(() => {
@@ -358,6 +406,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         setInfo("Session started — watching this page.");
       }
       if (m.type === "SESSION_ENDED") {
+        haltAutomation("Session ended.");
         setSession(null);
         setSuggestions([]);
         setSnippets([]);
@@ -370,7 +419,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     };
     chrome.runtime.onMessage.addListener(handler);
     return () => chrome.runtime.onMessage.removeListener(handler);
-  }, []);
+  }, [haltAutomation]);
 
   const refreshSession = useCallback(async () => {
     try {
@@ -394,6 +443,18 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   useEffect(() => {
     void refreshSession();
   }, [refreshSession]);
+
+  /** If the page loaded before the service worker finished waking, retry active-session hydration briefly. */
+  useEffect(() => {
+    if (sessionId) return;
+    let attempts = 0;
+    const t = window.setInterval(() => {
+      attempts += 1;
+      void refreshSession();
+      if (attempts >= 10) window.clearInterval(t);
+    }, 1500);
+    return () => window.clearInterval(t);
+  }, [sessionId, refreshSession]);
 
   const startSessionForActiveDeal = useCallback(async () => {
     if (!activeDeal) {
@@ -445,8 +506,8 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     setBusy("Analyzing…");
     setError(null);
     try {
-      const res = await send<ObserveResponse>({ type: "OBSERVE", snapshot });
-      if (controller.signal.aborted) return;
+      const res = await send<ObserveResponse>({ type: "OBSERVE", snapshot, clientMode: modeRef.current });
+      if (controller.signal.aborted || pausedRef.current) return;
       lastSnapshotRef.current = { fingerprint: fp, at: Date.now() };
       setResearchActivity(observeFollowUpSentence(res.suggestions ?? []));
       setSuggestions((prev) => {
@@ -496,6 +557,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       if (timer != null) window.clearTimeout(timer);
       const ms = lastSnapshotRef.current ? ANALYZE_DEBOUNCE_MS : FIRST_ANALYZE_DEBOUNCE_MS;
       timer = window.setTimeout(() => {
+        if (pausedRef.current) return;
         analyzePage();
       }, ms);
     };
@@ -579,6 +641,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         type: "DECISION",
         suggestionEventId: sid,
         action,
+        sourceUrl: location.href,
       });
       void refreshSession();
       if (!opts?.silent) {
@@ -674,14 +737,18 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     if (!sessionId || paused || mode !== "auto" || busy) return;
     if (pendingNav) return;
     const run = async () => {
-      if (pausedRef.current) return;
+      const runGeneration = automationGenerationRef.current;
+      const stopped = () =>
+        pausedRef.current || modeRef.current !== "auto" || automationGenerationRef.current !== runGeneration;
+      if (stopped()) return;
       // Auto UI hides suggestion cards — resolve contradictions without asking (defer CRM truth; unblocks planner).
       const contradictRows = suggestions.filter((s) => s.kind === "contradicts" && s.event_id);
       if (contradictRows.length) {
         setResearchActivity("Untangling conflicting facts the model flagged…");
         for (const s of contradictRows) {
-          if (pausedRef.current) return;
+          if (stopped()) return;
           await decide(s, "reject", { silent: true });
+          if (stopped()) return;
         }
         return;
       }
@@ -695,7 +762,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       const draftKeys = new Set(autoDraft.map((sn) => suggestionKey({ summary: "", snippet: sn.text })));
       const textsForDedupe = [...autoDraft.map((sn) => sn.text), ...snippets.map((sn) => sn.text)];
       for (const s of autoAccept) {
-        if (pausedRef.current) return;
+        if (stopped()) return;
         const key = suggestionKey(s);
         if (draftKeys.has(key)) continue;
         if (isNearDuplicateDraftSnippet(s.snippet, textsForDedupe)) continue;
@@ -719,9 +786,10 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             from_suggestion_event_id: s.event_id ?? null,
           },
         });
+        if (stopped()) return;
         setSuggestions((prev) => prev.filter((x) => (x.event_id ?? x.client_id) !== (s.event_id ?? s.client_id)));
       }
-      if (pausedRef.current) return;
+      if (stopped()) return;
       const snapshot = extractDomSnapshot({ scope: effectiveScope });
       const copilotExploreLinks = suggestions
         .filter((s) => s.kind === "explore" && typeof s.link_url === "string" && s.link_url.trim())
@@ -751,7 +819,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         plan_page_context,
         ...(copilotExploreLinks.length ? { copilotExploreLinks } : {}),
       });
-      if (pausedRef.current) return;
+      if (stopped()) return;
       if (res.next.action === "scroll") {
         agentScrollStreakRef.current += 1;
         if (agentScrollStreakRef.current > 8) {
@@ -770,7 +838,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: "smooth" });
         scrollKickTimerRef.current = window.setTimeout(() => {
           scrollKickTimerRef.current = null;
-          if (pausedRef.current) return;
+          if (stopped()) return;
           setResearchActivity("Re-reading the page after scrolling…");
           void analyzePage();
           setPostScrollPlannerKick((k) => k + 1);
@@ -795,7 +863,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         );
         return;
       }
-      if (pausedRef.current) return;
+      if (stopped()) return;
       if (res.next.action === "navigate" && res.next.url) {
         const rationale = res.next.rationale?.trim();
         let host = "the next page";
@@ -833,14 +901,31 @@ export function Overlay({ activeDeal, initialSession }: Props) {
 
   useEffect(() => {
     if (!pendingNav || mode !== "auto" || paused) return;
-    const t = window.setTimeout(() => {
+    if (pendingNavTimerRef.current != null) {
+      window.clearTimeout(pendingNavTimerRef.current);
+      pendingNavTimerRef.current = null;
+    }
+    const navGeneration = automationGenerationRef.current;
+    pendingNavTimerRef.current = window.setTimeout(() => {
+      pendingNavTimerRef.current = null;
+      if (pausedRef.current || modeRef.current !== "auto" || automationGenerationRef.current !== navGeneration) return;
       window.location.assign(pendingNav.url);
     }, AGENT_NAV_COUNTDOWN_MS);
-    return () => window.clearTimeout(t);
+    return () => {
+      if (pendingNavTimerRef.current != null) {
+        window.clearTimeout(pendingNavTimerRef.current);
+        pendingNavTimerRef.current = null;
+      }
+    };
   }, [pendingNav, mode, paused]);
 
   useEffect(() => {
-    if (!session || mode !== "auto") setPendingNav(null);
+    if (session && mode === "auto") return;
+    setPendingNav(null);
+    if (pendingNavTimerRef.current != null) {
+      window.clearTimeout(pendingNavTimerRef.current);
+      pendingNavTimerRef.current = null;
+    }
   }, [session, mode]);
 
   const headerLabel = useMemo(() => {
@@ -954,25 +1039,17 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                   <span className="company-status-label">Researching</span>
                   <span className="company-status-name">{companyNameFromSession(session) || activeDeal?.name || "Selected company"}</span>
                 </div>
-                <div className="agent-banner">
-                  Auto mode — runs until you pause. No accept/reject prompts; use Manual for that.
-                </div>
-                <div className="agent-banner subtle">Full-page snapshot scope while auto runs.</div>
                 <div className="agent-banner agent-activity" role="status" aria-live="polite" aria-atomic="true">
                   {researchActivity}
                 </div>
                 <div className="card" style={{ marginBottom: 10 }}>
                   <div className="label" style={{ marginTop: 0 }}>
-                    Steer auto research
-                  </div>
-                  <div className="deal-line" style={{ margin: "0 0 8px" }}>
-                    Short note on what to prioritize (e.g. company geography, HQ, funding). Applies after you save.
-                    Site preferences with a matching category are favored when choosing links.
+                    Focus
                   </div>
                   <textarea
                     className="prompt-input"
                     rows={2}
-                    placeholder="e.g. Focus on where they’re based and office locations"
+                    placeholder="HQ, funding, team, competitors…"
                     value={autoSteeringDraft}
                     onChange={(e) => {
                       setAutoSteeringDraft(e.target.value);
@@ -1046,6 +1123,14 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                       suggestion={s}
                       onDecide={decide}
                       onOpenLink={(sg) => {
+                        void send({
+                          type: "PREFERENCE_SIGNAL",
+                          action: "open_link",
+                          url: sg.link_url ?? undefined,
+                          task: sg.summary,
+                          summary: sg.summary,
+                          snippet: sg.snippet,
+                        }).catch(() => {});
                         if (sg.link_url) window.open(sg.link_url, "_blank", "noopener,noreferrer");
                         setSuggestions((prev) => prev.filter((x) => (x.event_id ?? x.client_id) !== (sg.event_id ?? sg.client_id)));
                       }}
@@ -1139,35 +1224,69 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                   <div className="row">
                     <button
                       className="btn primary"
+                      disabled={busy === "Ending…"}
                       onClick={async () => {
-                        for (const sn of autoDraft) {
-                          const edited = reviewState[sn.id];
-                          if (!edited) continue;
-                          if (!edited.checked) {
-                            await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "remove", id: sn.id });
-                            continue;
+                        haltAutomation("Ending session — saving reviewed facts first.", { pause: true });
+                        setBusy("Ending…");
+                        setError(null);
+                        try {
+                          for (const sn of autoDraft) {
+                            const edited = reviewState[sn.id];
+                            if (!edited) continue;
+                            if (!edited.checked) {
+                              await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "remove", id: sn.id });
+                              continue;
+                            }
+                            if (edited.text.trim() && edited.text.trim() !== sn.text) {
+                              await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "edit", id: sn.id, text: edited.text.trim() });
+                            }
                           }
-                          if (edited.text.trim() && edited.text.trim() !== sn.text) {
-                            await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "edit", id: sn.id, text: edited.text.trim() });
-                          }
+                          await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "approve" });
+                          await send({ type: "END_SESSION" });
+                          setShowReview(false);
+                          setReviewState({});
+                          setSession(null);
+                          setSuggestions([]);
+                          setSnippets([]);
+                          setAutoDraft([]);
+                          pausedRef.current = false;
+                          setPausedState(false);
+                          setMode("manual");
+                          setInfo("Approved auto draft and ended session.");
+                        } catch (e) {
+                          setError((e as Error).message);
+                        } finally {
+                          setBusy(null);
                         }
-                        await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "approve" });
-                        await send({ type: "END_SESSION" });
-                        setShowReview(false);
-                        setMode("manual");
-                        setInfo("Approved auto draft and ended session.");
                       }}
                     >
-                      Approve & End
+                      {busy === "Ending…" ? "Ending…" : "Approve & End"}
                     </button>
                     <button
                       className="btn ghost"
+                      disabled={busy === "Ending…"}
                       onClick={async () => {
-                        await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "discard" });
-                        await send({ type: "END_SESSION" });
-                        setShowReview(false);
-                        setMode("manual");
-                        setInfo("Discarded auto draft and ended session.");
+                        haltAutomation("Ending session — discarding draft.", { pause: true });
+                        setBusy("Ending…");
+                        setError(null);
+                        try {
+                          await autoDraftOp({ type: "AUTO_DRAFT_OP", op: "discard" });
+                          await send({ type: "END_SESSION" });
+                          setShowReview(false);
+                          setReviewState({});
+                          setSession(null);
+                          setSuggestions([]);
+                          setSnippets([]);
+                          setAutoDraft([]);
+                          pausedRef.current = false;
+                          setPausedState(false);
+                          setMode("manual");
+                          setInfo("Discarded auto draft and ended session.");
+                        } catch (e) {
+                          setError((e as Error).message);
+                        } finally {
+                          setBusy(null);
+                        }
                       }}
                     >
                       Discard & End
@@ -1184,7 +1303,6 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                 className="btn"
                 type="button"
                 onClick={() => {
-                  if (!paused) setPendingNav(null);
                   setPaused((v) => !v);
                 }}
               >
@@ -1199,12 +1317,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                 <button
                   className="btn"
                   onClick={() => {
+                    haltAutomation("Reviewing saved facts — auto navigation stopped.", { pause: true });
                     const next: DraftReview = {};
                     for (const sn of autoDraft) next[sn.id] = { checked: true, text: sn.text };
                     setReviewState(next);
                     setShowReview(true);
                   }}
-                  disabled={!!busy}
                 >
                   End & Review
                 </button>

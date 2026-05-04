@@ -21,8 +21,10 @@ export default defineConfig({
   },
   server: {
     // crxjs picks a random port by default; pin to keep extension reload friendly.
+    // HMR is also pinned, so fail loudly instead of falling back to a second port
+    // and creating a 5175 page / 5174 websocket mismatch.
     port: 5174,
-    strictPort: false,
+    strictPort: true,
     hmr: { port: 5174 },
   },
 });

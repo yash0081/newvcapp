@@ -1,5 +1,10 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light;
+  --vc-ink: #18181b;
+  --vc-muted: #71717a;
+  --vc-line: #e4e4e7;
+  --vc-soft: #f4f4f5;
+  --vc-soft-2: #fafafa;
 }
 
 * {
@@ -8,134 +13,183 @@
 
 body {
   margin: 0;
-  width: 320px;
+  width: 340px;
   font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
     -apple-system,
     BlinkMacSystemFont,
     "Segoe UI",
-    Roboto,
-    Oxygen,
-    Ubuntu,
     sans-serif;
-  background: #18181b;
-  color: #f4f4f5;
+  background: #ffffff;
+  color: var(--vc-ink);
   font-size: 13px;
+}
+
+button {
+  font: inherit;
 }
 
 .popup {
-  padding: 12px;
+  padding: 14px;
 }
 
 .title {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 800;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   margin-bottom: 12px;
 }
 
 .subtitle {
-  font-size: 11px;
-  color: #a1a1aa;
-  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #52525b;
+  margin-bottom: 10px;
 }
 
 .deal-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-height: 280px;
+  gap: 7px;
+  max-height: 284px;
   overflow-y: auto;
+  padding-right: 2px;
+}
+
+.deal-list::-webkit-scrollbar {
+  width: 9px;
+}
+
+.deal-list::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border: 3px solid #ffffff;
+  border-radius: 999px;
 }
 
 .deal {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 1px solid var(--vc-line);
+  background: #ffffff;
+  border-radius: 18px;
+  padding: 10px 12px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  text-align: left;
+  color: var(--vc-ink);
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04);
 }
 
 .deal:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--vc-soft-2);
+  border-color: #d4d4d8;
 }
 
 .deal.selected {
-  border-color: #6366f1;
-  background: rgba(99, 102, 241, 0.1);
+  border-color: #18181b;
+  background: var(--vc-soft);
+  box-shadow: inset 0 0 0 1px #18181b;
 }
 
 .deal-name {
-  font-weight: 600;
+  font-weight: 750;
 }
 
 .deal-meta {
   font-size: 11px;
-  color: #71717a;
+  color: var(--vc-muted);
 }
 
 .banner {
-  font-size: 11px;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(244, 63, 94, 0.1);
-  color: #fda4af;
-  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 9px 10px;
+  border-radius: 16px;
+  background: rgba(225, 29, 72, 0.06);
+  border: 1px solid rgba(225, 29, 72, 0.16);
+  color: #be123c;
+  margin-bottom: 10px;
 }
 
 .banner.info {
-  background: rgba(99, 102, 241, 0.1);
-  color: #c7d2fe;
+  background: rgba(37, 99, 235, 0.06);
+  border-color: rgba(37, 99, 235, 0.16);
+  color: #1d4ed8;
 }
 
 .actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   margin-top: 12px;
 }
 
 .btn {
   flex: 1;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #f4f4f5;
-  padding: 8px 10px;
-  border-radius: 6px;
+  min-height: 38px;
+  background: #ffffff;
+  border: 1px solid var(--vc-line);
+  color: #3f3f46;
+  padding: 8px 12px;
+  border-radius: 999px;
   cursor: pointer;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 750;
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--vc-soft);
+  border-color: #d4d4d8;
+  color: var(--vc-ink);
 }
 
 .btn.primary {
-  background: #6366f1;
-  border-color: #6366f1;
+  background: #18181b;
+  border-color: #18181b;
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(24, 24, 27, 0.14);
 }
 
-.btn.primary:hover {
-  background: #4f46e5;
+.btn.primary:hover:not(:disabled) {
+  background: #27272a;
 }
 
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .notice {
   text-align: center;
-  color: #a1a1aa;
-  padding: 16px 0;
+  color: var(--vc-muted);
+  padding: 18px 8px;
+  border: 1px solid var(--vc-line);
+  border-radius: 18px;
+  background: var(--vc-soft-2);
 }
 
 .link {
-  color: #c7d2fe;
-  text-decoration: underline;
+  color: #52525b;
   cursor: pointer;
-  background: none;
-  border: none;
+  background: var(--vc-soft);
+  border: 1px solid var(--vc-line);
+  border-radius: 999px;
+  width: 30px;
+  height: 30px;
   padding: 0;
-  font-size: inherit;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.link:hover {
+  color: var(--vc-ink);
+  background: #ffffff;
 }

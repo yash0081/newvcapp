@@ -118,12 +118,16 @@ function normalizeCopilotExploreLinks(v: unknown): Array<{ url: string; text: st
 }
 
 function buildPreferencesSummary(args: {
-  preferred: Array<{ domain: string; category?: string; preference_score: number }>;
+  preferred: Array<{ domain: string; category?: string; preference_score: number; focus_guidance?: string }>;
   disliked: Array<{ domain: string }>;
 }): string {
   const top = args.preferred
     .slice(0, 8)
-    .map((p) => (p.category ? `${p.domain} (${p.category})` : p.domain))
+    .map((p) => {
+      const category = p.category ? p.category : "general";
+      const guidance = p.focus_guidance ? `: ${p.focus_guidance.slice(0, 90)}` : "";
+      return `${p.domain} (${category}${guidance})`;
+    })
     .join(", ");
   const dis = args.disliked.slice(0, 6).map((d) => d.domain).join(", ");
   const parts: string[] = [];
@@ -229,6 +233,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       domain: p.domain,
       category: p.category,
       preference_score: p.preference_score,
+      focus_guidance: p.focus_guidance,
     })),
     disliked: sitePrefs.disliked.map((d) => ({ domain: d.domain })),
   });

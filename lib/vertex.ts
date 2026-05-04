@@ -214,6 +214,63 @@ export async function vertexRunWithText(
   throw new Error("Empty Vertex AI response (no usable JSON-ish text found)");
 }
 
+export type VertexGroundingSource = {
+  title: string;
+  uri: string;
+};
+
+export async function vertexRunWithTextAndGroundingSources(
+  modelName: string,
+  fullPrompt: string,
+  includeGoogleSearch = true
+): Promise<{ text: string; sources: VertexGroundingSource[] }> {
+  const model = getVertexModel(modelName);
+  const useGrounding = resolveUseGrounding(includeGoogleSearch);
+  const result = await model.generateContent({
+    contents: [
+      {
+        role: "user" as const,
+        parts: [{ text: fullPrompt }],
+      },
+    ],
+    ...(useGrounding ? { tools: groundingTools() } : {}),
+  });
+
+  const candidates = ((result as { response?: { candidates?: unknown[]; text?: unknown } })?.response?.candidates ?? []) as Array<{
+    content?: { parts?: unknown[] };
+    groundingMetadata?: {
+      groundingChunks?: Array<{ web?: { uri?: unknown; title?: unknown } }>;
+    };
+  }>;
+  const candidateTexts: string[] = [];
+  const sources: VertexGroundingSource[] = [];
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    const parts = c?.content?.parts ?? [];
+    for (const p of parts) {
+      const t = (p as { text?: unknown }).text;
+      if (typeof t === "string" && t.trim()) candidateTexts.push(t.trim());
+    }
+    for (const chunk of c.groundingMetadata?.groundingChunks ?? []) {
+      const uri = typeof chunk.web?.uri === "string" ? chunk.web.uri.trim() : "";
+      if (!uri || seen.has(uri)) continue;
+      seen.add(uri);
+      const title = typeof chunk.web?.title === "string" && chunk.web.title.trim()
+        ? chunk.web.title.trim()
+        : uri;
+      sources.push({ title, uri });
+    }
+  }
+
+  const directText =
+    typeof (result as { response?: { text?: unknown } }).response?.text === "string"
+      ? ((result as { response: { text: string } }).response.text as string).trim()
+      : "";
+  const text = (candidateTexts[0] || directText).trim();
+  if (!text) throw new Error("Empty Vertex AI response (no usable grounded text found)");
+  return { text, sources };
+}
+
 export async function vertexRunWithTextMulti(
   modelName: string,
   prompt: string,
