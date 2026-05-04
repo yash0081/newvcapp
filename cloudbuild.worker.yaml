@@ -13,6 +13,11 @@ steps:
       - ${_IMAGE}
       - .
 
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_IMAGE}
+
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
@@ -26,13 +31,12 @@ steps:
       - --platform
       - managed
       - --no-allow-unauthenticated
+      - --port
+      - "8080"
       - --min-instances
       - "1"
       - --max-instances
       - "2"
-
-images:
-  - ${_IMAGE}
 
 options:
   logging: CLOUD_LOGGING_ONLY

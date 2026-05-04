@@ -2,11 +2,15 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# Install including devDependencies: `tsx` and `dotenv` are required to run the worker script
+# but live under devDependencies; NODE_ENV=production would make plain `npm ci` omit them.
 ENV NODE_ENV=production
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY . .
+
+EXPOSE 8080
 
 CMD ["npm", "run", "deal-intel:bg-worker"]
