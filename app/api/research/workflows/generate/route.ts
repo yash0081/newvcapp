@@ -18,10 +18,10 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as { dealId?: string; focus?: string; peerDealIds?: unknown; peerDealNames?: unknown } | null;
   const dealId = typeof body?.dealId === "string" ? body.dealId : "";
   const focus = typeof body?.focus === "string" ? body.focus.trim().slice(0, 1800) : "";
-  const peerDealIds = Array.isArray(body?.peerDealIds)
+  let peerDealIds = Array.isArray(body?.peerDealIds)
     ? body.peerDealIds.filter((id): id is string => typeof id === "string" && id !== dealId).slice(0, 8)
     : [];
-  const peerDealNames = Array.isArray(body?.peerDealNames)
+  let peerDealNames = Array.isArray(body?.peerDealNames)
     ? body.peerDealNames.filter((name): name is string => typeof name === "string").slice(0, 8)
     : [];
   if (!dealId) return NextResponse.json({ error: "dealId is required" }, { status: 400 });
@@ -33,6 +33,28 @@ export async function POST(req: Request) {
   const admin = createAdminClient();
   const meta = (deal.metadata && typeof deal.metadata === "object" ? deal.metadata : {}) as Record<string, unknown>;
   const companyName = typeof meta.company_name === "string" ? meta.company_name : "Company";
+
+  if (peerDealIds.length) {
+    const peers = await admin
+      .schema("deal_intel")
+      .from("deal")
+      .select("id, metadata")
+      .eq("user_id", user.id)
+      .in("id", peerDealIds);
+    if (peers.error) return NextResponse.json({ error: peers.error.message }, { status: 500 });
+    const peerRows = peers.data ?? [];
+    const allowed = new Set(peerRows.map((peer) => String(peer.id)));
+    peerDealIds = peerDealIds.filter((id) => allowed.has(id));
+    peerDealNames = peerRows
+      .filter((peer) => peerDealIds.includes(String(peer.id)))
+      .map((peer) => {
+        const peerMeta = peer.metadata && typeof peer.metadata === "object" ? (peer.metadata as Record<string, unknown>) : {};
+        return typeof peerMeta.company_name === "string" && peerMeta.company_name.trim() ? peerMeta.company_name.trim() : "Peer company";
+      });
+  } else {
+    peerDealNames = [];
+  }
+
   const internalContext = await loadResearchInternalContext({
     admin,
     userId: user.id,

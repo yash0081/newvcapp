@@ -1,4 +1,5 @@
 import { GoogleSignInButton } from "@/components/google-sign-in-button";
+import { UsernamePasswordAuth } from "@/components/auth/username-password-auth";
 
 export default function Home() {
   return (
@@ -31,6 +32,14 @@ export default function Home() {
                 Continue to your investment workspace.
               </p>
               <div className="mt-6">
+                <UsernamePasswordAuth />
+              </div>
+              <div className="my-5 flex items-center gap-3">
+                <div className="h-px flex-1 bg-zinc-200" />
+                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">or</span>
+                <div className="h-px flex-1 bg-zinc-200" />
+              </div>
+              <div>
                 <GoogleSignInButton />
               </div>
             </div>

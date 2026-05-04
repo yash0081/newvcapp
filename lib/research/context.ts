@@ -4,7 +4,7 @@ import { vectorParam } from "@/lib/data-layer/shared/vector";
 import { retrieveContextNodesForQuery } from "@/lib/retrieval-orchestrator";
 import { stripMarkdownText } from "@/lib/plain-text";
 
-type DealLite = { id: string; metadata: Record<string, unknown> | null };
+type DealLite = { id: string; metadata: Record<string, unknown> | null; user_id?: string | null };
 type TractionLite = { deal_id: string; investor_list: string[] | null; money_raised_per_stage: string[] | null };
 
 function safeRecord(v: unknown): Record<string, unknown> {
@@ -25,10 +25,12 @@ function asTextBlock(label: string, value: unknown, max = 4000): string {
   return body ? `${label}\n${body.slice(0, max)}` : "";
 }
 
-async function loadRelationalSnapshot(admin: SupabaseClient, dealId: string): Promise<Record<string, unknown>> {
+async function loadRelationalSnapshot(admin: SupabaseClient, userId: string, dealId: string): Promise<Record<string, unknown>> {
   const di = admin.schema("deal_intel");
-  const [deal, makeup, origin, problem, solution, traction, negative, people] = await Promise.all([
-    di.from("deal").select("id, metadata").eq("id", dealId).maybeSingle(),
+  const dealRes = await di.from("deal").select("id, metadata").eq("id", dealId).eq("user_id", userId).maybeSingle();
+  if (dealRes.error || !dealRes.data) return {};
+
+  const [makeup, origin, problem, solution, traction, negative, people] = await Promise.all([
     di.from("company_makeup").select("*").eq("deal_id", dealId).order("updated_at", { ascending: false }).limit(1).maybeSingle(),
     di.from("company_origin_story").select("*").eq("deal_id", dealId).order("updated_at", { ascending: false }).limit(1).maybeSingle(),
     di.from("company_problem").select("*").eq("deal_id", dealId).order("updated_at", { ascending: false }).limit(1).maybeSingle(),
@@ -44,7 +46,7 @@ async function loadRelationalSnapshot(admin: SupabaseClient, dealId: string): Pr
   ]);
 
   return {
-    deal: deal.data ?? null,
+    deal: dealRes.data ?? null,
     company_makeup: makeup.data ?? null,
     company_origin_story: origin.data ?? null,
     company_problem: problem.data ?? null,
@@ -134,17 +136,21 @@ async function loadDocumentContext(args: {
 
 async function loadPeerInvestorSignals(args: {
   admin: SupabaseClient;
+  userId: string;
   dealId: string;
   peerDealIds: string[];
 }): Promise<string> {
   const ids = Array.from(new Set([args.dealId, ...args.peerDealIds])).filter(Boolean).slice(0, 8);
   if (ids.length < 2) return "";
   const di = args.admin.schema("deal_intel");
-  const [dealsRes, tractionRes] = await Promise.all([
-    di.from("deal").select("id, metadata").in("id", ids),
-    di.from("company_traction").select("deal_id, investor_list, money_raised_per_stage").in("deal_id", ids),
-  ]);
+  const dealsRes = await di.from("deal").select("id, metadata, user_id").eq("user_id", args.userId).in("id", ids);
+  if (dealsRes.error) return "";
   const deals = (dealsRes.data ?? []) as DealLite[];
+  const allowedIds = deals.map((deal) => deal.id);
+  if (!allowedIds.includes(args.dealId) || allowedIds.length < 2) return "";
+
+  const tractionRes = await di.from("company_traction").select("deal_id, investor_list, money_raised_per_stage").in("deal_id", allowedIds);
+  if (tractionRes.error) return "";
   const traction = (tractionRes.data ?? []) as TractionLite[];
   const nameByDeal = new Map(deals.map((deal) => [deal.id, companyNameFromMeta(deal.metadata)]));
   const investorsByDeal = new Map<string, Map<string, string>>();
@@ -160,6 +166,7 @@ async function loadPeerInvestorSignals(args: {
   if (!current?.size) return "";
   const lines: string[] = [];
   for (const peerId of args.peerDealIds) {
+    if (!allowedIds.includes(peerId)) continue;
     const peer = investorsByDeal.get(peerId);
     if (!peer?.size) continue;
     const overlap = Array.from(current.keys()).filter((key) => peer.has(key));
@@ -179,10 +186,10 @@ export async function loadResearchInternalContext(args: {
   mode?: "planning" | "execution";
 }): Promise<string> {
   const [snapshot, tree, docs, investorSignals] = await Promise.all([
-    loadRelationalSnapshot(args.admin, args.dealId).catch(() => ({})),
+    loadRelationalSnapshot(args.admin, args.userId, args.dealId).catch(() => ({})),
     loadTreeContext({ admin: args.admin, userId: args.userId, dealId: args.dealId, query: args.query, limit: args.mode === "planning" ? 6 : 10 }),
     loadDocumentContext({ admin: args.admin, userId: args.userId, dealId: args.dealId, query: args.query, limit: args.mode === "planning" ? 4 : 8 }),
-    loadPeerInvestorSignals({ admin: args.admin, dealId: args.dealId, peerDealIds: args.peerDealIds ?? [] }).catch(() => ""),
+    loadPeerInvestorSignals({ admin: args.admin, userId: args.userId, dealId: args.dealId, peerDealIds: args.peerDealIds ?? [] }).catch(() => ""),
   ]);
 
   const sections = [
@@ -194,4 +201,3 @@ export async function loadResearchInternalContext(args: {
 
   return sections.join("\n\n").slice(0, args.mode === "planning" ? 11000 : 18000);
 }
-

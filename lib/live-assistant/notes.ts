@@ -265,7 +265,7 @@ export async function runMeetingNotesTick(admin: SupabaseClient, args: { meeting
       b = { ...b, claim_ids: knownIds };
 
       const haystack = haystackForClaimIds(b.claim_ids);
-      let grounded =
+      const grounded =
         mode === "extractive"
           ? validateAndRepairBullet(b.text, haystack)
           : softGroundMemoBullet(b.text, haystack);
@@ -406,4 +406,3 @@ export async function runMeetingNotesTick(admin: SupabaseClient, args: { meeting
   // Background refinement (gated, slow-ish, optional).
   await maybeRefineMeetingNotes(admin, args.meetingId);
 }
-

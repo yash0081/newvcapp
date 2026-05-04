@@ -88,7 +88,6 @@ export function narrowChunkContextForClaim(chunkText: string, claimText: string,
  * or mention competitors when the source never does.
  */
 export function competitiveMemoLexiconGrounded(bulletText: string, haystack: string): boolean {
-  const h = haystack.toLowerCase();
   const competitiveBullet =
     /\b(competitor|competitors|competition|competitive|compete|competing|versus)\b/i.test(bulletText) ||
     /\bvs\.?\s+[a-z]/i.test(bulletText);

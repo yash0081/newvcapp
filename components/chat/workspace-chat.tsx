@@ -746,7 +746,17 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         messages?: ChatMessage[];
         error?: string;
       };
-      if (!res.ok) throw new Error(data.error || "Failed to load chat");
+      if (!res.ok) {
+        if (res.status === 404) {
+          if (typeof window !== "undefined") window.localStorage.removeItem("workspace-chat-active-thread-id");
+          setActiveThreadId(null);
+          setMessages([]);
+          setDealId("");
+          setThreads((prev) => prev.filter((thread) => thread.id !== threadId));
+          return;
+        }
+        throw new Error(data.error || "Failed to load chat");
+      }
       setActiveThreadId(threadId);
       setMessages((data.messages ?? []).map((message) => ({
         ...message,

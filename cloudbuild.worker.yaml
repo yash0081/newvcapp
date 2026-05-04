@@ -1,0 +1,15 @@
+substitutions:
+  _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/workroom/workroom-bg-worker:latest
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.worker
+      - -t
+      - ${_IMAGE}
+      - .
+
+images:
+  - ${_IMAGE}

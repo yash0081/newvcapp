@@ -303,10 +303,12 @@ async function fetchAssumptionRagSnippets(
   const nameById = new Map(
     (deals ?? []).map((d) => [d.id as string, String(d.company_name ?? "Unknown")])
   );
+  const allowedPeerDealIds = Array.from(nameById.keys());
+  if (allowedPeerDealIds.length === 0) return [];
   const { data: assRows } = await admin
     .from("deal_pipeline_json_core_assumptions")
     .select("deal_id, core_assumption_json")
-    .in("deal_id", peerDealIds);
+    .in("deal_id", allowedPeerDealIds);
   const out: Array<{ company_name: string; excerpt: string }> = [];
   for (const row of assRows ?? []) {
     const did = row.deal_id as string;
@@ -1291,4 +1293,3 @@ export async function runDealSourcingPipeline(
     retrieval_embeddings_json: retrievalEmbeddings,
   };
 }
-
