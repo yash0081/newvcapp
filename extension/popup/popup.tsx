@@ -129,7 +129,7 @@ function PopupApp() {
   if (loading) {
     return (
       <div className="popup">
-        <div className="title">VCApp research copilot</div>
+        <div className="title">Investora Labs research copilot</div>
         <div className="notice">Loading…</div>
       </div>
     );
@@ -138,8 +138,8 @@ function PopupApp() {
   if (needsAuth) {
     return (
       <div className="popup">
-        <div className="title">VCApp research copilot</div>
-        <div className="banner">Sign in at the VCApp tab to enable the copilot.</div>
+        <div className="title">Investora Labs research copilot</div>
+        <div className="banner">Sign in at the Investora Labs tab to enable the copilot.</div>
         <div className="actions">
           <button className="btn primary" onClick={() => openApp("/")}>
             Open {new URL(APP_ORIGIN).host}
@@ -152,7 +152,7 @@ function PopupApp() {
   return (
     <div className="popup">
       <div className="title">
-        <span>VCApp research copilot</span>
+        <span>Investora Labs research copilot</span>
         <button
           className="link"
           onClick={refresh}
@@ -173,7 +173,7 @@ function PopupApp() {
       <div className="subtitle">
         {activeDeal ? (
           <>
-            Defaulting to <strong>{activeDeal.name}</strong> from your VCApp tab.
+            Defaulting to <strong>{activeDeal.name}</strong> from your Investora Labs tab.
           </>
         ) : (
           <>Pick a deal to attach observations to.</>
@@ -181,7 +181,7 @@ function PopupApp() {
       </div>
 
       {deals.length === 0 ? (
-        <div className="notice">No deals yet. Create one in VCApp.</div>
+        <div className="notice">No deals yet. Create one in Investora Labs.</div>
       ) : (
         <div className="deal-list">
           {deals.map((deal) => {
@@ -195,7 +195,7 @@ function PopupApp() {
               >
                 <span className="deal-name">{deal.company_name}</span>
                 <span className="deal-meta">
-                  {isActive ? "open in VCApp tab • " : ""}
+                  {isActive ? "open in Investora Labs tab • " : ""}
                   updated {new Date(deal.updated_at).toLocaleDateString()}
                 </span>
               </button>

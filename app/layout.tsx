@@ -2,8 +2,11 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Investment Deep Research Engine",
-  description: "",
+  title: {
+    default: "Investora Labs",
+    template: "%s · Investora Labs",
+  },
+  description: "Investora Labs — investment research and workflow workspace.",
 };
 
 export default async function RootLayout({

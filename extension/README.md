@@ -1,6 +1,6 @@
-# VCApp research copilot — Chrome extension
+# Investora Labs research copilot — Chrome extension
 
-This is a Manifest V3 Chrome extension that overlays the VCApp research copilot directly on the page you're researching. It reads the current tab's DOM (no screenshots), sends it to your existing `/api/copilot/*` endpoints, and renders suggestions, a prompt bar, and a snippet buffer in a shadow-DOM panel that can't bleed into the host page's CSS.
+This is a Manifest V3 Chrome extension that overlays the Investora Labs research copilot directly on the page you're researching. It reads the current tab's DOM (no screenshots), sends it to your existing `/api/copilot/*` endpoints, and renders suggestions, a prompt bar, and a snippet buffer in a shadow-DOM panel that can't bleed into the host page's CSS.
 
 It is a separate package from the Next.js app and is **not** bundled with `next build`.
 
@@ -79,7 +79,7 @@ When you visit `/home/deal-intel/<id>` in the Next.js app, the page sets a non-H
 ## What "done" looks like
 
 - Install the unpacked extension; click its icon while on a third-party site (e.g. linkedin.com).
-- The popup lists your recent deals; the deal you're viewing in your VCApp tab is highlighted.
+- The popup lists your recent deals; the deal you're viewing in your Investora Labs tab is highlighted.
 - Click **Start session** in the popup, or **Start session here** in the on-page overlay.
 - An overlay appears top-right of the tab. Click **Analyze this page** — within a few seconds, suggestion cards appear inside the overlay.
 - Accept one — it appears under **Saved**.
@@ -91,7 +91,7 @@ When you visit `/home/deal-intel/<id>` in the Next.js app, the page sets a non-H
 - Snapshot text is capped to 5,000 chars before being sent.
 - The service worker enforces "max 1 observe in flight per session" and a 4 s minimum spacing between observations.
 - Common secrets-shaped lines (`password`, `otp`, `api key`, etc.) are dropped client-side before send.
-- The content script is excluded from the VCApp domain so the overlay never reads your own CRM pages.
+- The content script is excluded from the Investora Labs app domain so the overlay never reads your own CRM pages.
 
 ## Out of scope (MVP)
 

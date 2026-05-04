@@ -458,7 +458,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
 
   const startSessionForActiveDeal = useCallback(async () => {
     if (!activeDeal) {
-      setError("Open a deal in the VCApp tab to start a session.");
+      setError("Open a deal in the Investora Labs tab to start a session.");
       return;
     }
     setBusy("Starting session…");
@@ -932,7 +932,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     const sessionCompany = companyNameFromSession(session);
     if (session) return `${sessionCompany || activeDeal?.name || "Selected company"} • researching`;
     if (activeDeal) return `${activeDeal.name} • idle`;
-    return "VCApp copilot";
+    return "Investora Labs copilot";
   }, [session, activeDeal]);
 
   // Drag the header.

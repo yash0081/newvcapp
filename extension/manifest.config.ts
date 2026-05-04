@@ -7,10 +7,10 @@ const APP_HOST_MATCH = `${APP_ORIGIN}/*`;
 
 export default defineManifest({
   manifest_version: 3,
-  name: "VCApp research copilot",
+  name: "Investora Labs — research copilot",
   version: "0.1.0",
   description:
-    "Reads the current page's text and surfaces deal-relevant suggestions for VCApp research workflows.",
+    "Reads the current page's text and surfaces deal-relevant suggestions for Investora Labs research workflows.",
   permissions: ["storage", "activeTab", "cookies", "scripting"],
   host_permissions: [APP_HOST_MATCH, "https://*/*", "http://localhost/*"],
   background: {
@@ -19,7 +19,7 @@ export default defineManifest({
   },
   action: {
     default_popup: "popup/popup.html",
-    default_title: "VCApp research copilot",
+    default_title: "Investora Labs research copilot",
   },
   externally_connectable: {
     matches: [APP_HOST_MATCH],

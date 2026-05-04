@@ -2,7 +2,7 @@
   "name": "vcapp-research-copilot-extension",
   "version": "0.1.0",
   "private": true,
-  "description": "Chrome MV3 extension that overlays the VCApp research copilot on the page being researched.",
+  "description": "Chrome MV3 extension that overlays the Investora Labs research copilot on the page being researched.",
   "type": "module",
   "scripts": {
     "dev": "vite",

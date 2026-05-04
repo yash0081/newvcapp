@@ -74,7 +74,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
     }
     const sendMessage = window.chrome?.runtime?.sendMessage;
     if (!sendMessage) {
-      setCopilotError("Open the VCApp copilot extension from Chrome's toolbar.");
+      setCopilotError("Open the Investora Labs copilot extension from Chrome's toolbar.");
       return;
     }
     setOpeningCopilot(true);
@@ -99,7 +99,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
             href="/home/deals"
             className="flex h-9 shrink-0 items-center rounded-full border border-zinc-200 bg-white px-4 text-[13px] font-semibold tracking-tight text-zinc-950 shadow-sm"
           >
-            Workroom
+            Investora Labs
           </Link>
           <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
             {nav.map((item) => {

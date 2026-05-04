@@ -7,7 +7,7 @@ export default function Home() {
       <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-6">
         <header className="flex items-center justify-between">
           <div className="inline-flex h-11 items-center rounded-full border border-zinc-200 bg-white px-4 text-sm font-semibold shadow-sm">
-            Workroom
+            Investora Labs
           </div>
           <p className="hidden text-sm font-medium text-zinc-500 sm:block">Investment workflow automation</p>
         </header>
