@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "livekit-worker": "tsx scripts/livekit-transcription-worker.ts",
+    "live-assistant-server": "tsx scripts/live-assistant-server.ts",
     "deal-intel:bg-worker": "tsx scripts/deal-intel-bg-worker.ts",
     "backfill-embeddings": "tsx scripts/backfill-deal-embeddings.ts",
     "backfill-retrieval-profile": "tsx scripts/backfill-retrieval-profile.ts",

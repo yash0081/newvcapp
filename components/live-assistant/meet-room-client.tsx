@@ -470,7 +470,9 @@ function AssistantControlPanel(props: { meetingId: string }) {
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-medium text-zinc-900">Live assistant</p>
-          <p className="text-xs text-zinc-500">Host-only control for local assistant automation.</p>
+          <p className="text-xs text-zinc-500">
+            Host-only control for transcription and assistant automation (local spawn or Cloud Run).
+          </p>
         </div>
         <span className="text-[11px] rounded-full border border-zinc-300 px-2 py-0.5 text-zinc-700">
           {state?.status ?? "idle"}

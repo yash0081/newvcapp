@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
-  ensureLocalAutostartEnabled,
+  ensureAssistantControlEnabled,
+  getLocalWorkerState,
   getWorkerState,
+  isRemoteLiveAssistantControl,
   startWorkerForMeeting,
   stopWorkerForMeeting,
 } from "@/lib/live-assistant/worker-manager";
@@ -37,9 +39,18 @@ export async function GET(_req: Request, ctx: { params: Promise<{ meetingId: str
   if ("error" in host) {
     return NextResponse.json({ error: host.error }, { status: host.status });
   }
-  const guard = ensureLocalAutostartEnabled();
-  const state = getWorkerState(meetingId, host.meeting.livekit_room_name);
-  return NextResponse.json({ enabled: guard.ok, reason: guard.ok ? null : guard.reason, state });
+  const guard = ensureAssistantControlEnabled();
+  try {
+    // When remote control is misconfigured, avoid calling Cloud Run (would throw on missing secret).
+    const state =
+      guard.ok || !isRemoteLiveAssistantControl()
+        ? await getWorkerState(meetingId, host.meeting.livekit_room_name)
+        : getLocalWorkerState(meetingId, host.meeting.livekit_room_name);
+    return NextResponse.json({ enabled: guard.ok, reason: guard.ok ? null : guard.reason, state });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
 }
 
 export async function POST(_req: Request, ctx: { params: Promise<{ meetingId: string }> }) {
@@ -48,12 +59,17 @@ export async function POST(_req: Request, ctx: { params: Promise<{ meetingId: st
   if ("error" in host) {
     return NextResponse.json({ error: host.error }, { status: host.status });
   }
-  const guard = ensureLocalAutostartEnabled();
+  const guard = ensureAssistantControlEnabled();
   if (!guard.ok) {
     return NextResponse.json({ error: guard.reason }, { status: 400 });
   }
-  const state = startWorkerForMeeting(meetingId, host.meeting.livekit_room_name);
-  return NextResponse.json({ state });
+  try {
+    const state = await startWorkerForMeeting(meetingId, host.meeting.livekit_room_name);
+    return NextResponse.json({ state });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
 }
 
 export async function DELETE(_req: Request, ctx: { params: Promise<{ meetingId: string }> }) {
@@ -62,11 +78,15 @@ export async function DELETE(_req: Request, ctx: { params: Promise<{ meetingId: 
   if ("error" in host) {
     return NextResponse.json({ error: host.error }, { status: host.status });
   }
-  const guard = ensureLocalAutostartEnabled();
+  const guard = ensureAssistantControlEnabled();
   if (!guard.ok) {
     return NextResponse.json({ error: guard.reason }, { status: 400 });
   }
-  const state = stopWorkerForMeeting(meetingId, host.meeting.livekit_room_name);
-  return NextResponse.json({ state });
+  try {
+    const state = await stopWorkerForMeeting(meetingId, host.meeting.livekit_room_name);
+    return NextResponse.json({ state });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
 }
-

@@ -26,15 +26,77 @@ function envFlagExplicitFalse(name: string): boolean {
   return v === "0" || v === "false" || v === "no" || v === "off";
 }
 
-export function ensureLocalAutostartEnabled(): { ok: true } | { ok: false; reason: string } {
+/** True when the Next.js API should proxy control calls to Cloud Run (`LIVE_ASSISTANT_URL`). */
+export function isRemoteLiveAssistantControl(): boolean {
+  return Boolean(process.env.LIVE_ASSISTANT_URL?.trim());
+}
+
+function liveAssistantBaseUrl(): string | null {
+  const u = process.env.LIVE_ASSISTANT_URL?.trim();
+  return u || null;
+}
+
+function liveAssistantControlSecret(): string | null {
+  const s = process.env.LIVE_ASSISTANT_CONTROL_SECRET?.trim();
+  return s || null;
+}
+
+async function remoteFetch(pathWithQuery: string, init?: RequestInit): Promise<Response> {
+  const base = liveAssistantBaseUrl();
+  const secret = liveAssistantControlSecret();
+  if (!base || !secret) {
+    throw new Error("LIVE_ASSISTANT_URL and LIVE_ASSISTANT_CONTROL_SECRET are required for remote assistant control");
+  }
+  const url = `${base.replace(/\/$/, "")}${pathWithQuery}`;
+  const headers = new Headers(init?.headers);
+  headers.set("Authorization", `Bearer ${secret}`);
+  if (init?.body != null && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  return fetch(url, { ...init, headers });
+}
+
+async function readRemoteError(res: Response): Promise<string> {
+  const t = await res.text();
+  try {
+    const j = JSON.parse(t) as { error?: string };
+    if (typeof j.error === "string" && j.error) return j.error;
+  } catch {
+    /* ignore */
+  }
+  return t || res.statusText || `HTTP ${res.status}`;
+}
+
+/**
+ * Whether the host can start/stop the live transcription worker from the app.
+ *
+ * - **Production (Vercel):** set `LIVE_ASSISTANT_URL` to the Cloud Run live-assistant base URL
+ *   and `LIVE_ASSISTANT_CONTROL_SECRET` (same value on Vercel and Cloud Run).
+ * - **Local dev:** `NODE_ENV=development` and spawn worker on the same machine (optional
+ *   `LIVE_ASSISTANT_AUTOSTART_LOCAL=0` to disable).
+ */
+export function ensureAssistantControlEnabled(): { ok: true } | { ok: false; reason: string } {
+  if (isRemoteLiveAssistantControl()) {
+    if (!liveAssistantControlSecret()) {
+      return {
+        ok: false,
+        reason: "LIVE_ASSISTANT_CONTROL_SECRET must be set when LIVE_ASSISTANT_URL is set.",
+      };
+    }
+    return { ok: true };
+  }
   if (process.env.NODE_ENV !== "development") {
     return { ok: false, reason: "Assistant autostart is only supported in local development." };
   }
-  // In local dev, enable by default. Allow explicit disable for safety.
   if (envFlagExplicitFalse("LIVE_ASSISTANT_AUTOSTART_LOCAL")) {
     return { ok: false, reason: "Local assistant is disabled (set LIVE_ASSISTANT_AUTOSTART_LOCAL=1 to re-enable)." };
   }
   return { ok: true };
+}
+
+/** @deprecated Use `ensureAssistantControlEnabled`. */
+export function ensureLocalAutostartEnabled(): { ok: true } | { ok: false; reason: string } {
+  return ensureAssistantControlEnabled();
 }
 
 function baseState(meetingId: string, roomName: string): WorkerProcessState {
@@ -66,14 +128,15 @@ function toPublicState(state: WorkerProcessState): WorkerState {
   };
 }
 
-export function getWorkerState(meetingId: string, roomName: string): WorkerState {
+/** In-process worker registry + child spawn (Next.js dev machine or Cloud Run live-assistant container). */
+export function getLocalWorkerState(meetingId: string, roomName: string): WorkerState {
   const existing = workers.get(meetingId);
   if (!existing) return toPublicState(baseState(meetingId, roomName));
   if (existing.roomName !== roomName) existing.roomName = roomName;
   return toPublicState(existing);
 }
 
-export function startWorkerForMeeting(meetingId: string, roomName: string): WorkerState {
+export function startLocalWorkerForMeeting(meetingId: string, roomName: string): WorkerState {
   const existing = workers.get(meetingId);
   if (existing?.proc && !existing.proc.killed && existing.status !== "stopped" && existing.status !== "error") {
     return toPublicState(existing);
@@ -132,7 +195,7 @@ export function startWorkerForMeeting(meetingId: string, roomName: string): Work
   return toPublicState(state);
 }
 
-export function stopWorkerForMeeting(meetingId: string, roomName: string): WorkerState {
+export function stopLocalWorkerForMeeting(meetingId: string, roomName: string): WorkerState {
   const state = workers.get(meetingId) ?? baseState(meetingId, roomName);
   state.roomName = roomName;
   const proc = state.proc;
@@ -147,3 +210,50 @@ export function stopWorkerForMeeting(meetingId: string, roomName: string): Worke
   return toPublicState(state);
 }
 
+async function getRemoteWorkerState(meetingId: string, roomName: string): Promise<WorkerState> {
+  const q = new URLSearchParams();
+  q.set("roomName", roomName);
+  const res = await remoteFetch(`/v1/workers/${encodeURIComponent(meetingId)}?${q.toString()}`, { method: "GET" });
+  if (!res.ok) throw new Error(await readRemoteError(res));
+  const json = (await res.json()) as { state?: WorkerState };
+  if (!json.state) throw new Error("Invalid response from live assistant service");
+  return json.state;
+}
+
+async function startRemoteWorkerForMeeting(meetingId: string, roomName: string): Promise<WorkerState> {
+  const res = await remoteFetch("/v1/workers", {
+    method: "POST",
+    body: JSON.stringify({ meetingId, roomName }),
+  });
+  if (!res.ok) throw new Error(await readRemoteError(res));
+  const json = (await res.json()) as { state?: WorkerState };
+  if (!json.state) throw new Error("Invalid response from live assistant service");
+  return json.state;
+}
+
+async function stopRemoteWorkerForMeeting(meetingId: string, roomName: string): Promise<WorkerState> {
+  const q = new URLSearchParams();
+  q.set("roomName", roomName);
+  const res = await remoteFetch(`/v1/workers/${encodeURIComponent(meetingId)}?${q.toString()}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await readRemoteError(res));
+  const json = (await res.json()) as { state?: WorkerState };
+  if (!json.state) throw new Error("Invalid response from live assistant service");
+  return json.state;
+}
+
+export async function getWorkerState(meetingId: string, roomName: string): Promise<WorkerState> {
+  if (isRemoteLiveAssistantControl()) return getRemoteWorkerState(meetingId, roomName);
+  return getLocalWorkerState(meetingId, roomName);
+}
+
+export async function startWorkerForMeeting(meetingId: string, roomName: string): Promise<WorkerState> {
+  if (isRemoteLiveAssistantControl()) return startRemoteWorkerForMeeting(meetingId, roomName);
+  return startLocalWorkerForMeeting(meetingId, roomName);
+}
+
+export async function stopWorkerForMeeting(meetingId: string, roomName: string): Promise<WorkerState> {
+  if (isRemoteLiveAssistantControl()) return stopRemoteWorkerForMeeting(meetingId, roomName);
+  return stopLocalWorkerForMeeting(meetingId, roomName);
+}

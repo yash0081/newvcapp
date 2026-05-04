@@ -1,0 +1,48 @@
+# Build/push live-assistant image and deploy to Cloud Run.
+# Trigger from Cloud Build or: gcloud builds submit --config cloudbuild.live.yaml .
+#
+# Keep --max-instances at 1 unless you externalize worker registry; multiple revisions
+# each spawn workers independently and can duplicate LiveKit subscribers for one meeting.
+substitutions:
+  _IMAGE: us-central1-docker.pkg.dev/project-30329891-0f8f-4493-928/workroom/live-assistant:latest
+  _SERVICE: live-assistant
+  _REGION: us-central1
+  _MAX_INSTANCES: "1"
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.live
+      - -t
+      - ${_IMAGE}
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_IMAGE}
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image
+      - ${_IMAGE}
+      - --region
+      - ${_REGION}
+      - --platform
+      - managed
+      - --allow-unauthenticated
+      - --port
+      - "8080"
+      - --timeout
+      - "3600"
+      - --max-instances
+      - ${_MAX_INSTANCES}
+
+options:
+  logging: CLOUD_LOGGING_ONLY

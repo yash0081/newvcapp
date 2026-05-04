@@ -98,6 +98,38 @@ If you wish to just develop locally and not deploy to Vercel, [follow the steps 
 
 > Check out [the docs for Local Development](https://supabase.com/docs/guides/getting-started/local-development) to also run Supabase locally.
 
+## Live assistant (production)
+
+The web app runs on Vercel; the **LiveKit transcription worker** is a long-running Node process and must run **outside** Vercel (e.g. Cloud Run). The repo script `npm run livekit-worker` is spawned either locally or by the **live-assistant** Cloud Run service (`npm run live-assistant-server`), which exposes HTTP on `$PORT` (default `8080`) and implements `/health`, `POST /v1/workers`, `GET/DELETE /v1/workers/:meetingId`.
+
+### Deploy live-assistant (Cloud Build)
+
+1. From the repo root, submit a build (or wire a trigger to `cloudbuild.live.yaml`):
+
+   ```bash
+   gcloud builds submit --config cloudbuild.live.yaml .
+   ```
+
+2. On the **live-assistant** Cloud Run service, set environment variables (mirror what you use locally for live meetings), including at minimum:
+
+   - **HTTP auth:** `LIVE_ASSISTANT_CONTROL_SECRET` — long random string; must match Vercel.
+   - **Rooms:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
+   - **Speech:** `DEEPGRAM_API_KEY`
+   - **Database:** `NEXT_PUBLIC_SUPABASE_URL` and **service role** key used by the worker (same as app server-side — see your Supabase setup).
+   - **GCP / Vertex:** `GOOGLE_CLOUD_PROJECT` — use the **runtime service account** for Vertex (grant Vertex AI User / whatever roles your code needs). Optional: `GOOGLE_APPLICATION_CREDENTIALS_JSON` only if you are not using the default compute service account.
+   - **Models:** any `LIVE_ASSISTANT_*` / `GEMINI_*` vars your `lib/live-assistant/model-env.ts` path expects.
+
+3. **Do not set `LIVE_ASSISTANT_URL` on the Cloud Run service** — that variable is only for the Vercel app to discover the live-assistant URL.
+
+4. On **Vercel**, set:
+
+   - `LIVE_ASSISTANT_URL` — base URL of the live-assistant Cloud Run service (no trailing path), e.g. `https://live-assistant-xxxxx-uc.a.run.app`
+   - `LIVE_ASSISTANT_CONTROL_SECRET` — same value as on Cloud Run.
+
+5. Redeploy Vercel so the new env vars apply.
+
+**Scaling:** The control plane keeps worker state in memory on one instance. Keep **max instances at 1** for this service unless you redesign coordination; see comments in `cloudbuild.live.yaml`.
+
 ## Feedback and issues
 
 Please file feedback and issues over on the [Supabase GitHub org](https://github.com/supabase/supabase/issues/new/choose).
