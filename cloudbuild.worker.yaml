@@ -1,5 +1,7 @@
 substitutions:
   _IMAGE: us-central1-docker.pkg.dev/project-30329891-0f8f-4493-928/workroom/workroom-bg-worker:latest
+  _SERVICE: workroom-bg-worker
+  _REGION: us-central1
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -10,6 +12,24 @@ steps:
       - -t
       - ${_IMAGE}
       - .
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image
+      - ${_IMAGE}
+      - --region
+      - ${_REGION}
+      - --platform
+      - managed
+      - --no-allow-unauthenticated
+      - --min-instances
+      - "1"
+      - --max-instances
+      - "2"
 
 images:
   - ${_IMAGE}
