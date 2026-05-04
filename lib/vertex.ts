@@ -1,6 +1,7 @@
 import { VertexAI } from "@google-cloud/vertexai";
 import type { Tool } from "@google-cloud/vertexai";
 import { Storage } from "@google-cloud/storage";
+import { ensureGoogleCloudCredentialsFile } from "@/lib/google-cloud-credentials";
 
 type VertexEnv = {
   projectId: string;
@@ -28,6 +29,7 @@ const vertexClients = new Map<string, VertexAI>();
 let storage: Storage | null = null;
 
 function getVertexClient(): VertexAI {
+  ensureGoogleCloudCredentialsFile();
   const env = vertexEnv();
   const key = `${env.projectId}:${env.location}`;
   const cached = vertexClients.get(key);
@@ -42,6 +44,7 @@ function getVertexClient(): VertexAI {
 }
 
 function getStorageClient(): Storage {
+  ensureGoogleCloudCredentialsFile();
   if (!storage) storage = new Storage();
   return storage;
 }

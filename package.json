@@ -4,7 +4,7 @@
     "dev": "concurrently -n web,worker -c blue,magenta \"npm run dev:web\" \"npm run dev:worker\"",
     "dev:web": "next dev --webpack",
     "dev:worker": "tsx scripts/deal-intel-bg-worker.ts",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint .",
     "livekit-worker": "tsx scripts/livekit-transcription-worker.ts",

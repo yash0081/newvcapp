@@ -1,4 +1,5 @@
 import { GoogleAuth } from "google-auth-library";
+import { ensureGoogleCloudCredentialsFile } from "@/lib/google-cloud-credentials";
 
 /** Vertex text-embedding-004 outputs 768 dimensions. */
 export const DEAL_EMBEDDING_DIMENSIONS = 768;
@@ -25,6 +26,7 @@ const MAX_REQUEST_CHARS = Number(process.env.VERTEX_EMBEDDING_MAX_REQUEST_CHARS 
 let authClient: GoogleAuth | null = null;
 
 function getAuth(): GoogleAuth {
+  ensureGoogleCloudCredentialsFile();
   if (!authClient) authClient = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
   return authClient;
 }

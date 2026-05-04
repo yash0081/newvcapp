@@ -32,10 +32,10 @@ function asRecord(v: unknown): Record<string, unknown> {
 
 function existingPeopleToFactsShape(rows: Array<Record<string, unknown>>): Record<string, unknown>[] {
   return rows
-    .map((r) => {
+    .flatMap((r): Record<string, unknown>[] => {
       const name = typeof r.name === "string" ? r.name.trim() : "";
-      if (!name) return null;
-      return {
+      if (!name) return [];
+      return [{
         name,
         company_role: typeof r.company_role === "string" ? r.company_role : null,
         general_description: typeof r.general_description === "string" ? r.general_description : null,
@@ -61,9 +61,8 @@ function existingPeopleToFactsShape(rows: Array<Record<string, unknown>>): Recor
           patents: Array.isArray(r.patents) ? r.patents : [],
           projects: Array.isArray(r.projects) ? r.projects : [],
         },
-      };
-    })
-    .filter((p): p is Record<string, unknown> => Boolean(p));
+      }];
+    });
 }
 
 function mergeNotablePeople(
@@ -234,4 +233,3 @@ export async function syncCopilotSessionToFactsSchema(args: {
     : 0;
   return { revisionId, insertedPeople: people };
 }
-
