@@ -1,5 +1,5 @@
 substitutions:
-  _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/workroom/workroom-bg-worker:latest
+  _IMAGE: us-central1-docker.pkg.dev/project-30329891-0f8f-4493-928/workroom/workroom-bg-worker:latest
 
 steps:
   - name: gcr.io/cloud-builders/docker
