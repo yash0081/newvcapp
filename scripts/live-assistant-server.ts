@@ -43,9 +43,20 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+function normalizeControlSecret(raw: string): string {
+  let s = raw.trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
 function verifyControlAuth(req: IncomingMessage): { ok: true } | { ok: false; reason: string } {
-  const required = process.env.LIVE_ASSISTANT_CONTROL_SECRET?.trim();
-  if (!required) {
+  const raw = process.env.LIVE_ASSISTANT_CONTROL_SECRET;
+  if (!raw?.trim()) {
     if (process.env.NODE_ENV === "production") {
       return {
         ok: false,
@@ -54,14 +65,15 @@ function verifyControlAuth(req: IncomingMessage): { ok: true } | { ok: false; re
     }
     return { ok: true };
   }
+  const required = normalizeControlSecret(raw);
   const auth = req.headers.authorization;
-  const bearer = auth?.startsWith("Bearer ") ? auth.slice(7).trim() : null;
+  const bearer = auth?.startsWith("Bearer ") ? normalizeControlSecret(auth.slice(7)) : null;
   const headerSecret =
     typeof req.headers["x-live-assistant-secret"] === "string"
-      ? req.headers["x-live-assistant-secret"].trim()
+      ? normalizeControlSecret(req.headers["x-live-assistant-secret"])
       : null;
   const token = bearer || headerSecret;
-  if (token !== required) {
+  if (!token || token !== required) {
     return { ok: false, reason: "Unauthorized" };
   }
   return { ok: true };

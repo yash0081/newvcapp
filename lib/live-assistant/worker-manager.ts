@@ -37,9 +37,23 @@ function liveAssistantBaseUrl(): string | null {
   return u || null;
 }
 
+/** Strip whitespace / accidental wrapping quotes from secrets pasted into GCP or Vercel UIs. */
+function normalizeSharedSecret(raw: string): string {
+  let s = raw.trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
 function liveAssistantControlSecret(): string | null {
-  const s = process.env.LIVE_ASSISTANT_CONTROL_SECRET?.trim();
-  return s || null;
+  const s = process.env.LIVE_ASSISTANT_CONTROL_SECRET;
+  if (!s) return null;
+  const n = normalizeSharedSecret(s);
+  return n || null;
 }
 
 async function remoteFetch(pathWithQuery: string, init?: RequestInit): Promise<Response> {
@@ -137,7 +151,21 @@ function toPublicState(state: WorkerProcessState): WorkerState {
  * reach Cloud Logging**, so connect/import/OOM failures look like “worker never joined” with no
  * explanation. Mirroring lines here fixes that visibility gap (not a substitute for correct LiveKit
  * env, but required to diagnose prod-only failures).
+ *
+ * Use **stdout → console.log** and **stderr → console.error** so GCP Logging severity stays INFO/DEFAULT
+ * for normal LiveKit output (many libs write INFO to stderr; routing everything through console.error
+ * produced noisy ERROR-level logs).
  */
+function stderrLooksLikeFailure(trimmed: string): boolean {
+  const low = trimmed.toLowerCase();
+  if (/^error\b|^fatal\b|uncaught|exception:/i.test(trimmed)) return true;
+  if (/econnrefused|enotfound|etimedout|enetunreach|certificate/i.test(low)) return true;
+  if (/signal failure|failed to retrieve|failed to connect|cannot find module/i.test(low)) return true;
+  // Avoid treating every line containing the substring "error" as fatal (false positives).
+  if (low.includes(" error ") || /^error:/i.test(trimmed)) return true;
+  return false;
+}
+
 function attachLivekitWorkerStreams(proc: ChildProcessWithoutNullStreams, state: WorkerProcessState) {
   const tap = (chunk: Buffer, stream: "stdout" | "stderr") => {
     const raw = chunk.toString("utf8");
@@ -145,18 +173,15 @@ function attachLivekitWorkerStreams(proc: ChildProcessWithoutNullStreams, state:
     for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      console.error(`[livekit-worker:${stream}] ${trimmed}`);
-    }
-    const lowered = raw.toLowerCase();
-    if (
-      lowered.includes("error") ||
-      lowered.includes("failed") ||
-      lowered.includes("exception") ||
-      lowered.includes("fatal") ||
-      lowered.includes("cannot ") ||
-      lowered.includes("econn")
-    ) {
-      state.lastError = raw.trim().slice(0, 2000);
+      const payload = `[livekit-worker:${stream}] ${trimmed}`;
+      if (stream === "stderr") {
+        console.error(payload);
+        if (stderrLooksLikeFailure(trimmed)) {
+          state.lastError = trimmed.slice(0, 2000);
+        }
+      } else {
+        console.log(payload);
+      }
     }
   };
   proc.stdout.on("data", (c) => tap(Buffer.isBuffer(c) ? c : Buffer.from(c), "stdout"));
