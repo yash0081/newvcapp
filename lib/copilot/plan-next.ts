@@ -770,11 +770,12 @@ export type PlanNextResult = {
   candidates: CandidateMeta[];
 };
 
+/** Prefer lite model for faster plan-next; fall back to flash if lite env is not configured. */
 function copilotPlannerModel(): string {
   try {
-    return getResearchModel("flash");
-  } catch {
     return getResearchModel("flash_lite");
+  } catch {
+    return getResearchModel("flash");
   }
 }
 

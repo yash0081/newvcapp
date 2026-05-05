@@ -30,9 +30,9 @@ function getCopilotAnalyzeModel(): string {
   const override = process.env[ANALYZE_MODEL_ENV]?.trim();
   if (override) return override;
   try {
-    return getResearchModel("flash");
-  } catch {
     return getResearchModel("flash_lite");
+  } catch {
+    return getResearchModel("flash");
   }
 }
 

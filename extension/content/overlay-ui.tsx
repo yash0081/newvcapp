@@ -38,10 +38,12 @@ function companyNameFromSession(s: CopilotSession | null): string | null {
   const v = meta?.company_name;
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
-const FINGERPRINT_SUPPRESSION_MS = 5000;
+const FINGERPRINT_SUPPRESSION_MS = 2800;
 const MAX_VISIBLE_SUGGESTIONS = 8;
-const FIRST_ANALYZE_DEBOUNCE_MS = 800;
-const ANALYZE_DEBOUNCE_MS = 1500;
+const FIRST_ANALYZE_DEBOUNCE_MS = 450;
+const ANALYZE_DEBOUNCE_MS = 900;
+/** After scroll, wait for layout before re-observe + plan (keep > min observe spacing). */
+const SCROLL_THEN_ANALYZE_MS = 1100;
 /** End session if automated observe succeeded this long ago (ms) while snippets exist. */
 const OBSERVE_IDLE_END_MS = 30 * 60 * 1000;
 
@@ -764,7 +766,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       } else {
         window.setTimeout(() => {
           void analyzePage();
-        }, 120);
+        }, 60);
       }
     } catch (e) {
       setError((e as Error).message);
@@ -795,7 +797,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       } else {
         window.setTimeout(() => {
           void analyzePage();
-        }, 120);
+        }, 60);
       }
     } catch (e) {
       setError((e as Error).message);
@@ -903,7 +905,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           agentScrollStreakRef.current = 0;
           lastSnapshotRef.current = null;
           setResearchActivity("Pausing auto-scroll — waiting for new content or your steering note.");
-          window.setTimeout(() => setPostScrollPlannerKick((k) => k + 1), 400);
+          window.setTimeout(() => setPostScrollPlannerKick((k) => k + 1), 280);
           return;
         }
         if (scrollKickTimerRef.current != null) {
@@ -919,7 +921,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           setResearchActivity("Re-reading the page after scrolling…");
           void analyzePage();
           setPostScrollPlannerKick((k) => k + 1);
-        }, 1700);
+        }, SCROLL_THEN_ANALYZE_MS);
         return;
       }
       agentScrollStreakRef.current = 0;
@@ -950,7 +952,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
               setResearchActivity(`Re-checking this page for: ${truncateWords(steer, 56)}…`);
               void analyzePage();
               setPostScrollPlannerKick((k) => k + 1);
-            }, 2600);
+            }, 1700);
           }
         }
         return;
