@@ -40,6 +40,15 @@ type PlannerCandidate = {
 
 type ResearchPlanIntent = ResearchPlanScope;
 
+/** Prefer a capable model for intent + review; keeps plans from collapsing into generic one-liners. */
+function researchPlannerReasoningModel(): string {
+  try {
+    return getResearchModel("flash");
+  } catch {
+    return getResearchModel("flash_lite");
+  }
+}
+
 const BROAD_WEB_SOURCE = "web";
 const ALL_CATEGORIES: WebsiteCategory[] = ["founder", "product", "market", "traction", "hiring", "legal", "news", "general"];
 
@@ -75,7 +84,7 @@ function asCategory(v: unknown): WebsiteCategory | undefined {
   return undefined;
 }
 
-function parseSuggestion(raw: string, candidates?: PlannerCandidate[]): ResearchPlanSuggestion | null {
+function parseSuggestion(raw: string, candidates?: PlannerCandidate[], companyName?: string): ResearchPlanSuggestion | null {
   const parsed = parseJsonFromResponseOrNull(raw) as
     | {
         summary?: unknown;
@@ -113,8 +122,11 @@ function parseSuggestion(raw: string, candidates?: PlannerCandidate[]): Research
         .filter((s) => s.task)
     : [];
   if (!steps.length) return null;
+  const co = (companyName ?? "").trim();
   return {
-    summary: stripMarkdownText(toStringSafe(parsed.summary)) || "Auto-generated research plan.",
+    summary:
+      stripMarkdownText(toStringSafe(parsed.summary)) ||
+      (co ? `Research steps for ${co} (structured plan).` : "Research plan."),
     steps,
   };
 }
@@ -158,8 +170,26 @@ function deterministicFallback(args: {
   candidates: PlannerCandidate[];
   focus?: string;
   intent?: ResearchPlanIntent;
+  openGapFields?: string[];
 }): ResearchPlanSuggestion {
   const focus = args.focus?.trim();
+  const co = (args.companyName || "this company").trim() || "this company";
+  const maxSteps = args.intent?.maxSteps ?? 5;
+  const gaps = (args.openGapFields ?? []).map((g) => g.trim()).filter(Boolean);
+
+  if (gaps.length && !focus) {
+    const steps = gaps.slice(0, maxSteps).map((field) => ({
+      website: BROAD_WEB_SOURCE,
+      task: `For ${co}, find current sourced evidence for ${field.replace(/_/g, " ")}; capture primary URLs, dates, and any conflicts with saved records.`,
+      category: categoryForGap(field),
+      dependsOnStepIds: [] as string[],
+    }));
+    return {
+      summary: `Targeted plan for ${co}: close open schema gaps (${gaps.slice(0, maxSteps).map((g) => g.replace(/_/g, " ")).join(", ")}).`,
+      steps,
+    };
+  }
+
   const fallbackCandidate: PlannerCandidate = {
     website: BROAD_WEB_SOURCE,
     label: "Web",
@@ -170,20 +200,22 @@ function deterministicFallback(args: {
     is_preferred: false,
   };
   const candidates = args.candidates.length ? args.candidates : [fallbackCandidate];
-  const steps = candidates.slice(0, args.intent?.maxSteps ?? 5).map((candidate) => {
+  const steps = candidates.slice(0, maxSteps).map((candidate) => {
     const support = candidate.supports[0]?.replace(/_/g, " ") || candidate.category;
     return {
       website: BROAD_WEB_SOURCE,
       task: focus
-        ? `Find current evidence for ${args.companyName || "the company"} that directly answers this user focus: ${focus}. Capture only sourced facts and note uncertainty.`
-        : `Find current evidence about ${args.companyName || "the company"}'s ${support}; capture only sourced facts and note uncertainty.`,
+        ? `For ${co}, find sourced evidence that directly answers: ${focus}. Map findings to Deal Intel fields; note uncertainty and contradictions.`
+        : `For ${co}, find sourced evidence on ${support} (${candidate.label || candidate.category}); cite primary pages and dates.`,
       category: candidate.category,
       dependsOnStepIds: [],
     };
   });
 
   return {
-    summary: `Initial plan for ${args.companyName || "this company"} based on default research strategy.`,
+    summary: focus
+      ? `Plan for ${co}: ${focus.slice(0, 200)}${focus.length > 200 ? "…" : ""}`
+      : `Initial plan for ${co}: default source-guided passes on open diligence areas.`,
     steps,
   };
 }
@@ -467,11 +499,12 @@ Rules:
 - A matrix, table, or side-by-side output request changes the output format/tool choice; it does not expand the research scope.
 - Use user source preferences for source selection and evidence style only; never expand the research scope just because a preferred website exists.
 - Keep maxSteps between 1 and 6. Use 1-3 for narrow asks, 3-4 for standard asks, and 4-6 for broad asks.
+- userGoal must name the company (or "this company" if unknown) and state the **deliverable** in plain language (what will be verified, mapped, or decided) — not "do diligence" or "research the startup."
 - Use plain text only inside JSON strings; do not use formatting markers.`;
 
   try {
     const raw = await vertexRunWithTextMulti(
-      getResearchModel("flash_lite"),
+      researchPlannerReasoningModel(),
       prompt,
       [
         { label: "Company name", value: args.companyName || "Unknown" },
@@ -538,8 +571,9 @@ Return strict JSON only:
 }
 
 Rules:
-- The draft plan has already passed cheap keyword and category filtering. Your job is the semantic gate: reduce that smaller set to only the steps that are necessary for the user's exact request.
+- The draft plan has already passed cheap keyword and category filtering. Your job is the semantic gate: remove **redundant or off-scope** steps — not collapse the plan into vague one-liners.
 - Keep only steps necessary for intent.userGoal.
+- When intent.breadth is **broad** and the draft has multiple **materially different** angles (e.g. team vs funding vs product), keep **at least two** distinct steps unless they are true duplicates.
 - Remove steps covered by intent.excludedTopics.
 - Stay within intent.allowedCategories unless a step directly answers one of intent.requiredTopics.
 - If a step would merely help understand the whole company, remove it unless the user asked for broad diligence.
@@ -550,10 +584,11 @@ Rules:
 - Keep at most intent.maxSteps steps. Prefer fewer precise steps over a broad sweep when intent.breadth is narrow.
 - Preserve user website preferences when they fit the intent, but never let preferences add irrelevant topics.
 - Every task must be directly answerable, company-specific, and useful to the final answer.
+- summary must **start with the company name** and state what this plan will **produce** (outcome), not generic "research" language.
 - Use plain text only inside JSON strings; do not use formatting markers.`;
   try {
     const raw = await vertexRunWithTextMulti(
-      getResearchModel("flash_lite"),
+      researchPlannerReasoningModel(),
       prompt,
       [
         { label: "Company name", value: args.companyName || "Unknown" },
@@ -564,7 +599,7 @@ Rules:
       ],
       false,
     );
-    const parsed = parseSuggestion(raw, args.candidates);
+    const parsed = parseSuggestion(raw, args.candidates, args.companyName);
     return filterSuggestionForIntent(parsed ?? args.suggestion, args.intent);
   } catch {
     return filterSuggestionForIntent(args.suggestion, args.intent);
@@ -780,6 +815,7 @@ Return strict JSON only with shape:
 }
 Rules:
 - Produce no more than the intent maxSteps. Use fewer when the user asked a narrow question. They should usually be source-agnostic tasks, not website tasks.
+- **summary** (required): 1–2 sentences. **First sentence must include the company name** and the concrete outcome (e.g. "verify X", "map Y competitors", "reconcile Z"). No boilerplate like "comprehensive research plan" or "diligence workflow" without naming what gets decided.
 - Each task must be a clear, answerable research question for this exact company.
 - Tie every task to the research intent first, then to a real relevant open gap or hypothesis. Avoid vague "look into X" work and whole-company background sweeps.
 - Each task should name the exact schema field(s) it is trying to fill, verify, or falsify.
@@ -812,7 +848,7 @@ Rules:
       ],
       false
     );
-    const parsed = parseSuggestion(raw, plannerContext.candidates);
+    const parsed = parseSuggestion(raw, plannerContext.candidates, args.companyName);
     if (parsed) {
       const reviewed = await reviewResearchPlan({
         companyName: args.companyName,
@@ -852,6 +888,7 @@ Rules:
       candidates: plannerContext.candidates,
       focus,
       intent,
+      openGapFields: plannerContext.openGapFields,
     }),
     intent,
   );

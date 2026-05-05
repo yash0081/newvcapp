@@ -23,6 +23,7 @@ import {
 import {
   applyAgendaPatch,
   emptyAgenda,
+  ensureAgendaHasConcreteIntent,
   recomputeAgendaFacts,
   type ResearchAgenda,
 } from "@/lib/copilot/research-agenda";
@@ -278,8 +279,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     acceptedSourceUrls,
   });
 
+  const agendaForPlan = ensureAgendaHasConcreteIntent(refreshedAgenda, companyName);
   const planResult = await planNextActionWithAgenda({
-    agenda: refreshedAgenda,
+    agenda: agendaForPlan,
+    companyDisplayName: companyName,
     currentUrl,
     pageTitle,
     visibleTextExcerpt,
@@ -294,7 +297,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
 
   const next = planResult.action;
   const nextAgenda = applyAgendaPatch(
-    refreshedAgenda,
+    agendaForPlan,
     planResult.patch,
     next.action === "navigate"
       ? { kind: "navigate", url: next.url, rationale: next.rationale }

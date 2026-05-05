@@ -72,6 +72,7 @@ function parseExecution(raw: string): Omit<ExecutionOk, "ok"> | null {
             };
           })
           .filter((u) => u.reason && u.website && u.task)
+          .slice(0, 3)
       : [];
 
   try {
@@ -171,10 +172,12 @@ Rules:
 - Use the internal workspace context first. If it answers part of the task, incorporate it and use web research to verify, update, or fill missing details. Do not repeat internal context as if it came from the web.
 - Use deterministic database signals when supplied for keyword or SQL-style questions, such as common investors, saved traction, saved competitors, saved customers, and prior document evidence.
 - Include 2-6 sources when available.
-- Return suggestedStepUpdates as an empty array by default.
-- Suggest at most one follow-up step only when this step uncovered a new contradiction, missing source, newly named entity, or unresolved evidence gap that is required to answer the original research task. The reason must state what changed and why the current plan cannot answer it.
-- Do not suggest follow-ups for adjacent company background, generic diligence, repeated competitor searching, repeated investor searching, or broader schema coverage.
-- Suggested follow-up steps should use website "web" unless they truly require a specific source.
+- suggestedStepUpdates: return **[]** when this step fully answers the task and leaves no new blocking gap. Otherwise return **1–3** items (never more than 3).
+- Each suggestedStepUpdates entry must be **plan-quality**: a concrete next research step a human would add to the workflow, not a vague "dig deeper."
+  - **reason**: one sentence naming **the company**, what **new** gap or conflict appeared (or what remained **unverified**), and why the **current step list** would miss it. Forbidden: "further research", "learn more", "continue investigating" without naming the gap.
+  - **task**: a single **answerable** instruction that names the company and a **schema angle** (e.g. funding_round, competitors, founder_experience) or a **named entity** to resolve. Must differ from the step you just ran.
+  - **website**: usually **"web"**. Use a specific domain only when a registry, filing, product docs, or official site is clearly the right next hop.
+- Do not suggest follow-ups for generic company overviews, duplicate angles you already resolved, or "nice to have" context unrelated to the original task.
 - If evidence is weak, say so explicitly in notes.
 - Notes must be clean regular text. Do not use headings, bold markers, bullet characters, numbered lists, code fences, or link markup.
 - Map every finding to the canonical Deal Intel schema when possible:

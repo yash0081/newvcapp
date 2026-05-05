@@ -335,6 +335,38 @@ export function emptyAgenda(args: {
   };
 }
 
+/**
+ * The planner model often leaves intent.next_question empty or vague, which yields generic plans.
+ * Seed a concrete question tied to company + focus + open gaps before calling the LLM.
+ */
+export function ensureAgendaHasConcreteIntent(agenda: ResearchAgenda, companyName: string): ResearchAgenda {
+  const name = (companyName || "Company").trim() || "Company";
+  const focus = (agenda.focus ?? "").trim();
+  const nq = (agenda.intent.next_question ?? "").trim();
+  const tooShort = nq.length < 18;
+  const generic =
+    /^(research|continue|next|more|investigate|explore)\b/i.test(nq) ||
+    /^what (else|more|other)\b/i.test(nq) ||
+    /^find (out|more)\b/i.test(nq);
+  if (!tooShort && !generic) return agenda;
+  const gapFields = agenda.open_gaps.slice(0, 5).map((g) => g.field).filter(Boolean);
+  const gapBit = gapFields.length ? ` Priority schema gaps: ${gapFields.join(", ")}.` : "";
+  const nextQ = focus
+    ? `For ${name}, what on this page (or via which outbound link) best answers: "${focus.slice(0, 160)}"?${gapBit}`
+    : `For ${name}, which concrete diligence facts are still missing here, and which outbound link is most likely to supply them?${gapBit}`;
+  const stopWhen = focus
+    ? `At least one cited snippet addresses "${focus.slice(0, 90)}" or we confirm it is absent on-page.`
+    : `Materially reduce open gaps with cited facts or documented absence.`;
+  return {
+    ...agenda,
+    intent: {
+      ...agenda.intent,
+      next_question: nextQ.slice(0, LIMITS.text),
+      stop_when: stopWhen.slice(0, LIMITS.text),
+    },
+  };
+}
+
 /** Best-effort parse of a stored agenda; returns null if the shape is unrecoverable. */
 export function parseStoredAgenda(raw: unknown): ResearchAgenda | null {
   if (!raw || typeof raw !== "object") return null;

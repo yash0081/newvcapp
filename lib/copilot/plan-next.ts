@@ -128,6 +128,50 @@ export function deferLeavingPage(sig: PlanPageSignals | undefined, currentUrl?: 
   return null;
 }
 
+function trimPlannerRationale(s: string, max = 120): string {
+  return s.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function plannerCompanyLabel(companyDisplayName: string, agenda: ResearchAgenda): string {
+  const fromArg = companyDisplayName.trim();
+  const fromAgenda = (agenda.company?.name ?? "").trim();
+  return (fromArg || fromAgenda || "Company").slice(0, 56);
+}
+
+/** Deterministic rationales when the model omits text or we take a mechanical fallback — avoids vague UI copy. */
+function mechanicalPlannerRationale(args: {
+  kind: "scroll" | "wait" | "stop_no_candidates" | "stop_generic" | "navigate_fallback";
+  companyLabel: string;
+  agenda: ResearchAgenda;
+  navigate?: { url: string; text: string };
+}): string {
+  const co = args.companyLabel;
+  const focus = (args.agenda.focus ?? "").trim().slice(0, 44);
+  const gap0 = args.agenda.open_gaps[0]?.field?.replace(/_/g, " ") ?? "";
+  const focusBit = focus ? ` — ${focus}` : "";
+  const gapBit = gap0 ? ` (${gap0})` : "";
+
+  switch (args.kind) {
+    case "scroll":
+      return trimPlannerRationale(`${co}: scroll for more on-page evidence${gapBit || focusBit || ""}`);
+    case "wait":
+      return trimPlannerRationale(`${co}: pause for on-page suggestions${focusBit}`);
+    case "stop_no_candidates":
+      return trimPlannerRationale(`${co}: no agenda-safe links here — steer or open another source${focusBit}`);
+    case "stop_generic":
+      return trimPlannerRationale(`${co}: holding on this page${focusBit} — review suggestions or steer`);
+    case "navigate_fallback": {
+      const nav = args.navigate!;
+      const host = safeHost(nav.url);
+      const hint = (nav.text || "").trim().slice(0, 40);
+      if (gap0) {
+        return trimPlannerRationale(`${co}: open ${host} for ${gap0}${hint ? ` — ${hint}` : ""}`);
+      }
+      return trimPlannerRationale(`${co}: open ${host}${focusBit}${hint ? ` — ${hint}` : ""}`);
+    }
+  }
+}
+
 function normalizeUrl(u: string): string | null {
   try {
     const parsed = new URL(u);
@@ -405,6 +449,7 @@ Rules (structural — no topical denylists):
 - Return action "stop" ONLY when: (1) defer hint is effectively "wait" on pending on-page suggestions, OR (2) the candidate list truly offers no reasonable next URL for any remaining gap and you need the user to steer or change tabs — say so clearly in rationale.
 - agenda_patch.intent.candidate_urls is your top 1-5 next moves in priority order. Use it to remember plans across ticks.
 - "scroll" is appropriate only when the current page is still likely to yield more drafts below the fold; otherwise prefer navigate over stopping.
+- The "rationale" string (<=120 chars) must be SPECIFIC: include ResearchAgenda.company.name, and either the user focus or a named open_gap field — never vague phrases like "continuing research", "next steps", or "more diligence" without naming what you are chasing.
 - Never output anything except valid JSON.`;
 
 function buildPlanNextPrompt(agendaFocus: string): string {
@@ -468,7 +513,7 @@ function relaxDeferWhenFocused(
   if (defer !== "wait") return defer;
   const P = sig.pendingSuggestionsCount;
   const S = sig.scrollDepthRatio;
-  if (P > 0 && P <= 6 && S < 0.9) return "scroll";
+  if (P > 0 && P <= 8 && S < 0.92) return "scroll";
   return defer;
 }
 
@@ -585,17 +630,32 @@ function fallbackResult(args: {
   candidates: CandidateMeta[];
   defer: "scroll" | "wait" | null;
   reason: string;
+  companyLabel: string;
 }): { action: NextAction; patch: AgendaPatch; errors: string[] } {
   if (args.defer === "scroll") {
     return {
-      action: { action: "scroll", rationale: "Page may still yield more — scrolling before leaving." },
+      action: {
+        action: "scroll",
+        rationale: mechanicalPlannerRationale({
+          kind: "scroll",
+          companyLabel: args.companyLabel,
+          agenda: args.agenda,
+        }),
+      },
       patch: EMPTY_AGENDA_PATCH,
       errors: [args.reason],
     };
   }
   if (args.defer === "wait") {
     return {
-      action: { action: "stop", rationale: "Holding on this page until suggestions settle." },
+      action: {
+        action: "stop",
+        rationale: mechanicalPlannerRationale({
+          kind: "wait",
+          companyLabel: args.companyLabel,
+          agenda: args.agenda,
+        }),
+      },
       patch: EMPTY_AGENDA_PATCH,
       errors: [args.reason],
     };
@@ -603,13 +663,29 @@ function fallbackResult(args: {
   const choice = pickFallbackCandidate(args.agenda, args.candidates);
   if (!choice) {
     return {
-      action: { action: "stop", rationale: "No on-agenda candidates available." },
+      action: {
+        action: "stop",
+        rationale: mechanicalPlannerRationale({
+          kind: "stop_no_candidates",
+          companyLabel: args.companyLabel,
+          agenda: args.agenda,
+        }),
+      },
       patch: EMPTY_AGENDA_PATCH,
       errors: [args.reason],
     };
   }
   return {
-    action: { action: "navigate", url: choice.url, rationale: choice.text || "Following next planned candidate." },
+    action: {
+      action: "navigate",
+      url: choice.url,
+      rationale: mechanicalPlannerRationale({
+        kind: "navigate_fallback",
+        companyLabel: args.companyLabel,
+        agenda: args.agenda,
+        navigate: { url: choice.url, text: choice.text },
+      }),
+    },
     patch: EMPTY_AGENDA_PATCH,
     errors: [args.reason],
   };
@@ -617,17 +693,42 @@ function fallbackResult(args: {
 
 function coerceModelAction(
   raw: unknown,
-  ctx: { allowedNavigateUrls: ReadonlySet<string> },
+  ctx: { allowedNavigateUrls: ReadonlySet<string>; companyLabel: string; agenda: ResearchAgenda },
 ): NextAction | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const rationale = typeof r.rationale === "string" ? r.rationale.trim().slice(0, 120) : "";
-  if (r.action === "scroll") return { action: "scroll", rationale: rationale || "Scan more content on this page." };
-  if (r.action === "stop") return { action: "stop", rationale: rationale || "No strong next step." };
+  if (r.action === "scroll") {
+    return {
+      action: "scroll",
+      rationale:
+        rationale ||
+        mechanicalPlannerRationale({ kind: "scroll", companyLabel: ctx.companyLabel, agenda: ctx.agenda }),
+    };
+  }
+  if (r.action === "stop") {
+    return {
+      action: "stop",
+      rationale:
+        rationale ||
+        mechanicalPlannerRationale({ kind: "stop_generic", companyLabel: ctx.companyLabel, agenda: ctx.agenda }),
+    };
+  }
   if (r.action !== "navigate") return null;
   const url = typeof r.url === "string" ? normalizeUrl(r.url) : null;
   if (!url || !ctx.allowedNavigateUrls.has(url)) return null;
-  return { action: "navigate", url, rationale: rationale || "Following candidate URL." };
+  return {
+    action: "navigate",
+    url,
+    rationale:
+      rationale ||
+      mechanicalPlannerRationale({
+        kind: "navigate_fallback",
+        companyLabel: ctx.companyLabel,
+        agenda: ctx.agenda,
+        navigate: { url, text: "" },
+      }),
+  };
 }
 
 export type PlanNextResult = {
@@ -638,8 +739,18 @@ export type PlanNextResult = {
   candidates: CandidateMeta[];
 };
 
+function copilotPlannerModel(): string {
+  try {
+    return getResearchModel("flash");
+  } catch {
+    return getResearchModel("flash_lite");
+  }
+}
+
 export async function planNextActionWithAgenda(args: {
   agenda: ResearchAgenda;
+  /** Shown in prompts and fallbacks so rationales stay company-specific. */
+  companyDisplayName: string;
   currentUrl: string;
   pageTitle?: string | null;
   visibleTextExcerpt?: string | null;
@@ -651,6 +762,7 @@ export async function planNextActionWithAgenda(args: {
   visitedHostCounts?: Map<string, number>;
   dislikedHostnames?: string[];
 }): Promise<PlanNextResult> {
+  const companyLabel = plannerCompanyLabel(args.companyDisplayName, args.agenda);
   const visitedHostCounts = args.visitedHostCounts ?? new Map<string, number>();
   const candidates = buildCandidateMetas({
     agenda: args.agenda,
@@ -674,7 +786,7 @@ export async function planNextActionWithAgenda(args: {
 
   if (candidates.length === 0) {
     return {
-      ...fallbackResult({ agenda: args.agenda, candidates, defer, reason: "no_candidates" }),
+      ...fallbackResult({ agenda: args.agenda, candidates, defer, reason: "no_candidates", companyLabel }),
       candidates,
     };
   }
@@ -708,11 +820,15 @@ export async function planNextActionWithAgenda(args: {
       label: "Defer hint (mechanical page-yield rule — honor when present)",
       value: defer ?? "none",
     },
+    {
+      label: "Rationale discipline",
+      value: `Company: "${args.companyDisplayName.trim() || "Company"}". Every action.rationale must say what you are trying to learn about THIS company and how the chosen scroll/navigate advances agenda.focus or an open_gap (no generic filler).`,
+    },
   ];
 
   let raw = "";
   try {
-    raw = await vertexRunWithTextMulti(getResearchModel("flash_lite"), plannerPrompt, inputs, false);
+    raw = await vertexRunWithTextMulti(copilotPlannerModel(), plannerPrompt, inputs, false);
   } catch (err) {
     return {
       ...fallbackResult({
@@ -720,6 +836,7 @@ export async function planNextActionWithAgenda(args: {
         candidates,
         defer,
         reason: `model_error: ${err instanceof Error ? err.message : String(err)}`,
+        companyLabel,
       }),
       candidates,
     };
@@ -728,7 +845,7 @@ export async function planNextActionWithAgenda(args: {
   const parsed = parseJsonFromResponseOrNull(raw) as Record<string, unknown> | null;
   if (!parsed) {
     return {
-      ...fallbackResult({ agenda: args.agenda, candidates, defer, reason: "model_unparseable" }),
+      ...fallbackResult({ agenda: args.agenda, candidates, defer, reason: "model_unparseable", companyLabel }),
       candidates,
     };
   }
@@ -754,10 +871,10 @@ export async function planNextActionWithAgenda(args: {
     knownHypothesisIds,
   });
 
-  const action = coerceModelAction(parsed, { allowedNavigateUrls });
+  const action = coerceModelAction(parsed, { allowedNavigateUrls, companyLabel, agenda: args.agenda });
   if (!action) {
     return {
-      ...fallbackResult({ agenda: args.agenda, candidates, defer, reason: "model_action_invalid" }),
+      ...fallbackResult({ agenda: args.agenda, candidates, defer, reason: "model_action_invalid", companyLabel }),
       candidates,
       patch,
       errors: ["model_action_invalid", ...errors],
@@ -767,7 +884,10 @@ export async function planNextActionWithAgenda(args: {
   // Defer overrides: never let the model navigate when mechanics say "scroll first".
   if (defer === "scroll" && action.action === "navigate") {
     return {
-      action: { action: "scroll", rationale: "Page may still yield more — scrolling before leaving." },
+      action: {
+        action: "scroll",
+        rationale: mechanicalPlannerRationale({ kind: "scroll", companyLabel, agenda: args.agenda }),
+      },
       patch,
       errors,
       candidates,
@@ -775,7 +895,10 @@ export async function planNextActionWithAgenda(args: {
   }
   if (defer === "wait" && action.action === "navigate") {
     return {
-      action: { action: "stop", rationale: "Holding on this page until suggestions settle." },
+      action: {
+        action: "stop",
+        rationale: mechanicalPlannerRationale({ kind: "wait", companyLabel, agenda: args.agenda }),
+      },
       patch,
       errors,
       candidates,
@@ -785,7 +908,10 @@ export async function planNextActionWithAgenda(args: {
   // Same defer rule when the model pessimistically says "stop" but the page still warrants scrolling.
   if (defer === "scroll" && action.action === "stop") {
     return {
-      action: { action: "scroll", rationale: "Page may still yield more — scrolling before leaving." },
+      action: {
+        action: "scroll",
+        rationale: mechanicalPlannerRationale({ kind: "scroll", companyLabel, agenda: args.agenda }),
+      },
       patch,
       errors: [...errors, "defer_scroll_overrode_stop"],
       candidates,
@@ -796,11 +922,15 @@ export async function planNextActionWithAgenda(args: {
   if (action.action === "stop" && defer !== "wait" && candidates.length > 0) {
     const choice = pickAntiIdleCandidate(args.agenda, candidates);
     if (choice) {
+      const co = (args.companyDisplayName || args.agenda.company?.name || "Company").trim() || "Company";
+      const focusShort = (args.agenda.focus ?? "").trim().slice(0, 56);
       const gapFields = args.agenda.open_gaps.map((g) => g.field);
+      const host = safeHost(choice.url);
+      const linkHint = (choice.text || "").trim().slice(0, 42);
       const rationale =
         gapFields.length > 0
-          ? `More research needed (${gapFields.slice(0, 5).join(", ")}) — opening another source.`
-          : "Continuing across sources — basic facts are not the whole diligence story.";
+          ? `${co}: open ${host} for ${gapFields[0]!}${focusShort ? ` (${focusShort})` : ""}${linkHint ? ` — ${linkHint}` : ""}`
+          : `${co}: open ${host} for diligence${focusShort ? ` — focus: ${focusShort}` : ""}${linkHint ? ` — ${linkHint}` : ""}`;
       return {
         action: { action: "navigate", url: choice.url, rationale: rationale.slice(0, 120) },
         patch,

@@ -17,17 +17,22 @@ const ANALYZE_MODEL_ENV = "COPILOT_ANALYZE_MODEL";
 const MAX_RECENT_CLAIMS = 12;
 /** Session accepts can lag facts-schema sync; surface enough for contradiction checks. */
 const MAX_SESSION_ACCEPTED_SNIPPETS = 25;
-const MAX_SUGGESTIONS = 4;
-const MIN_CONFIDENCE = 0.55;
-/** Slightly looser threshold when the user set a focus — we still filter junk via isLowValueSaveSuggestion. */
-const MIN_CONFIDENCE_WITH_FOCUS = 0.52;
-const MAX_VISIBLE_TEXT_CHARS = 2400;
+const MAX_SUGGESTIONS = 6;
+/** Keep in sync with ANALYZE_PROMPT confidence line so the model is not trained to self-suppress. */
+const MIN_CONFIDENCE = 0.44;
+/** Slightly looser when the user set a focus — junk still filtered via isLowValueSaveSuggestion. */
+const MIN_CONFIDENCE_WITH_FOCUS = 0.42;
+const MAX_VISIBLE_TEXT_CHARS = 5200;
 const MAX_OUTBOUND_LINKS = 36;
 
 function getCopilotAnalyzeModel(): string {
   const override = process.env[ANALYZE_MODEL_ENV]?.trim();
   if (override) return override;
-  return getResearchModel("flash_lite");
+  try {
+    return getResearchModel("flash");
+  } catch {
+    return getResearchModel("flash_lite");
+  }
 }
 
 export type DealContext = {
@@ -47,7 +52,7 @@ export type DealContext = {
   dislikedHostnames?: string[];
 };
 
-const ANALYZE_PROMPT = `You are the research copilot. Compare the on-screen extraction against what we already know about a deal/company and produce 0-4 high-quality actionable suggestions to log.
+const ANALYZE_PROMPT = `You are the research copilot. Compare the on-screen extraction against what we already know about a deal/company and produce 0-${MAX_SUGGESTIONS} high-quality actionable suggestions to log.
 
 Prioritize suggestions that fill, verify, or contradict the canonical Deal Intel schema:
 ${DEAL_INTEL_RESEARCH_FOCUS_GUIDE}
@@ -70,7 +75,7 @@ Return strict JSON:
 }
 
 Rules:
-- Return at most 4 suggestions; prefer quality over quantity.
+- Return at most ${MAX_SUGGESTIONS} suggestions; prefer quality over quantity.
 - When "Outbound links visible on page" lists several URLs, include explore suggestions for distinct useful follow-ups (e.g. team, pricing, security, docs) when the current screen does not already answer the question—up to 2 explore items if justified, each with a different link_url.
 - Prefer one strong suggestion over several weak ones; do not pad with low-value items.
 - Treat "Open research gaps" as the main save target. Also treat a non-empty "Auto steering note" or user prompt as the user's live priority. A high-quality suggestion should fill, verify, or contradict either an open gap or that explicit focus.
@@ -96,7 +101,8 @@ Rules:
 - Prefer links from preferred hostnames; avoid disliked hostnames unless no alternative exists.
 - When "Auto steering note" is non-empty: treat it as the user's live priority for this session. Favor facts, aligns, and explore links that advance that focus; avoid unrelated tangents. When choosing explore targets, prefer outbound URLs on preferred hostnames whose category matches the steering topic (e.g. geography → maps / HQ / office pages).
 - Skip generic chrome / navigation / cookie banners.
-- Drop suggestions whose confidence < 0.55.
+- Assign confidence honestly for each item. Keep substantive suggestions with confidence >= 0.44 when they cite a concrete on-screen fact, a clear contradiction, or a well-targeted explore link. Do not inflate confidence on vague meta-summaries.
+- When "On-screen extracted text" has 300+ characters of real sentences (not only nav/footer/cookie boilerplate), return at least 1 suggestion unless the page truly has no fact, contradiction, or outbound link that advances open gaps or the steering note. Prefer 2–4 suggestions on dense pages (team, funding, product, news).
 - If nothing is worth surfacing, return { "suggestions": [] }.`;
 
 const FOCUS_MODE_APPEND = `
