@@ -19,6 +19,8 @@ const MAX_RECENT_CLAIMS = 12;
 const MAX_SESSION_ACCEPTED_SNIPPETS = 25;
 const MAX_SUGGESTIONS = 4;
 const MIN_CONFIDENCE = 0.55;
+/** Slightly looser threshold when the user set a focus — we still filter junk via isLowValueSaveSuggestion. */
+const MIN_CONFIDENCE_WITH_FOCUS = 0.52;
 const MAX_VISIBLE_TEXT_CHARS = 2400;
 const MAX_OUTBOUND_LINKS = 36;
 
@@ -97,6 +99,14 @@ Rules:
 - Drop suggestions whose confidence < 0.55.
 - If nothing is worth surfacing, return { "suggestions": [] }.`;
 
+const FOCUS_MODE_APPEND = `
+
+FOCUS MODE (only when "Auto steering note" is non-empty):
+- Treat that note as a hard scope: every suggestion must either (a) extract a concrete fact that clearly serves that focus, (b) resolve an open gap that supports that focus, or (c) be an "explore" link whose anchor/URL obviously helps answer the focus.
+- Do not add suggestions about unrelated topics just because they appear on the page.
+- When the visible text likely contains focus-relevant material, prefer returning 1–3 strong suggestions over returning none.
+- Explore links must be the best on-page paths toward the focus (not generic site navigation).`;
+
 function normalizeSuggestionKind(v: unknown): SuggestionKind | null {
   return v === "new" || v === "aligns" || v === "contradicts" || v === "explore" ? v : null;
 }
@@ -134,6 +144,10 @@ export async function analyzeAgainstDeal(args: {
   const visibleText = (args.extracted.visible_text || "").slice(0, MAX_VISIBLE_TEXT_CHARS);
   const outboundLinks = (args.extracted.outbound_links ?? []).slice(0, MAX_OUTBOUND_LINKS);
 
+  const steeringTrim = (args.userInstruction ?? "").trim();
+  const analyzePrompt = steeringTrim ? `${ANALYZE_PROMPT}${FOCUS_MODE_APPEND}` : ANALYZE_PROMPT;
+  const minConfidence = steeringTrim ? MIN_CONFIDENCE_WITH_FOCUS : MIN_CONFIDENCE;
+
   const inputs = [
     { label: "Company name", value: args.deal.companyName || "Unknown" },
     { label: "Known company metadata", value: args.deal.metadata ?? {} },
@@ -153,7 +167,7 @@ export async function analyzeAgainstDeal(args: {
 
   let raw: string;
   try {
-    raw = await vertexRunWithTextMulti(getCopilotAnalyzeModel(), ANALYZE_PROMPT, inputs, false);
+    raw = await vertexRunWithTextMulti(getCopilotAnalyzeModel(), analyzePrompt, inputs, false);
   } catch (e) {
     throw new Error(`Copilot analyze failed: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -175,7 +189,7 @@ export async function analyzeAgainstDeal(args: {
     const snippetBase = typeof r.snippet === "string" ? r.snippet.trim() : "";
     const snippet = (snippetBase || summary).slice(0, 1200);
     if (!summary || !snippet || !kind) continue;
-    if (confidence < MIN_CONFIDENCE) continue;
+    if (confidence < minConfidence) continue;
     if (kind === "explore" && !link_url) continue;
     if (isLowValueSaveSuggestion({ kind, summary, snippet })) continue;
     const repeatKey = suggestionRepeatKey(summary, snippet);

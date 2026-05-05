@@ -407,6 +407,21 @@ Rules (structural — no topical denylists):
 - "scroll" is appropriate only when the current page is still likely to yield more drafts below the fold; otherwise prefer navigate over stopping.
 - Never output anything except valid JSON.`;
 
+function buildPlanNextPrompt(agendaFocus: string): string {
+  const trimmed = agendaFocus.trim();
+  if (!trimmed) return PLAN_NEXT_PROMPT;
+  const safe = trimmed.slice(0, 480).replace(/"/g, "'");
+  return `${PLAN_NEXT_PROMPT}
+
+BINDING USER FOCUS (highest priority — avoid drift):
+The session focus is: "${safe}"
+- For action=navigate, pick a candidate URL that plausibly advances THIS focus or an open_gap that supports it. Avoid tangential links.
+- intent.next_question must be one concrete question about THIS company that serves THIS focus.
+- If multiple candidates qualify, prefer is_explore_hint / is_trusted_seed rows whose link text or URL matches focus keywords.
+- If the page may still hold focus-relevant content below the fold, prefer "scroll" over "stop".
+- Return action "stop" only when the defer hint is "wait", or there is no reasonable next URL for this focus (say so clearly in rationale).`;
+}
+
 type CandidateMeta = {
   url: string;
   text: string;
@@ -417,6 +432,45 @@ type CandidateMeta = {
   is_explore_hint: boolean;
   is_trusted_seed: boolean;
 };
+
+function focusKeywordTokens(focus: string): string[] {
+  return focus
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 2);
+}
+
+/** Boost candidate order so the model sees focus-aligned links first (reduces generic navigations). */
+function sortCandidatesForFocus(candidates: CandidateMeta[], focusRaw: string): void {
+  const focus = focusRaw.trim();
+  if (!focus) return;
+  const tokens = focusKeywordTokens(focus);
+  if (!tokens.length) return;
+  const score = (c: CandidateMeta): number => {
+    const blob = `${c.text} ${c.url} ${c.host}`.toLowerCase();
+    let n = 0;
+    for (const t of tokens) if (blob.includes(t)) n += 1;
+    if (c.is_explore_hint) n += 2;
+    if (c.is_trusted_seed) n += 1;
+    return n;
+  };
+  candidates.sort((a, b) => score(b) - score(a));
+}
+
+/** With an explicit user focus, avoid stalling in "wait" when a few suggestions are pending — scroll to mine the page for focus evidence. */
+function relaxDeferWhenFocused(
+  defer: "scroll" | "wait" | null,
+  focusTrim: string,
+  sig: PlanPageSignals | undefined,
+): "scroll" | "wait" | null {
+  if (!focusTrim || !sig) return defer;
+  if (defer !== "wait") return defer;
+  const P = sig.pendingSuggestionsCount;
+  const S = sig.scrollDepthRatio;
+  if (P > 0 && P <= 6 && S < 0.9) return "scroll";
+  return defer;
+}
 
 function buildAvoidHostSet(agenda: ResearchAgenda, dislikedHostnames?: string[]): Set<string> {
   const set = new Set<string>();
@@ -608,8 +662,15 @@ export async function planNextActionWithAgenda(args: {
     visitedHostCounts,
     dislikedHostnames: args.dislikedHostnames ?? [],
   });
+  const focusTrim = (args.agenda.focus ?? "").trim();
+  if (focusTrim) sortCandidatesForFocus(candidates, focusTrim);
   const allowedNavigateUrls = new Set(candidates.map((c) => c.url));
-  const defer = deferLeavingPage(args.pageSignals, args.currentUrl);
+  const defer = relaxDeferWhenFocused(
+    deferLeavingPage(args.pageSignals, args.currentUrl),
+    focusTrim,
+    args.pageSignals,
+  );
+  const plannerPrompt = buildPlanNextPrompt(args.agenda.focus ?? "");
 
   if (candidates.length === 0) {
     return {
@@ -651,7 +712,7 @@ export async function planNextActionWithAgenda(args: {
 
   let raw = "";
   try {
-    raw = await vertexRunWithTextMulti(getResearchModel("flash_lite"), PLAN_NEXT_PROMPT, inputs, false);
+    raw = await vertexRunWithTextMulti(getResearchModel("flash_lite"), plannerPrompt, inputs, false);
   } catch (err) {
     return {
       ...fallbackResult({
