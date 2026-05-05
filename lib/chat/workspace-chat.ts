@@ -832,9 +832,12 @@ function buildToolPrecheck(args: {
   const wantsMatrix = MATRIX_INTENT_RE.test(args.message);
   const docTypeHint = inferDocumentTypeHint(args.message);
   const wantsDocument = Boolean(docTypeHint) || DOCUMENT_INTENT_RE.test(args.message);
+  const standaloneResearchClauses = clauses.filter(
+    (clause) => RESEARCH_INTENT_RE.test(clause) && !MATRIX_INTENT_RE.test(clause) && !DOCUMENT_INTENT_RE.test(clause),
+  );
   const wantsResearch =
-    EXPLICIT_RESEARCH_INTENT_RE.test(args.message) ||
-    clauses.some((clause) => RESEARCH_INTENT_RE.test(clause) && !MATRIX_INTENT_RE.test(clause) && !DOCUMENT_INTENT_RE.test(clause));
+    standaloneResearchClauses.some((clause) => EXPLICIT_RESEARCH_INTENT_RE.test(clause)) ||
+    (!wantsDocument && !wantsMatrix && standaloneResearchClauses.some((clause) => RESEARCH_INTENT_RE.test(clause)));
   const wantsWorkflow = WORKFLOW_INTENT_RE.test(args.message);
   const matrixColumnsToCreate = wantsMatrix ? inferMatrixDraftsFromMessage(matrixFocus, targetDealNames) : [];
   const researchDealIds = wantsResearch
@@ -964,6 +967,12 @@ function applyToolPrecheck(args: {
     plan.generateDocument.enabled = true;
     plan.generateDocument.prompt = args.precheck.documentFocus || plan.generateDocument.prompt || args.message;
     plan.generateDocument.typeHint = plan.generateDocument.typeHint || args.precheck.documentTypeHint;
+
+    if (!args.precheck.wantsResearch) {
+      plan.runResearch.enabled = false;
+      plan.quickLookup.enabled = false;
+      plan.missingInfoBehavior = "answer_unknown";
+    }
   }
 
   if (args.precheck.wantsResearch && args.permissions.runResearch) {
@@ -1870,13 +1879,6 @@ export async function runWorkspaceChat(args: {
           columnsToCreate,
         });
       }
-    } else {
-      actions.push({
-        type: "open_link",
-        label: "Open matrix",
-        href: "/home/matrix",
-        detail: "Company comparison workspace",
-      });
     }
   }
 

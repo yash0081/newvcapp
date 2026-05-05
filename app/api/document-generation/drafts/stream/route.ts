@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser } from "@/lib/research/db";
-import { buildGenerationContext, loadDocumentType, preflightDocument } from "@/lib/document-generation/generator";
+import { buildGenerationContext, loadDocumentType, preflightDocument, skippedResearchPreflight } from "@/lib/document-generation/generator";
 import type { DocumentTypeRow } from "@/lib/document-generation/generator";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import { stripMarkdownText } from "@/lib/plain-text";
@@ -72,7 +72,9 @@ export async function POST(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        const preflight = await preflightDocument({ admin, userId: user.id, dealId, type, prompt });
+        const preflight = skipResearch
+          ? skippedResearchPreflight()
+          : await preflightDocument({ admin, userId: user.id, dealId, type, prompt });
         if (!preflight.enoughInfo && !skipResearch) {
           controller.enqueue(sse({ type: "needs_research", preflight }));
           controller.close();

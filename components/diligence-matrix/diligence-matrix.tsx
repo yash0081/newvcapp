@@ -139,7 +139,8 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
   const [activeSelection, setActiveSelection] = useState<ActiveSelection>(null);
   const [matrixViews, setMatrixViews] = useState<MatrixView[]>([]);
   const [viewName, setViewName] = useState("");
-  const [setupCollapsed, setSetupCollapsed] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [setupCollapsed, setSetupCollapsed] = useState(true);
   const [matrixFiles, setMatrixFiles] = useState<File[]>([]);
   const [companyQuery, setCompanyQuery] = useState("");
   const [columnQuery, setColumnQuery] = useState("");
@@ -274,12 +275,12 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
       if (!pairs.length) return;
       setAutoBusy(true);
       setError(null);
-      setAutoMessage(`Filling ${pairs.length} visible cell${pairs.length === 1 ? "" : "s"} with internal context and research.`);
+      setAutoMessage(`Filling ${pairs.length} visible cell${pairs.length === 1 ? "" : "s"} from saved context first.`);
       try {
         const res = await jsonFetch<{ cells: Cell[]; errors: Array<{ error: string }> }>("/api/diligence-matrix/fill", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pairs, allowResearch: true }),
+          body: JSON.stringify({ pairs, allowResearch: false }),
         });
         setData((prev) => {
           const byKey = new Map(prev.cells.map((c) => [`${c.deal_id}:${c.column_id}`, c]));
@@ -287,7 +288,7 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
           return { ...prev, cells: [...byKey.values()] };
         });
         setAutoMessage(
-          `Filled ${res.cells.length} visible cell${res.cells.length === 1 ? "" : "s"}${res.errors.length ? `; ${res.errors.length} need attention` : ""}.`,
+          `Filled ${res.cells.length} visible cell${res.cells.length === 1 ? "" : "s"} from saved context${res.errors.length ? `; ${res.errors.length} need attention` : ""}.`,
         );
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -521,7 +522,7 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        {!focusMode ? (
+        {!focusMode && !historyCollapsed ? (
         <aside className="flex max-h-[32svh] shrink-0 flex-col border-b border-zinc-200 bg-white lg:max-h-none lg:w-[264px] lg:border-b-0 lg:border-r">
           <div className="border-b border-zinc-200 px-4 py-3">
             <div className="flex items-center justify-between gap-2">
@@ -843,6 +844,16 @@ export function DiligenceMatrix({ focusMode = false }: { focusMode?: boolean }) 
                   <SlidersHorizontal className="h-4 w-4" />
                   {setupCollapsed ? "Show setup" : "Hide setup"}
                 </button>
+                {!focusMode ? (
+                  <button
+                    type="button"
+                    onClick={() => setHistoryCollapsed((value) => !value)}
+                    className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 text-sm font-medium text-zinc-800 hover:bg-zinc-50"
+                  >
+                    <BarChart3 className="h-4 w-4" />
+                    {historyCollapsed ? "Show views" : "Hide views"}
+                  </button>
+                ) : null}
                 {!focusMode ? (
                   <a
                     href="/home/matrix/focus"

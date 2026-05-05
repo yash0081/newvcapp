@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser } from "@/lib/research/db";
-import { generateDocumentContent, loadDocumentType, preflightDocument } from "@/lib/document-generation/generator";
+import { generateDocumentContent, loadDocumentType, preflightDocument, skippedResearchPreflight } from "@/lib/document-generation/generator";
 import type { DocumentTypeRow } from "@/lib/document-generation/generator";
 
 function adHocDocumentType(userId: string, body: { typeName?: unknown; outputFormat?: unknown }): DocumentTypeRow {
@@ -54,7 +54,9 @@ export async function POST(req: Request) {
   if (!type) return NextResponse.json({ error: "Document type not found" }, { status: 404 });
 
   const dealId = typeof body?.dealId === "string" ? body.dealId : null;
-  const preflight = await preflightDocument({ admin, userId: user.id, dealId, type, prompt });
+  const preflight = body?.skipResearch
+    ? skippedResearchPreflight()
+    : await preflightDocument({ admin, userId: user.id, dealId, type, prompt });
   if (!preflight.enoughInfo && !body?.skipResearch) {
     return NextResponse.json({ needsResearch: true, preflight }, { status: 409 });
   }

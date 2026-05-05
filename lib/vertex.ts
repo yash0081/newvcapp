@@ -86,6 +86,13 @@ function isRetryableVertexStreamError(e: unknown): boolean {
   );
 }
 
+function isRetryableVertexError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /429|RESOURCE_EXHAUSTED|resource exhausted|rate limit|quota|unavailable|UNAVAILABLE|DEADLINE_EXCEEDED|503|502|ECONNRESET|ETIMEDOUT/i.test(
+    msg
+  );
+}
+
 /**
  * Stream plain text from a single user message (chat answers). No grounding by default.
  * Retries the **whole** stream on rate limits / transient errors (exponential backoff + jitter).
@@ -197,19 +204,35 @@ export async function vertexRunWithText(
     return (bestCandidate || directText).trim();
   };
 
+  const generateWithRetry = async (withGrounding: boolean) => {
+    const maxAttempts = 4;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await model.generateContent(buildRequest(withGrounding));
+      } catch (e) {
+        lastErr = e;
+        if (attempt >= maxAttempts || !isRetryableVertexError(e)) throw e;
+        const base = Math.min(16_000, 750 * 2 ** attempt);
+        await sleep(base + Math.random() * 400);
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  };
+
   // Primary attempt (grounded or ungrounded based on caller).
-  const first = await model.generateContent(buildRequest(useGrounding));
+  const first = await generateWithRetry(useGrounding);
   const firstText = pickText(first);
   if (firstText) return firstText;
 
   // Retry same request once: Vertex occasionally returns empty candidate text payloads.
-  const second = await model.generateContent(buildRequest(useGrounding));
+  const second = await generateWithRetry(useGrounding);
   const secondText = pickText(second);
   if (secondText) return secondText;
 
   // If grounded mode produced no text, run one ungrounded fallback call.
   if (useGrounding) {
-    const third = await model.generateContent(buildRequest(false));
+    const third = await generateWithRetry(false);
     const thirdText = pickText(third);
     if (thirdText) return thirdText;
   }

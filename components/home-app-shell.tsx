@@ -59,7 +59,7 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
     pathname === "/home/document-generator" ||
     pathname === "/home/workflows" ||
     pathname === "/home/deals/grid";
-  const framedMaxWidth = chatRoute ? "max-w-[1680px]" : "max-w-[1180px]";
+  const framedMaxWidth = chatRoute ? "max-w-[1680px]" : matrixRoute ? "max-w-none" : "max-w-[1180px]";
   const contentMaxWidth = researchRoute
     ? "max-w-5xl"
     : compactContent

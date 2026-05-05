@@ -1674,6 +1674,7 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
   function shouldRenderActionForMessage(action: ChatAction, key: string): boolean {
     if (action.type === "tool_call") return false;
     if (action.type === "matrix_preview" || action.type === "document_preview") return true;
+    if (action.type === "open_link" && action.href.startsWith("/home/matrix")) return false;
     if (action.type === "open_document" || action.type === "open_link" || action.type === "record_update") return true;
     const runState = toolRuns[key];
     if (runState?.status === "done") return false;

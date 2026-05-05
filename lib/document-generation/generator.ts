@@ -62,6 +62,15 @@ function clampText(s: string, n: number): string {
   return s.trim().slice(0, n);
 }
 
+export function skippedResearchPreflight(): PreflightResult {
+  return {
+    enoughInfo: true,
+    missingInfo: [],
+    researchSteps: [],
+    rationale: "Skipped research preflight; drafting from existing workspace context and saved document guidance.",
+  };
+}
+
 async function loadDeal(admin: SupabaseClient, userId: string, dealId: string | null): Promise<DealRow | null> {
   if (!dealId) return null;
   const res = await admin
@@ -267,6 +276,100 @@ function parseGenerated(raw: string): { title: string; content: string } | null 
   };
 }
 
+type DocumentSection = {
+  heading: string | null;
+  text: string;
+  startLine: number;
+  endLine: number;
+};
+
+function normalizeSectionName(s: string): string {
+  return stripMarkdownLike(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripMarkdownLike(s: string): string {
+  return String(s || "").replace(/^#+\s*/, "").replace(/[*_`]/g, "").trim();
+}
+
+function looksLikeSectionHeading(line: string, prevBlank: boolean, nextLine?: string): boolean {
+  const clean = stripMarkdownLike(line);
+  if (!clean || clean.length > 110) return false;
+  if (/^[\-*•]|\d+[.)]\s/.test(clean)) return false;
+  if (/[.!?;,]$/.test(clean)) return false;
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 10) return false;
+  if (/^(and|but|or|the|this|that|it|we|they)\b/i.test(clean)) return false;
+  return prevBlank || Boolean(nextLine?.trim());
+}
+
+function splitDocumentSections(content: string): DocumentSection[] {
+  const lines = content.split(/\n/);
+  const headingIndexes: Array<{ index: number; heading: string }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const prevBlank = i === 0 || !lines[i - 1]!.trim();
+    if (looksLikeSectionHeading(lines[i] ?? "", prevBlank, lines[i + 1])) {
+      headingIndexes.push({ index: i, heading: stripMarkdownLike(lines[i] ?? "") });
+    }
+  }
+  if (!headingIndexes.length) return [{ heading: null, text: content, startLine: 0, endLine: lines.length - 1 }];
+
+  const sections: DocumentSection[] = [];
+  if (headingIndexes[0]!.index > 0) {
+    sections.push({
+      heading: null,
+      text: lines.slice(0, headingIndexes[0]!.index).join("\n"),
+      startLine: 0,
+      endLine: headingIndexes[0]!.index - 1,
+    });
+  }
+  for (let i = 0; i < headingIndexes.length; i++) {
+    const current = headingIndexes[i]!;
+    const next = headingIndexes[i + 1]?.index ?? lines.length;
+    sections.push({
+      heading: current.heading,
+      text: lines.slice(current.index, next).join("\n"),
+      startLine: current.index,
+      endLine: next - 1,
+    });
+  }
+  return sections;
+}
+
+function findTargetSection(content: string, instruction: string): DocumentSection | null {
+  const normalizedInstruction = normalizeSectionName(instruction);
+  if (!/\b(section|paragraph|summary|overview|problem|solution|traction|market|team|risk|risks|recommendation|thesis|memo)\b/.test(normalizedInstruction)) {
+    return null;
+  }
+  const sections = splitDocumentSections(content).filter((section) => section.heading);
+  const matches = sections
+    .map((section) => {
+      const heading = normalizeSectionName(section.heading || "");
+      if (!heading) return { section, score: 0 };
+      let score = normalizedInstruction.includes(heading) ? heading.length + 20 : 0;
+      for (const token of heading.split(" ").filter((t) => t.length >= 4)) {
+        if (normalizedInstruction.includes(token)) score += token.length;
+      }
+      return { section, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return matches[0]?.section ?? null;
+}
+
+function replaceSection(content: string, target: DocumentSection, replacement: string): string {
+  const lines = content.split(/\n/);
+  const next = [
+    ...lines.slice(0, target.startLine),
+    ...replacement.trim().split(/\n/),
+    ...lines.slice(target.endLine + 1),
+  ];
+  return next.join("\n").trim();
+}
+
 export async function generateDocumentContent(args: {
   admin: SupabaseClient;
   userId: string;
@@ -326,6 +429,70 @@ export async function reviseDocumentContent(args: {
     | null;
   if (!draft) throw new Error("Draft not found");
   const type = draft.type_id ? await loadDocumentType(args.admin, args.userId, draft.type_id) : null;
+  const targetSection = findTargetSection(draft.content, args.instruction);
+
+  if (targetSection) {
+    const rawSection = await vertexRunWithTextMulti(
+      getResearchModel("flash_lite"),
+      `Revise only the targeted section of a generated business document.
+Return strict JSON:
+{
+  "section": "full revised section text, including the original section heading",
+  "savePreference": false,
+  "preference": "general reusable preference if relevant, otherwise blank"
+}
+Rules:
+- Apply the user's instruction only to the targeted section.
+- Preserve the section heading unless the instruction explicitly renames it.
+- Do not rewrite, summarize, reduce, expand, or reorder any other section.
+- Do not use Markdown syntax, bold markers, code fences, or link markup.
+- savePreference should be true only when the instruction is reusable for future documents of this type.
+- The preference must be concise format/style/content guidance, not deal-specific facts.`,
+      [
+        { label: "Document type", value: type },
+        { label: "Current title", value: draft.title },
+        { label: "Target section heading", value: targetSection.heading },
+        { label: "Target section only", value: targetSection.text },
+        { label: "Revision instruction", value: args.instruction },
+      ],
+      false,
+    );
+    const parsed = (parseJsonFromResponseOrNull(rawSection) ?? (await parseJsonFromResponseWithRepair(rawSection).catch(() => null))) as
+      | Record<string, unknown>
+      | null;
+    const revisedSection = asString(parsed?.section).trim() || targetSection.text;
+    const title = draft.title;
+    const content = replaceSection(draft.content, targetSection, revisedSection);
+    const preference = asString(parsed?.preference).trim();
+    const savePreference = Boolean(parsed?.savePreference && preference && draft.type_id);
+
+    await args.admin
+      .schema("deal_intel")
+      .from("generated_document_draft")
+      .update({ title, content, status: "ready" })
+      .eq("id", draft.id)
+      .eq("user_id", args.userId);
+
+    await args.admin.schema("deal_intel").from("generated_document_feedback").insert({
+      draft_id: draft.id,
+      type_id: draft.type_id,
+      user_id: args.userId,
+      instruction: args.instruction,
+      saved_to_type: savePreference,
+    });
+
+    if (savePreference && type && draft.type_id) {
+      const nextPrefs = `${type.learned_preferences || ""}\n- ${preference}`.trim().slice(-8000);
+      await args.admin
+        .schema("deal_intel")
+        .from("document_generation_type")
+        .update({ learned_preferences: nextPrefs })
+        .eq("id", draft.type_id)
+        .eq("user_id", args.userId);
+    }
+
+    return { title, content, savedPreference: savePreference ? preference : null };
+  }
 
   const raw = await vertexRunWithTextMulti(
     getResearchModel("flash"),
@@ -338,7 +505,8 @@ export async function reviseDocumentContent(args: {
 	  "preference": "general reusable preference if relevant, otherwise blank"
 	}
 	Rules:
-	- Apply the requested modification to the full document.
+	- Apply the requested modification to the full document only when the instruction is document-wide.
+	- If the instruction names one section, paragraph, or heading, change only that section and preserve the rest verbatim.
 	- Do not use Markdown syntax, markdown headings, bold markers, code fences, or link markup.
 	- savePreference should be true only when the instruction is reusable for future documents of this type.
 - The preference must be concise and format/style/content guidance, not deal-specific facts.`,
@@ -350,7 +518,7 @@ export async function reviseDocumentContent(args: {
     ],
     false,
   );
-  const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw))) as Record<string, unknown> | null;
+  const parsed = (parseJsonFromResponseOrNull(raw) ?? (await parseJsonFromResponseWithRepair(raw).catch(() => null))) as Record<string, unknown> | null;
   const title = asString(parsed?.title) || draft.title;
   const content = asString(parsed?.content) || draft.content;
   const preference = asString(parsed?.preference).trim();

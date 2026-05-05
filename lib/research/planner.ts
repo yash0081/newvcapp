@@ -473,6 +473,9 @@ async function deriveResearchIntent(args: {
     focus: args.focus,
     openGapFields: openGaps.map((g) => g.field),
   });
+  if (process.env.RESEARCH_ENABLE_LLM_INTENT !== "1") {
+    return fallback;
+  }
   const prompt = `You are the intent and pruning layer for a VC research planner.
 
 Before planning research, infer what the user actually needs. The output controls which schema buckets, source families, and research tasks are allowed. This must be generalized: do not use a fixed diligence checklist unless the user asked for broad diligence.
@@ -553,9 +556,12 @@ async function reviewResearchPlan(args: {
   candidates: PlannerCandidate[];
   preferencesSummary: string;
 }): Promise<ResearchPlanSuggestion> {
+  if (process.env.RESEARCH_ENABLE_LLM_PLAN_REVIEW !== "1") {
+    return filterSuggestionForIntent(args.suggestion, args.intent);
+  }
   const prompt = `You are the lightweight review and pruning agent for a VC research plan.
 
-Your job is to rewrite the draft plan so it answers the research intent exactly, with no unrelated work.
+Your job is to review each draft task independently so the plan answers the research intent exactly, with no unrelated work.
 
 Return strict JSON only:
 {
@@ -571,7 +577,7 @@ Return strict JSON only:
 }
 
 Rules:
-- The draft plan has already passed cheap keyword and category filtering. Your job is the semantic gate: remove **redundant or off-scope** steps — not collapse the plan into vague one-liners.
+- The draft plan has already passed cheap keyword and category filtering. Your job is the semantic gate: keep, narrow, or remove each task based on that task's relevance — not collapse the whole plan into vague one-liners.
 - Keep only steps necessary for intent.userGoal.
 - When intent.breadth is **broad** and the draft has multiple **materially different** angles (e.g. team vs funding vs product), keep **at least two** distinct steps unless they are true duplicates.
 - Remove steps covered by intent.excludedTopics.
@@ -861,8 +867,8 @@ Rules:
         ...reviewed,
         intent,
         pruningNotes: [
-          "Keyword and category hints reduced the draft plan before lightweight LLM review.",
-          "The lightweight review agent kept only steps needed for the user goal and removed duplicate or adjacent-company work.",
+          "Each draft task was checked against the requested topics before optional lightweight LLM review.",
+          "Task-level pruning kept only steps needed for the user goal and removed duplicate or adjacent-company work.",
         ],
       };
     }
@@ -875,7 +881,7 @@ Rules:
       return {
         ...filterSuggestionForIntent(recovered, intent),
         intent,
-        pruningNotes: ["Recovered an unstructured plan, then applied keyword/category pruning."],
+        pruningNotes: ["Recovered an unstructured plan, then applied task-level keyword/category pruning."],
       };
     }
   } catch {
@@ -895,6 +901,6 @@ Rules:
   return {
     ...fallback,
     intent,
-    pruningNotes: ["Used the deterministic fallback, then applied the same scope and duplicate pruning gates."],
+    pruningNotes: ["Used the deterministic fallback, then applied the same task-level scope and duplicate pruning gates."],
   };
 }

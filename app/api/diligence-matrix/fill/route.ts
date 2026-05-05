@@ -3,6 +3,19 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { fillMatrixCell } from "@/lib/diligence-matrix/matrix";
 import { getAuthedUser } from "@/lib/research/db";
 
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workers = new Array(Math.min(limit, items.length)).fill(null).map(async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await fn(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function POST(req: Request) {
   const user = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -34,7 +47,8 @@ export async function POST(req: Request) {
   const pairs = requestedPairs.length ? requestedPairs : dealIds.flatMap((dealId) => columnIds.map((columnId) => ({ dealId, columnId })));
   const maxPairs = body?.allowResearch !== false ? 12 : 80;
   const selectedPairs = pairs.slice(0, maxPairs);
-  const results = await Promise.all(selectedPairs.map(async ({ dealId, columnId }) => {
+  const concurrency = body?.allowResearch !== false ? 3 : 8;
+  const results = await mapWithConcurrency(selectedPairs, concurrency, async ({ dealId, columnId }) => {
       try {
         const cell = await fillMatrixCell({
           admin,
@@ -55,7 +69,7 @@ export async function POST(req: Request) {
           },
         };
       }
-  }));
+  });
   const cells = results.map((result) => result.cell).filter(Boolean);
   const errors = results.map((result) => result.error).filter(Boolean);
   if (pairs.length > maxPairs) {
