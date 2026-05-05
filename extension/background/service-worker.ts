@@ -203,7 +203,11 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
         const controller = new AbortController();
         pendingObserveAbort = controller;
         try {
-          const res = await observeText(state.activeSessionId, req.snapshot, req.clientMode, controller.signal);
+          const res = await observeText(state.activeSessionId, req.snapshot, {
+            clientMode: req.clientMode,
+            signal: controller.signal,
+            steeringHint: req.steeringHint,
+          });
           if (pendingObserveAbort === controller) pendingObserveAbort = null;
           const payload: ObserveResponse = res;
           await saveState({ ...(await loadState()), lastObserveAt: Date.now() });
@@ -247,6 +251,7 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
           req.currentUrl,
           req.copilotExploreLinks,
           req.plan_page_context,
+          req.steeringHint,
         );
         const payload: PlanNextResponse = res;
         return { ok: true, payload };

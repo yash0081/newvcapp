@@ -9,7 +9,13 @@ export type ExtensionRequest =
   | { type: "ENSURE_OVERLAY" }
   | { type: "START_SESSION"; dealId: string; tabHint?: string }
   | { type: "GET_ACTIVE_SESSION" }
-  | { type: "OBSERVE"; snapshot: DomSnapshot; clientMode?: "manual" | "auto" }
+  | {
+      type: "OBSERVE";
+      snapshot: DomSnapshot;
+      clientMode?: "manual" | "auto";
+      /** Current focus text (draft or applied); server uses this when set so analysis follows the textarea without waiting for Apply. */
+      steeringHint?: string;
+    }
   | {
       type: "PLAN_NEXT";
       snapshot: DomSnapshot;
@@ -22,7 +28,9 @@ export type ExtensionRequest =
         scroll_depth_ratio: number;
         draft_items_this_url: number;
         pending_suggestions_count: number;
+        consecutive_plan_scrolls?: number;
       };
+      steeringHint?: string;
     }
   | {
       type: "AUTO_DRAFT_OP";

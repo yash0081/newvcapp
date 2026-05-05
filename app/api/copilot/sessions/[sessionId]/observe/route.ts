@@ -65,6 +65,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         clientMode?: "manual" | "auto";
         hostnameHint?: string;
         urlHint?: string;
+        /** Extension Focus field: overrides session metadata for this request when non-empty. */
+        steering_hint?: unknown;
         extracted?: {
           visible_text?: unknown;
           page_title?: unknown;
@@ -131,7 +133,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   // Session metadata is the live source of truth for accepts (may be ahead of company_* until background sync).
   const sessionAcceptedSnippets = getSessionAcceptedSnippets(session.metadata);
   const visitedUrls = getVisitedUrls(session.metadata);
-  const autoSteeringNote = getAutoSteeringNote(session.metadata);
+  const clientSteeringHint =
+    typeof body?.steering_hint === "string" && body.steering_hint.trim()
+      ? body.steering_hint.trim().slice(0, 2000)
+      : null;
+  const autoSteeringNote = clientSteeringHint ?? getAutoSteeringNote(session.metadata);
   const openGaps = computeOpenGaps({
     metadata: dealMeta,
     recentClaims: claims,

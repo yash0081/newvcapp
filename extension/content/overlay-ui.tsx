@@ -233,6 +233,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const [autoSteeringDraft, setAutoSteeringDraft] = useState(() => steeringNoteFromSession(initialSession));
   const [autoSteeringDirty, setAutoSteeringDirty] = useState(false);
 
+  /** Draft wins when non-empty so analysis/planning follow the textarea before “Apply focus”. */
+  const effectiveSteeringHint = useMemo(
+    () => (autoSteeringDraft.trim() || serverAutoSteering.trim()) || undefined,
+    [autoSteeringDraft, serverAutoSteering],
+  );
+
   sessionRef.current = session;
   pausedRef.current = paused;
   modeRef.current = mode;
@@ -502,11 +508,16 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     analyzeAbortRef.current?.abort();
     const controller = new AbortController();
     analyzeAbortRef.current = controller;
-    setResearchActivity(analyzingActivitySentence(snapshot, serverAutoSteering));
+    setResearchActivity(analyzingActivitySentence(snapshot, effectiveSteeringHint ?? ""));
     setBusy("Analyzing…");
     setError(null);
     try {
-      const res = await send<ObserveResponse>({ type: "OBSERVE", snapshot, clientMode: modeRef.current });
+      const res = await send<ObserveResponse>({
+        type: "OBSERVE",
+        snapshot,
+        clientMode: modeRef.current,
+        ...(effectiveSteeringHint ? { steeringHint: effectiveSteeringHint } : {}),
+      });
       if (controller.signal.aborted || pausedRef.current) return;
       lastSnapshotRef.current = { fingerprint: fp, at: Date.now() };
       setResearchActivity(observeFollowUpSentence(res.suggestions ?? []));
@@ -537,7 +548,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         setBusy(null);
       }
     }
-  }, [sessionId, effectiveScope, serverAutoSteering]);
+  }, [sessionId, effectiveScope, effectiveSteeringHint]);
 
   useEffect(() => {
     if (mode !== "auto" || !session) return;
@@ -741,17 +752,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       const stopped = () =>
         pausedRef.current || modeRef.current !== "auto" || automationGenerationRef.current !== runGeneration;
       if (stopped()) return;
-      // Auto UI hides suggestion cards — resolve contradictions without asking (defer CRM truth; unblocks planner).
-      const contradictRows = suggestions.filter((s) => s.kind === "contradicts" && s.event_id);
-      if (contradictRows.length) {
-        setResearchActivity("Untangling conflicting facts the model flagged…");
-        for (const s of contradictRows) {
-          if (stopped()) return;
-          await decide(s, "reject", { silent: true });
-          if (stopped()) return;
-        }
-        return;
-      }
+      // Do not auto-reject contradict cards (felt arbitrary); skip them for accepts and let the planner run.
       const autoAccept = suggestions.filter(
         (s) =>
           !!s.event_id &&
@@ -818,6 +819,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         currentUrl: href,
         plan_page_context,
         ...(copilotExploreLinks.length ? { copilotExploreLinks } : {}),
+        ...(effectiveSteeringHint ? { steeringHint: effectiveSteeringHint } : {}),
       });
       if (stopped()) return;
       if (res.next.action === "scroll") {
@@ -897,6 +899,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     decide,
     analyzePage,
     postScrollPlannerKick,
+    effectiveSteeringHint,
   ]);
 
   useEffect(() => {
@@ -1017,6 +1020,48 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             </div>
           ) : null}
 
+          {mode !== "auto" && session ? (
+            <div className="card" style={{ marginBottom: 10 }}>
+              <div className="label" style={{ marginTop: 0 }}>
+                Focus
+              </div>
+              <p className="notice" style={{ marginBottom: 8, fontSize: 11 }}>
+                Guides page analysis and suggestions. You can type here before clicking Apply — it is sent on each analyze without saving.
+              </p>
+              <textarea
+                className="prompt-input"
+                rows={2}
+                placeholder="HQ, funding, team, competitors…"
+                value={autoSteeringDraft}
+                onChange={(e) => {
+                  setAutoSteeringDraft(e.target.value);
+                  setAutoSteeringDirty(true);
+                }}
+              />
+              <div className="row" style={{ marginTop: 6 }}>
+                <button
+                  className="btn primary"
+                  type="button"
+                  onClick={() => void applyAutoSteering()}
+                  disabled={
+                    steeringSaving ||
+                    (!autoSteeringDirty && autoSteeringDraft.trim() === serverAutoSteering.trim())
+                  }
+                >
+                  {steeringSaving ? "Saving…" : "Apply focus"}
+                </button>
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => void clearAutoSteering()}
+                  disabled={steeringSaving || (!serverAutoSteering && !autoSteeringDraft.trim())}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           {mode !== "auto" ? (
             <div className="tabs">
               <button
@@ -1046,6 +1091,9 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                   <div className="label" style={{ marginTop: 0 }}>
                     Focus
                   </div>
+                  <p className="notice" style={{ marginBottom: 8, fontSize: 11 }}>
+                    Typed focus is used on each step immediately; Apply saves it to the session for sync and tab reloads.
+                  </p>
                   <textarea
                     className="prompt-input"
                     rows={2}

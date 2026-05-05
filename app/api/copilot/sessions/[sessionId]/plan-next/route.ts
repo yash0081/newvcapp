@@ -167,6 +167,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
         currentUrl?: unknown;
         copilot_explore_links?: unknown;
         plan_page_context?: unknown;
+        steering_hint?: unknown;
         snapshot?: {
           visible_text?: unknown;
           page_title?: unknown;
@@ -219,7 +220,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   const draftSnippets = getAutoDraft(session.metadata).snippets;
   const draftSourceUrls = draftSnippets.map((s) => s.source_url ?? "").filter((u): u is string => Boolean(u));
   const acceptedSourceUrls = getAcceptedSourceUrls(sessionAcceptedSnippets);
-  const steeringNote = getAutoSteeringNote(session.metadata);
+  const clientSteeringHint =
+    typeof body?.steering_hint === "string" && body.steering_hint.trim()
+      ? body.steering_hint.trim().slice(0, 2000)
+      : null;
+  const steeringNote = clientSteeringHint ?? getAutoSteeringNote(session.metadata);
   const companyName = asCompanyName(dealMeta);
   const companyContext = buildCompanyContext({ name: companyName, metadata: dealMeta });
   const openGaps = computeOpenGaps({

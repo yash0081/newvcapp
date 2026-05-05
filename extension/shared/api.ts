@@ -90,9 +90,16 @@ export async function setCopilotSteering(
 export async function observeText(
   sessionId: string,
   snapshot: DomSnapshot,
-  clientMode?: "manual" | "auto",
-  signal?: AbortSignal,
+  options?: {
+    clientMode?: "manual" | "auto";
+    signal?: AbortSignal;
+    /** Overrides session-stored steering for this request (extension Focus field). */
+    steeringHint?: string;
+  },
 ): Promise<{ suggestions: Suggestion[]; observationEventId?: string }> {
+  const clientMode = options?.clientMode;
+  const signal = options?.signal;
+  const hint = options?.steeringHint?.trim();
   return apiFetch(`/api/copilot/sessions/${sessionId}/observe`, {
     method: "POST",
     signal,
@@ -107,6 +114,7 @@ export async function observeText(
       urlHint: snapshot.url,
       hostnameHint: snapshot.hostname,
       clientMode,
+      ...(hint ? { steering_hint: hint.slice(0, 2000) } : {}),
     }),
   });
 }
@@ -121,8 +129,11 @@ export async function planNext(
     scroll_depth_ratio: number;
     draft_items_this_url: number;
     pending_suggestions_count: number;
+    consecutive_plan_scrolls?: number;
   },
+  steeringHint?: string,
 ): Promise<{ next: { action: "navigate" | "scroll" | "stop"; url?: string; rationale?: string } }> {
+  const hint = steeringHint?.trim();
   return apiFetch(`/api/copilot/sessions/${sessionId}/plan-next`, {
     method: "POST",
     body: JSON.stringify({
@@ -136,6 +147,7 @@ export async function planNext(
       currentUrl,
       ...(copilotExploreLinks?.length ? { copilot_explore_links: copilotExploreLinks } : {}),
       ...(planPageContext ? { plan_page_context: planPageContext } : {}),
+      ...(hint ? { steering_hint: hint.slice(0, 2000) } : {}),
     }),
   });
 }
