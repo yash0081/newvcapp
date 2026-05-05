@@ -84,8 +84,8 @@ Rules:
   2) Existing CRM/deal claims
   If a current-session accepted snippet already resolves a previous contradiction, do NOT raise it again.
 - Do not repeat substantially identical suggestions already surfaced in this session.
-- "new"        => useful info not present in our context.
-- "aligns"     => corroborates an existing fact only if it materially improves evidence.
+- "new"        => useful info not present in our context (metadata + recent claims + session snippets).
+- "aligns"     => corroborates something we already have in CRM/metadata **or** recent claims. Use this whenever the **visible page** states the same fact with usable sourcing — even if CRM already lists it (e.g. founder name, title, education). Session research often needs on-record corroboration, not only net-new fields. Prefer **aligns** over skipping; the snippet should quote or paraphrase the **on-screen** fact and imply the source (page/section). "Material improvement" includes: independent source, fresher detail, exact quote, or confirmation while the user’s steering note or open gaps target that topic.
 - "contradicts"=> meaningfully disagrees with existing facts; include conflicting value.
 - Prefer schema-aligned snippets: people/team, makeup/origin, problem/customer/market, solution/pricing/defensibility/competitors, traction, or negative aspects.
 - Surface negatives and missing-evidence facts when the page gives concrete support; do not manufacture criticism.
@@ -111,6 +111,7 @@ FOCUS MODE (only when "Auto steering note" is non-empty):
 - Treat that note as a hard scope: every suggestion must either (a) extract a concrete fact that clearly serves that focus, (b) resolve an open gap that supports that focus, or (c) be an "explore" link whose anchor/URL obviously helps answer the focus.
 - Do not add suggestions about unrelated topics just because they appear on the page.
 - When the visible text likely contains focus-relevant material, prefer returning 1–3 strong suggestions over returning none.
+- If the focus is on people (founders, team, leadership, bios) and the page names or describes those people, suggest saving **aligns** snippets for facts that **already appear in CRM** — the user still wants sourced captures from this page, not an empty card because the CRM was pre-filled.
 - Explore links must be the best on-page paths toward the focus (not generic site navigation).`;
 
 function normalizeSuggestionKind(v: unknown): SuggestionKind | null {

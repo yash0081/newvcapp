@@ -53,12 +53,11 @@ function truncateWords(s: string, maxLen: number): string {
   return (sp > 20 ? slice.slice(0, sp) : slice).trim() + "…";
 }
 
-/** Cheap topic hints from visible text / suggestions — drives friendly status lines only. */
+/**
+ * Cheap topic hints from visible text / suggestions — drives friendly status lines only.
+ * Stock/finance patterns are strict and listed last so "stock photos", "in stock", etc. do not win.
+ */
 const RESEARCH_TOPIC_PATTERNS: ReadonlyArray<{ re: RegExp; phrase: string }> = [
-  {
-    re: /\b(stock price|share price|nasdaq|nyse|ticker|market cap|valuation|equity)\b|\bstock\b|\bshares?\b/i,
-    phrase: "stock price and market signals",
-  },
   { re: /\b(ceo|cfo|cto|coo|chief executive|founder|co-founder|leadership|management team|executives?|board of directors)\b/i, phrase: "leadership and executives" },
   { re: /\b(revenue|arr|mrr|annual recurring|booking|pipeline)\b/i, phrase: "revenue and growth metrics" },
   { re: /\b(funding|raised|series [a-e]|seed round|venture|investors?)\b/i, phrase: "funding and investors" },
@@ -69,6 +68,10 @@ const RESEARCH_TOPIC_PATTERNS: ReadonlyArray<{ re: RegExp; phrase: string }> = [
   { re: /\b(competitor|competitive|landscape|versus|vs\.)\b/i, phrase: "competition" },
   { re: /\b(patents?|intellectual property)\b|\bip\b/i, phrase: "intellectual property" },
   { re: /\b(acquisition|m&a|merger|bought)\b/i, phrase: "M&A activity" },
+  {
+    re: /\b(stock price|share price|closing price|after[- ]hours trading|shares outstanding|market capitalization|market cap)\b|\b(?:nasdaq|nyse)\s*:\s*[A-Z]{1,5}\b|\bticker\s+symbol\b|\bpublic\s+company\s+filings?\b/i,
+    phrase: "stock price and market signals",
+  },
 ];
 
 function researchTopicPhrase(blob: string): string | null {
@@ -83,17 +86,19 @@ function analyzingActivitySentence(
   snapshot: { visible_text: string; page_title: string },
   steeringNote: string,
 ): string {
+  const steer = steeringNote.trim();
+  if (steer) {
+    return `Analyzing this page for your focus: ${truncateWords(steer, 76)}…`;
+  }
   const blob = `${snapshot.page_title}\n${snapshot.visible_text}`;
   const topic = researchTopicPhrase(blob);
-  const steer = steeringNote.trim();
-  let core: string;
-  if (topic) core = `Analyzing ${topic} on this page`;
-  else core = `Analyzing “${truncateWords(snapshot.page_title, 44)}” for deal-relevant details`;
-  if (steer) core += ` — prioritizing ${truncateWords(steer, 72)}`;
-  return `${core}…`;
+  if (topic) return `Analyzing ${topic} on this page…`;
+  return `Analyzing “${truncateWords(snapshot.page_title, 44)}” for deal-relevant details…`;
 }
 
-function suggestionPickSentence(s: Suggestion): string {
+function suggestionPickSentence(s: Suggestion, steeringNote?: string): string {
+  const steer = steeringNote?.trim() ?? "";
+  if (steer) return `Saving a fact toward your focus: ${truncateWords(steer, 56)}…`;
   const blob = `${s.summary}\n${s.snippet}`;
   const topic = researchTopicPhrase(blob);
   if (topic) return `Saving a note about ${topic}…`;
@@ -102,7 +107,9 @@ function suggestionPickSentence(s: Suggestion): string {
   return "Saving a useful fact from this page…";
 }
 
-function observeFollowUpSentence(suggestions: Suggestion[]): string {
+function observeFollowUpSentence(suggestions: Suggestion[], steeringNote?: string): string {
+  const steer = steeringNote?.trim() ?? "";
+  if (steer) return `Updating suggestions aligned with: ${truncateWords(steer, 60)}…`;
   const pick = suggestions.find((s) => s.kind !== "explore");
   if (!pick) return "Scan complete — planning the next move…";
   const blob = `${pick.summary}\n${pick.snippet}`;
@@ -520,7 +527,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       });
       if (controller.signal.aborted || pausedRef.current) return;
       lastSnapshotRef.current = { fingerprint: fp, at: Date.now() };
-      setResearchActivity(observeFollowUpSentence(res.suggestions ?? []));
+      setResearchActivity(observeFollowUpSentence(res.suggestions ?? [], effectiveSteeringHint));
       setSuggestions((prev) => {
         const seenIds = new Set(prev.map((s) => s.event_id ?? s.client_id));
         const seenKeys = new Set(prev.map((s) => suggestionKey(s)));
@@ -760,16 +767,21 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           s.kind !== "explore" &&
           (s.confidence ?? 0) >= AGENT_AUTO_ACCEPT_MIN_CONFIDENCE,
       );
+      /** Keep auto mode moving: draft a couple of focus-relevant facts, then plan-next can navigate. */
+      const MAX_AUTO_DRAFT_PER_TICK = 2;
       const draftKeys = new Set(autoDraft.map((sn) => suggestionKey({ summary: "", snippet: sn.text })));
       const textsForDedupe = [...autoDraft.map((sn) => sn.text), ...snippets.map((sn) => sn.text)];
+      let draftedThisTick = 0;
       for (const s of autoAccept) {
+        if (draftedThisTick >= MAX_AUTO_DRAFT_PER_TICK) break;
         if (stopped()) return;
         const key = suggestionKey(s);
         if (draftKeys.has(key)) continue;
         if (isNearDuplicateDraftSnippet(s.snippet, textsForDedupe)) continue;
         draftKeys.add(key);
         textsForDedupe.push(s.snippet);
-        setResearchActivity(suggestionPickSentence(s));
+        draftedThisTick += 1;
+        setResearchActivity(suggestionPickSentence(s, effectiveSteeringHint));
         highlightAcceptedSnippet(s.snippet);
         await autoDraftOp({
           type: "AUTO_DRAFT_OP",

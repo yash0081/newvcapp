@@ -128,6 +128,24 @@ export function deferLeavingPage(sig: PlanPageSignals | undefined, currentUrl?: 
   return null;
 }
 
+/**
+ * When the user set a focus and we've already drafted facts on this URL, stop
+ * "mining" the same page forever — let navigation pick a focus-aligned link.
+ */
+function relaxDeferAfterFocusYield(
+  defer: "scroll" | "wait" | null,
+  focusTrim: string,
+  sig: PlanPageSignals | undefined,
+): "scroll" | "wait" | null {
+  if (!focusTrim || !sig) return defer;
+  const D = sig.draftItemsOnUrl ?? 0;
+  const P = sig.pendingSuggestionsCount ?? 0;
+  if (D >= 2) return null;
+  if (D >= 1 && defer === "scroll") return null;
+  if (D >= 1 && defer === "wait" && P === 0) return null;
+  return defer;
+}
+
 function trimPlannerRationale(s: string, max = 120): string {
   return s.replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -448,7 +466,8 @@ Rules (structural — no topical denylists):
 - Do NOT return action "stop" just because founders/HQ/founding-year-style basics look filled. Deal research continues across funding, product, traction, competitors, security, etc. If **Open research gaps** is non-empty, you must usually **navigate** to the best candidate that targets a remaining gap (or scroll if defer hint says so).
 - Return action "stop" ONLY when: (1) defer hint is effectively "wait" on pending on-page suggestions, OR (2) the candidate list truly offers no reasonable next URL for any remaining gap and you need the user to steer or change tabs — say so clearly in rationale.
 - agenda_patch.intent.candidate_urls is your top 1-5 next moves in priority order. Use it to remember plans across ticks.
-- "scroll" is appropriate only when the current page is still likely to yield more drafts below the fold; otherwise prefer navigate over stopping.
+- "scroll" is appropriate only when the current page is still likely to yield more **focus-relevant** drafts below the fold; otherwise prefer navigate over stopping.
+- When agenda.focus is non-empty and page_yield_signals.draft_items_this_url is >= 1, strongly prefer **navigate** to a focus-aligned candidate over more scrolling on this URL unless defer hint is "wait" for high-value pending suggestions.
 - The "rationale" string (<=120 chars) must be SPECIFIC: include ResearchAgenda.company.name, and either the user focus or a named open_gap field — never vague phrases like "continuing research", "next steps", or "more diligence" without naming what you are chasing.
 - Never output anything except valid JSON.`;
 
@@ -777,8 +796,8 @@ export async function planNextActionWithAgenda(args: {
   const focusTrim = (args.agenda.focus ?? "").trim();
   if (focusTrim) sortCandidatesForFocus(candidates, focusTrim);
   const allowedNavigateUrls = new Set(candidates.map((c) => c.url));
-  const defer = relaxDeferWhenFocused(
-    deferLeavingPage(args.pageSignals, args.currentUrl),
+  const defer = relaxDeferAfterFocusYield(
+    relaxDeferWhenFocused(deferLeavingPage(args.pageSignals, args.currentUrl), focusTrim, args.pageSignals),
     focusTrim,
     args.pageSignals,
   );
