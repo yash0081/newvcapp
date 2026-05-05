@@ -327,8 +327,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             setScopeState(sc);
             scopeRef.current = sc;
           }
-          // Intentionally do not restore `mode` from disk: it races SESSION_STARTED and can leave
-          // a new copilot session stuck in Auto with stale navigation state. Mode defaults to manual.
+          if ((raw as { mode?: unknown }).mode === "manual" || (raw as { mode?: unknown }).mode === "auto") {
+            const md = (raw as { mode: CopilotMode }).mode;
+            setModeState(md);
+            modeRef.current = md;
+          }
         }
       });
     } catch {
@@ -410,26 +413,34 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       if (!msg || typeof msg !== "object") return;
       const m = msg as { type?: string; session?: CopilotSession };
       if (m.type === "SESSION_STARTED" && m.session) {
-        cancelAgentWork();
-        modeRef.current = "manual";
-        setModeState("manual");
-        persistPrefs(pausedRef.current, scopeRef.current, "manual");
+        const incomingId = m.session.id;
+        const currentId = sessionRef.current?.id ?? null;
+        /** Full navigation remounts the overlay; same id means reinject / replay, not a brand-new session. */
+        const isNewCopilotSession = currentId !== incomingId;
+
+        if (isNewCopilotSession) {
+          cancelAgentWork();
+          modeRef.current = "manual";
+          setModeState("manual");
+          persistPrefs(pausedRef.current, scopeRef.current, "manual");
+          setSuggestions([]);
+          setError(null);
+          setAutoSteeringDirty(false);
+          setAutoSteeringDraft(steeringNoteFromSession(m.session));
+          stopRecoveryCountByUrlRef.current = {};
+          lastSnapshotRef.current = null;
+          setPostScrollPlannerKick(0);
+          lastObserveSuccessAtRef.current = Date.now();
+          setResearchActivity("Getting oriented on this page…");
+          setInfo("Session started — watching this page.");
+        }
+
         setSession(m.session);
         setSnippets((m.session.metadata?.acceptedSnippets ?? []) as AcceptedSnippet[]);
         const d = (m.session.metadata as Record<string, unknown> | null)?.auto_draft as
           | { snippets?: AutoDraftSnippet[] }
           | undefined;
         setAutoDraft(Array.isArray(d?.snippets) ? d!.snippets! : []);
-        setSuggestions([]);
-        setError(null);
-        setAutoSteeringDirty(false);
-        setAutoSteeringDraft(steeringNoteFromSession(m.session));
-        stopRecoveryCountByUrlRef.current = {};
-        lastSnapshotRef.current = null;
-        setPostScrollPlannerKick(0);
-        lastObserveSuccessAtRef.current = Date.now();
-        setResearchActivity("Getting oriented on this page…");
-        setInfo("Session started — watching this page.");
       }
       if (m.type === "SESSION_ENDED") {
         haltAutomation("Session ended.");
