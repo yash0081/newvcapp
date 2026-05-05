@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { join } from "node:path";
 import { cwd } from "node:process";
 
 export type WorkerStatus = "idle" | "starting" | "running" | "stopped" | "error";
@@ -128,6 +129,40 @@ function toPublicState(state: WorkerProcessState): WorkerState {
   };
 }
 
+/**
+ * Forward transcription worker streams to the parent process.
+ *
+ * Locally you often run `tsx` directly and see output in the terminal. On Cloud Run the worker is
+ * `spawn`ed with stdio pipes — without forwarding, **`livekit-transcription-worker` logs never
+ * reach Cloud Logging**, so connect/import/OOM failures look like “worker never joined” with no
+ * explanation. Mirroring lines here fixes that visibility gap (not a substitute for correct LiveKit
+ * env, but required to diagnose prod-only failures).
+ */
+function attachLivekitWorkerStreams(proc: ChildProcessWithoutNullStreams, state: WorkerProcessState) {
+  const tap = (chunk: Buffer, stream: "stdout" | "stderr") => {
+    const raw = chunk.toString("utf8");
+    if (!raw) return;
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      console.error(`[livekit-worker:${stream}] ${trimmed}`);
+    }
+    const lowered = raw.toLowerCase();
+    if (
+      lowered.includes("error") ||
+      lowered.includes("failed") ||
+      lowered.includes("exception") ||
+      lowered.includes("fatal") ||
+      lowered.includes("cannot ") ||
+      lowered.includes("econn")
+    ) {
+      state.lastError = raw.trim().slice(0, 2000);
+    }
+  };
+  proc.stdout.on("data", (c) => tap(Buffer.isBuffer(c) ? c : Buffer.from(c), "stdout"));
+  proc.stderr.on("data", (c) => tap(Buffer.isBuffer(c) ? c : Buffer.from(c), "stderr"));
+}
+
 /** In-process worker registry + child spawn (Next.js dev machine or Cloud Run live-assistant container). */
 export function getLocalWorkerState(meetingId: string, roomName: string): WorkerState {
   const existing = workers.get(meetingId);
@@ -150,13 +185,21 @@ export function startLocalWorkerForMeeting(meetingId: string, roomName: string):
   state.lastExitCode = null;
   state.lastSignal = null;
 
-  const cmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const args = ["run", "livekit-worker", "--", `--meetingId=${meetingId}`, `--roomName=${roomName}`];
-  const proc = spawn(cmd, args, {
+  const spawnOpts = {
     cwd: cwd(),
     env: process.env,
-    stdio: "pipe",
-  });
+    stdio: "pipe" as const,
+  };
+
+  /** Windows keeps `npm.cmd`; Unix containers call `tsx` directly — avoids extra npm wrapper churn in Docker/Cloud Run. */
+  let proc: ChildProcessWithoutNullStreams;
+  if (process.platform === "win32") {
+    proc = spawn("npm.cmd", ["run", "livekit-worker", "--", `--meetingId=${meetingId}`, `--roomName=${roomName}`], spawnOpts);
+  } else {
+    const tsxBin = join(cwd(), "node_modules", ".bin", "tsx");
+    const scriptPath = join(cwd(), "scripts", "livekit-transcription-worker.ts");
+    proc = spawn(tsxBin, [scriptPath, `--meetingId=${meetingId}`, `--roomName=${roomName}`], spawnOpts);
+  }
 
   state.proc = proc;
   state.pid = proc.pid ?? null;
@@ -164,16 +207,7 @@ export function startLocalWorkerForMeeting(meetingId: string, roomName: string):
   state.status = "running";
   workers.set(meetingId, state);
 
-  const onData = (chunk: Buffer) => {
-    const msg = chunk.toString("utf8").trim();
-    if (!msg) return;
-    const lowered = msg.toLowerCase();
-    if (lowered.includes("error") || lowered.includes("failed")) {
-      state.lastError = msg.slice(0, 2000);
-    }
-  };
-  proc.stderr.on("data", onData);
-  proc.stdout.on("data", onData);
+  attachLivekitWorkerStreams(proc, state);
 
   proc.once("error", (err) => {
     state.status = "error";

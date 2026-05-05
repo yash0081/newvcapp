@@ -42,7 +42,7 @@ import { runGuestTurnVerify } from "@/lib/live-assistant/guest-turn-verify";
 import { createHash } from "node:crypto";
 
 function env(name: string): string {
-  const v = process.env[name];
+  const v = process.env[name]?.trim();
   if (!v) throw new Error(`${name} is required`);
   return v;
 }
@@ -61,8 +61,8 @@ type WorkerArgs = {
 };
 
 function parseArgs(): WorkerArgs {
-  const meetingId = process.argv.find((a) => a.startsWith("--meetingId="))?.split("=", 2)[1];
-  const roomName = process.argv.find((a) => a.startsWith("--roomName="))?.split("=", 2)[1];
+  const meetingId = process.argv.find((a) => a.startsWith("--meetingId="))?.split("=", 2)[1]?.trim();
+  const roomName = process.argv.find((a) => a.startsWith("--roomName="))?.split("=", 2)[1]?.trim();
   if (!meetingId || !roomName) {
     throw new Error("Usage: tsx scripts/livekit-transcription-worker.ts --meetingId=<uuid> --roomName=<name>");
   }

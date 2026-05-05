@@ -43,6 +43,8 @@ steps:
       - "3600"
       - --max-instances
       - ${_MAX_INSTANCES}
+      - --memory
+      - "2Gi"
 
 options:
   logging: CLOUD_LOGGING_ONLY
