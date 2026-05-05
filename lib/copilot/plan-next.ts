@@ -146,6 +146,18 @@ function relaxDeferAfterFocusYield(
   return defer;
 }
 
+/** Focused sessions should move on after a single scroll tick instead of looping scroll on the same URL. */
+function relaxFocusNavigationMomentum(
+  defer: "scroll" | "wait" | null,
+  focusTrim: string,
+  sig: PlanPageSignals | undefined,
+): "scroll" | "wait" | null {
+  if (!focusTrim.trim() || !sig) return defer;
+  const streak = sig.consecutivePlanScrolls ?? 0;
+  if (defer === "scroll" && streak >= 1) return null;
+  return defer;
+}
+
 function trimPlannerRationale(s: string, max = 120): string {
   return s.replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -796,8 +808,12 @@ export async function planNextActionWithAgenda(args: {
   const focusTrim = (args.agenda.focus ?? "").trim();
   if (focusTrim) sortCandidatesForFocus(candidates, focusTrim);
   const allowedNavigateUrls = new Set(candidates.map((c) => c.url));
-  const defer = relaxDeferAfterFocusYield(
-    relaxDeferWhenFocused(deferLeavingPage(args.pageSignals, args.currentUrl), focusTrim, args.pageSignals),
+  const defer = relaxFocusNavigationMomentum(
+    relaxDeferAfterFocusYield(
+      relaxDeferWhenFocused(deferLeavingPage(args.pageSignals, args.currentUrl), focusTrim, args.pageSignals),
+      focusTrim,
+      args.pageSignals,
+    ),
     focusTrim,
     args.pageSignals,
   );

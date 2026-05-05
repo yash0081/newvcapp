@@ -11,6 +11,7 @@ import {
   USER_PREFERENCE_GUARDRAILS,
 } from "@/lib/deal-intel/prompt-guidance";
 import { isLowValueSaveSuggestion } from "@/lib/copilot/preference-signals";
+import { suggestionMatchesSteeringFocus } from "@/lib/copilot/steering-focus";
 import type { ResearchGap } from "@/lib/copilot/research-agenda";
 
 const ANALYZE_MODEL_ENV = "COPILOT_ANALYZE_MODEL";
@@ -108,11 +109,13 @@ Rules:
 const FOCUS_MODE_APPEND = `
 
 FOCUS MODE (only when "Auto steering note" is non-empty):
-- Treat that note as a hard scope: every suggestion must either (a) extract a concrete fact that clearly serves that focus, (b) resolve an open gap that supports that focus, or (c) be an "explore" link whose anchor/URL obviously helps answer the focus.
-- Do not add suggestions about unrelated topics just because they appear on the page.
-- When the visible text likely contains focus-relevant material, prefer returning 1–3 strong suggestions over returning none.
-- If the focus is on people (founders, team, leadership, bios) and the page names or describes those people, suggest saving **aligns** snippets for facts that **already appear in CRM** — the user still wants sourced captures from this page, not an empty card because the CRM was pre-filled.
-- Explore links must be the best on-page paths toward the focus (not generic site navigation).`;
+- The steering note is the **highest priority**. Every suggestion must **directly** serve that note — not merely "interesting" facts from the same company.
+- **Hard rule:** If the user asked only about one angle (e.g. funding, investors, rounds), do **not** surface standalone founder bios, product descriptions, generic team pages, or customer logos unless the **snippet itself** ties to that angle (e.g. founder also named as lead investor, product milestone tied to a financing event). When in doubt, omit.
+- If the focus is on **people / founders / team**, then team and leadership facts (including **aligns** with CRM) are in scope; do not pivot to funding or product unless the text explicitly connects them to the people question.
+- If the focus is on **funding / investors / rounds**, snippets must mention financing, investors, rounds, valuation, cap table, or similar — not just company identity.
+- Use **aligns** for on-page corroboration of CRM facts **only when** that fact is within the current focus scope (see above).
+- Prefer 1–3 **on-focus** suggestions; return { "suggestions": [] } rather than padding with off-focus items.
+- Explore links must obviously advance the steering note (e.g. funding focus → press release, Crunchbase, investor page), not generic navigation.`;
 
 function normalizeSuggestionKind(v: unknown): SuggestionKind | null {
   return v === "new" || v === "aligns" || v === "contradicts" || v === "explore" ? v : null;
@@ -199,6 +202,17 @@ export async function analyzeAgainstDeal(args: {
     if (confidence < minConfidence) continue;
     if (kind === "explore" && !link_url) continue;
     if (isLowValueSaveSuggestion({ kind, summary, snippet })) continue;
+    if (
+      steeringTrim &&
+      !suggestionMatchesSteeringFocus({
+        summary,
+        snippet,
+        linkUrl: link_url,
+        steeringNote: steeringTrim,
+      })
+    ) {
+      continue;
+    }
     const repeatKey = suggestionRepeatKey(summary, snippet);
     if (seenKeys.has(repeatKey)) continue;
     seenKeys.add(repeatKey);

@@ -19,6 +19,7 @@ import { extractDomSnapshot, fingerprintSnapshot, type SnapshotScope } from "@co
 import { isNearDuplicateDraftSnippet } from "@shared/draft-dedupe";
 import { suggestionRepeatKey } from "@shared/repeat-key";
 import { AGENT_AUTO_ACCEPT_MIN_CONFIDENCE, AGENT_NAV_COUNTDOWN_MS } from "@shared/config";
+import { suggestionMatchesSteeringFocus } from "@shared/steering-focus";
 import { highlightAcceptedSnippet } from "@content/highlighter";
 
 const APP_HOSTNAME_RE = /^chrome-extension:|^moz-extension:/;
@@ -183,6 +184,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const [paused, setPausedState] = useState(false);
   const [mode, setModeState] = useState<CopilotMode>("manual");
   const [scope, setScopeState] = useState<SnapshotScope>("viewport");
+  const scopeRef = useRef<SnapshotScope>("viewport");
   const [pos, setPos] = useState<{ top: number; right: number }>({ top: 16, right: 16 });
   const [promptText, setPromptText] = useState("");
   const [pendingNav, setPendingNav] = useState<{ url: string; rationale?: string; at: number } | null>(null);
@@ -201,6 +203,8 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const agentScrollStreakRef = useRef(0);
   /** Last time /observe returned OK (drives idle auto-end). */
   const lastObserveSuccessAtRef = useRef<number>(Date.now());
+  /** Limit stop-state recovery kicks per URL so we don't spin forever. */
+  const stopRecoveryCountByUrlRef = useRef<Record<string, number>>({});
   /** Mirrors `paused` for async loops / callbacks that can’t close over fresh state. */
   const pausedRef = useRef(false);
   /** Mirrors `mode` for async loops / delayed navigation callbacks. */
@@ -218,6 +222,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   useEffect(() => {
     setPostScrollPlannerKick(0);
     agentScrollStreakRef.current = 0;
+    stopRecoveryCountByUrlRef.current = {};
     if (scrollKickTimerRef.current != null) {
       window.clearTimeout(scrollKickTimerRef.current);
       scrollKickTimerRef.current = null;
@@ -250,6 +255,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   pausedRef.current = paused;
   modeRef.current = mode;
   autoSteeringDirtyRef.current = autoSteeringDirty;
+  scopeRef.current = scope;
 
   useEffect(() => {
     if (!session?.id) {
@@ -300,23 +306,9 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     }
   }, [sessionId]);
 
-  /** Pause immediately cancels in-flight analyze noise and pending scroll-kick without waiting on UI locks. */
+  /** Pause line only — timer cancellation runs via setPaused → haltAutomation (avoids double-bumping generation). */
   useEffect(() => {
     if (!paused) return;
-    automationGenerationRef.current += 1;
-    analyzeAbortRef.current?.abort();
-    analyzeAbortRef.current = null;
-    setBusy(null);
-    setPendingNav(null);
-    if (scrollKickTimerRef.current != null) {
-      window.clearTimeout(scrollKickTimerRef.current);
-      scrollKickTimerRef.current = null;
-    }
-    if (pendingNavTimerRef.current != null) {
-      window.clearTimeout(pendingNavTimerRef.current);
-      pendingNavTimerRef.current = null;
-    }
-    agentScrollStreakRef.current = 0;
     setResearchActivity("Paused — resume when you're ready to continue.");
   }, [paused]);
 
@@ -331,11 +323,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             setPausedState((raw as { paused: boolean }).paused);
           }
           if ((raw as { scope?: unknown }).scope === "viewport" || (raw as { scope?: unknown }).scope === "full") {
-            setScopeState((raw as { scope: SnapshotScope }).scope);
+            const sc = (raw as { scope: SnapshotScope }).scope;
+            setScopeState(sc);
+            scopeRef.current = sc;
           }
-          if ((raw as { mode?: unknown }).mode === "manual" || (raw as { mode?: unknown }).mode === "auto") {
-            setModeState((raw as { mode: CopilotMode }).mode);
-          }
+          // Intentionally do not restore `mode` from disk: it races SESSION_STARTED and can leave
+          // a new copilot session stuck in Auto with stale navigation state. Mode defaults to manual.
         }
       });
     } catch {
@@ -351,7 +344,8 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     }
   }, []);
 
-  const haltAutomation = useCallback((activity = "Paused — resume when you're ready to continue.", opts?: { pause?: boolean }) => {
+  /** Invalidate in-flight observe/plan/nav timers so mode/session switches never leave stuck state. */
+  const cancelAgentWork = useCallback(() => {
     automationGenerationRef.current += 1;
     analyzeAbortRef.current?.abort();
     analyzeAbortRef.current = null;
@@ -364,14 +358,18 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       pendingNavTimerRef.current = null;
     }
     agentScrollStreakRef.current = 0;
+    setPendingNav(null);
+    setBusy(null);
+  }, []);
+
+  const haltAutomation = useCallback((activity = "Paused — resume when you're ready to continue.", opts?: { pause?: boolean }) => {
+    cancelAgentWork();
     if (opts?.pause) {
       pausedRef.current = true;
       setPausedState(true);
     }
-    setPendingNav(null);
-    setBusy(null);
     setResearchActivity(activity);
-  }, []);
+  }, [cancelAgentWork]);
 
   const setPaused = useCallback((next: boolean | ((prev: boolean) => boolean)) => {
     const value = typeof next === "function" ? (next as (p: boolean) => boolean)(pausedRef.current) : next;
@@ -387,6 +385,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
 
   const setScope = useCallback((next: SnapshotScope) => {
     setScopeState(next);
+    scopeRef.current = next;
     persistPrefs(pausedRef.current, next, modeRef.current);
   }, [persistPrefs]);
 
@@ -394,10 +393,16 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     modeRef.current = next;
     if (next !== "auto") {
       haltAutomation("Manual mode — auto navigation stopped.");
+    } else {
+      cancelAgentWork();
+      lastSnapshotRef.current = null;
+      stopRecoveryCountByUrlRef.current = {};
+      setPostScrollPlannerKick((k) => k + 1);
+      setResearchActivity("Auto mode — starting on this page…");
     }
     setModeState(next);
-    persistPrefs(pausedRef.current, scope, next);
-  }, [haltAutomation, persistPrefs, scope]);
+    persistPrefs(pausedRef.current, scopeRef.current, next);
+  }, [haltAutomation, cancelAgentWork, persistPrefs]);
 
   // Listen for SESSION_STARTED broadcasts from popup → service worker → tabs.
   useEffect(() => {
@@ -405,6 +410,10 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       if (!msg || typeof msg !== "object") return;
       const m = msg as { type?: string; session?: CopilotSession };
       if (m.type === "SESSION_STARTED" && m.session) {
+        cancelAgentWork();
+        modeRef.current = "manual";
+        setModeState("manual");
+        persistPrefs(pausedRef.current, scopeRef.current, "manual");
         setSession(m.session);
         setSnippets((m.session.metadata?.acceptedSnippets ?? []) as AcceptedSnippet[]);
         const d = (m.session.metadata as Record<string, unknown> | null)?.auto_draft as
@@ -414,12 +423,19 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         setSuggestions([]);
         setError(null);
         setAutoSteeringDirty(false);
+        setAutoSteeringDraft(steeringNoteFromSession(m.session));
+        stopRecoveryCountByUrlRef.current = {};
+        lastSnapshotRef.current = null;
+        setPostScrollPlannerKick(0);
         lastObserveSuccessAtRef.current = Date.now();
         setResearchActivity("Getting oriented on this page…");
         setInfo("Session started — watching this page.");
       }
       if (m.type === "SESSION_ENDED") {
         haltAutomation("Session ended.");
+        modeRef.current = "manual";
+        setModeState("manual");
+        persistPrefs(pausedRef.current, scopeRef.current, "manual");
         setSession(null);
         setSuggestions([]);
         setSnippets([]);
@@ -432,7 +448,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     };
     chrome.runtime.onMessage.addListener(handler);
     return () => chrome.runtime.onMessage.removeListener(handler);
-  }, [haltAutomation]);
+  }, [haltAutomation, cancelAgentWork, persistPrefs]);
 
   const refreshSession = useCallback(async () => {
     try {
@@ -483,6 +499,10 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         tabHint: location.hostname,
       });
       if (res.session) {
+        cancelAgentWork();
+        modeRef.current = "manual";
+        setModeState("manual");
+        persistPrefs(pausedRef.current, scopeRef.current, "manual");
         setSession(res.session);
         setSnippets((res.session.metadata?.acceptedSnippets ?? []) as AcceptedSnippet[]);
         const d = (res.session.metadata as Record<string, unknown> | null)?.auto_draft as
@@ -490,6 +510,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           | undefined;
         setAutoDraft(Array.isArray(d?.snippets) ? d!.snippets! : []);
         setSuggestions([]);
+        setAutoSteeringDirty(false);
+        setAutoSteeringDraft(steeringNoteFromSession(res.session));
+        stopRecoveryCountByUrlRef.current = {};
+        lastSnapshotRef.current = null;
+        setPostScrollPlannerKick(0);
         lastObserveSuccessAtRef.current = Date.now();
       }
     } catch (e) {
@@ -497,7 +522,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     } finally {
       setBusy(null);
     }
-  }, [activeDeal]);
+  }, [activeDeal, cancelAgentWork, persistPrefs]);
 
   const analyzePage = useCallback(async () => {
     if (!sessionId) return;
@@ -582,6 +607,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     const onUrl = () => {
       if (location.href !== lastUrl) {
         lastUrl = location.href;
+        stopRecoveryCountByUrlRef.current = {};
         // New page: clear stale cards, drop fingerprint so first analyze fires fast.
         setSuggestions([]);
         lastSnapshotRef.current = null;
@@ -721,12 +747,20 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       setAutoSteeringDirty(false);
       if (res.session) setSession(res.session);
       setInfo("Focus saved — analysis and link choices follow this.");
+      lastSnapshotRef.current = null;
+      if (modeRef.current === "auto") {
+        setPostScrollPlannerKick((k) => k + 1);
+      } else {
+        window.setTimeout(() => {
+          void analyzePage();
+        }, 120);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setSteeringSaving(false);
     }
-  }, [sessionId, autoSteeringDraft]);
+  }, [sessionId, autoSteeringDraft, analyzePage]);
 
   const clearAutoSteering = useCallback(async () => {
     if (!sessionId) return;
@@ -744,12 +778,20 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       }
       if (res.session) setSession(res.session);
       setInfo("Steering cleared.");
+      lastSnapshotRef.current = null;
+      if (modeRef.current === "auto") {
+        setPostScrollPlannerKick((k) => k + 1);
+      } else {
+        window.setTimeout(() => {
+          void analyzePage();
+        }, 120);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setSteeringSaving(false);
     }
-  }, [sessionId]);
+  }, [sessionId, analyzePage]);
 
   useEffect(() => {
     if (!sessionId || paused || mode !== "auto" || busy) return;
@@ -760,12 +802,22 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         pausedRef.current || modeRef.current !== "auto" || automationGenerationRef.current !== runGeneration;
       if (stopped()) return;
       // Do not auto-reject contradict cards (felt arbitrary); skip them for accepts and let the planner run.
+      const steerForFilter = effectiveSteeringHint?.trim() ?? "";
       const autoAccept = suggestions.filter(
         (s) =>
           !!s.event_id &&
           s.kind !== "contradicts" &&
           s.kind !== "explore" &&
           (s.confidence ?? 0) >= AGENT_AUTO_ACCEPT_MIN_CONFIDENCE,
+      ).filter(
+        (s) =>
+          !steerForFilter ||
+          suggestionMatchesSteeringFocus({
+            summary: s.summary ?? "",
+            snippet: s.snippet ?? "",
+            linkUrl: s.link_url,
+            steeringNote: steerForFilter,
+          }),
       );
       /** Keep auto mode moving: draft a couple of focus-relevant facts, then plan-next can navigate. */
       const MAX_AUTO_DRAFT_PER_TICK = 2;
@@ -875,6 +927,21 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             ? `Auto: ${truncateWords(why, 180)}`
             : "Auto: open a page with useful links, accept explore suggestions, or add steering — idle waiting won't surface new options.",
         );
+        const steer = effectiveSteeringHint?.trim();
+        if (steer) {
+          const u = href;
+          const n = (stopRecoveryCountByUrlRef.current[u] ?? 0) + 1;
+          if (n <= 2) {
+            stopRecoveryCountByUrlRef.current[u] = n;
+            window.setTimeout(() => {
+              if (pausedRef.current || modeRef.current !== "auto") return;
+              lastSnapshotRef.current = null;
+              setResearchActivity(`Re-checking this page for: ${truncateWords(steer, 56)}…`);
+              void analyzePage();
+              setPostScrollPlannerKick((k) => k + 1);
+            }, 2600);
+          }
+        }
         return;
       }
       if (stopped()) return;
