@@ -1045,11 +1045,12 @@ export function WorkspaceChat({
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        let pendingAutoActions: {
+        type PendingAutoActions = {
           actions: ChatAction[];
           assistantId: string;
           threadId: string | null;
-        } | null = null;
+        };
+        const pendingAutoActionsHolder: { current: PendingAutoActions | null } = { current: null };
         const handleEvent = (event: ChatStreamEvent) => {
           if (event.type === "start") {
             if (event.threadId) setActiveThreadId(event.threadId);
@@ -1087,7 +1088,7 @@ export function WorkspaceChat({
               });
             }
             if (!isCancelled()) {
-              pendingAutoActions = {
+              pendingAutoActionsHolder.current = {
                 actions: assistantActions,
                 assistantId,
                 threadId: finalResult.threadId ?? activeThreadId,
@@ -1114,11 +1115,12 @@ export function WorkspaceChat({
         if (!finalResult && streamedContent) {
           updateAssistantMessage({ content: plainChatText(streamedContent) });
         }
-        if (pendingAutoActions && !isCancelled()) {
+        const deferredAutoActions = pendingAutoActionsHolder.current;
+        if (deferredAutoActions !== null && !isCancelled()) {
           await runAutoActions(
-            pendingAutoActions.actions,
-            pendingAutoActions.assistantId,
-            pendingAutoActions.threadId,
+            deferredAutoActions.actions,
+            deferredAutoActions.assistantId,
+            deferredAutoActions.threadId,
           );
         }
         void refreshThreads();
