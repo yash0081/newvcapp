@@ -230,6 +230,28 @@ export type TrailEntry = {
   rationale: string;
 };
 
+export type ResearchTask = {
+  id: string;
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "abandoned";
+  strategy: "skimming" | "deep_research";
+  priority: number;
+  evidence_need: string;
+  target_gap_fields: string[];
+  source_kinds: SourceKind[];
+  query_terms: string[];
+  completion: {
+    evidence_count: number;
+    exhausted_hosts: string[];
+  };
+  // New hybrid exploration fields
+  research_strategy?: "seek_primary_sources" | "compare_claims" | "find_contradictions" | "drill_deep" | "broad_survey";
+  abandon_criteria?: string;
+  expected_evidence_type?: string;
+  fallback_queries?: string[];
+  information_gain_priority?: number;
+};
+
 export type ResearchAgenda = {
   version: 1;
   updated_at: string;
@@ -242,6 +264,55 @@ export type ResearchAgenda = {
   intent: AgendaIntent;
   visited: VisitedRecord[];
   trail: TrailEntry[];
+  blocked_hosts: string[];
+  declined_hosts: string[];
+  /** Fingerprints (summary+snippet) of suggestions explicitly rejected by the user. */
+  rejected_suggestion_keys: string[];
+  /**
+   * Learned browsing depth profile — computed from manual-mode behavior.
+   * Used by auto mode to decide how much to scroll/read before navigating away.
+   */
+  depth_profile: DepthProfile;
+  /** Current research strategy decomposition. */
+  decomposed_tasks: ResearchTask[];
+  /** Global toggle for deep research. */
+  is_deep_research: boolean;
+  // New hybrid exploration tracking
+  /** Information gain history per host for novelty scoring. */
+  information_gain_history: Map<string, { claims: number; facts: number; entities: number; timestamp: string }>;
+  /** Novelty scores per host (0-1, higher = more novel information). */
+  novelty_scores: Map<string, number>;
+  /** Failed queries and hosts for dead-end avoidance. */
+  failed_queries: Map<string, { timestamp: string; reason: string }>;
+  failed_hosts: Set<string>;
+};
+
+/** Learned browsing-depth thresholds from manual-mode user behavior. */
+export type DepthProfile = {
+  /** Running average scroll depth ratio (0-1) when the user leaves a page. */
+  avg_scroll_depth: number;
+  /** Running average draft items accepted per page before the user leaves. */
+  avg_drafts_per_page: number;
+  /** Running average number of distinct sections/headings the user viewed before leaving. */
+  avg_viewed_sections: number;
+  /** Running average dwell time spent studying page sections before leaving. */
+  avg_section_dwell_ms: number;
+  /** Headings repeatedly focused in manual mode. */
+  focused_headings: string[];
+  /** Number of page transitions observed to compute the averages. */
+  sample_count: number;
+  /** Running average distinct visits per host before user moves on (used to normalize freq_penalty). */
+  avg_visits_per_host: number;
+};
+
+const DEFAULT_DEPTH_PROFILE: DepthProfile = {
+  avg_scroll_depth: 0.55,
+  avg_drafts_per_page: 2,
+  avg_viewed_sections: 3,
+  avg_section_dwell_ms: 18_000,
+  focused_headings: [],
+  sample_count: 0,
+  avg_visits_per_host: 2,
 };
 
 /** Trim limits so the agenda stays compact in JSON storage and prompt budgets. */
@@ -255,6 +326,7 @@ const LIMITS = {
   text: 600,
   why: 240,
   supports: 6,
+  tasks: 12,
 } as const;
 
 const SOURCE_KIND_SET: ReadonlySet<string> = new Set(SOURCE_KINDS);
@@ -305,6 +377,90 @@ function asExpectedValue(v: unknown): ExpectedValue {
   return "medium";
 }
 
+function uniqStrings(items: ReadonlyArray<string>, limit: number): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed.slice(0, 120));
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function tokenizeForTask(text: string, limit = 16): string[] {
+  return uniqStrings(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/i)
+      .filter((t) => t.length > 2 && !["the", "and", "for", "with", "this", "that", "from", "into", "about", "company"].includes(t)),
+    limit,
+  );
+}
+
+function sourceKindsForGap(field: string): SourceKind[] {
+  if (field.includes("funding") || field.includes("investor") || field.includes("revenue")) return ["database", "news", "filings"];
+  if (field.includes("customer") || field.includes("traction") || field.includes("pricing")) return ["company_site", "blog", "news", "database"];
+  if (field.includes("competitor") || field.includes("market")) return ["reference", "news", "database", "blog"];
+  if (field.includes("negative") || field.includes("risk")) return ["news", "blog", "social"];
+  if (field.includes("tech") || field.includes("product") || field.includes("security")) return ["company_site", "blog", "other"];
+  return ["company_site", "news", "database", "blog", "reference"];
+}
+
+export function normalizeResearchTask(raw: unknown, fallback: Partial<ResearchTask> & { id: string; description: string }): ResearchTask | null {
+  const o = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const id = trim(o.id, 40) || fallback.id;
+  const description = trim(o.description, 220) || fallback.description;
+  if (!id || !description) return null;
+  const target_gap_fields = uniqStrings(
+    Array.isArray(o.target_gap_fields)
+      ? o.target_gap_fields.filter((g): g is string => typeof g === "string")
+      : fallback.target_gap_fields ?? [],
+    8,
+  );
+  const source_kinds = uniqStrings(
+    Array.isArray(o.source_kinds)
+      ? o.source_kinds.filter((s): s is string => typeof s === "string" && SOURCE_KIND_SET.has(s))
+      : fallback.source_kinds ?? [],
+    8,
+  ) as SourceKind[];
+  const query_terms = uniqStrings(
+    [
+      ...(Array.isArray(o.query_terms) ? o.query_terms.filter((q): q is string => typeof q === "string") : []),
+      ...(fallback.query_terms ?? []),
+      ...tokenizeForTask(`${description} ${target_gap_fields.join(" ")}`),
+    ],
+    20,
+  );
+  const completionRaw = o.completion && typeof o.completion === "object" ? o.completion as Record<string, unknown> : {};
+  return {
+    id,
+    description,
+    status: o.status === "completed" || o.status === "in_progress" || o.status === "abandoned" ? o.status : fallback.status ?? "pending",
+    strategy: o.strategy === "deep_research" || fallback.strategy === "deep_research" ? "deep_research" : "skimming",
+    priority: typeof o.priority === "number" && Number.isFinite(o.priority) ? o.priority : fallback.priority ?? 1,
+    evidence_need: trim(o.evidence_need, LIMITS.text) || fallback.evidence_need || description,
+    target_gap_fields,
+    source_kinds: source_kinds.length ? source_kinds : ["company_site", "news", "database"],
+    query_terms,
+    completion: {
+      evidence_count: Number.isFinite(Number(completionRaw.evidence_count))
+        ? Math.max(0, Math.round(Number(completionRaw.evidence_count)))
+        : fallback.completion?.evidence_count ?? 0,
+      exhausted_hosts: uniqStrings(
+        Array.isArray(completionRaw.exhausted_hosts)
+          ? completionRaw.exhausted_hosts.filter((h): h is string => typeof h === "string")
+          : fallback.completion?.exhausted_hosts ?? [],
+        20,
+      ),
+    },
+  };
+}
+
 // ---------- Persistence helpers ----------
 
 export function emptyAgenda(args: {
@@ -312,26 +468,38 @@ export function emptyAgenda(args: {
   focus: string;
   preferencesSummary: string;
   openGaps: ResearchGap[];
+  isDeepResearch?: boolean;
 }): ResearchAgenda {
   return {
     version: 1,
     updated_at: new Date().toISOString(),
-    focus: trim(args.focus, LIMITS.text),
+    focus: args.focus,
     company: args.company,
-    preferences_summary: trim(args.preferencesSummary, LIMITS.text),
+    preferences_summary: args.preferencesSummary,
     open_gaps: args.openGaps,
     learned: [],
     hypotheses: [],
     intent: {
-      next_question: "",
-      expected_kind: "other",
+      next_question: "What are the core value propositions and traction signals for this company?",
+      expected_kind: "company_site",
       candidate_urls: [],
       avoid_urls: [],
       avoid_hosts: [],
-      stop_when: "",
+      stop_when: "I have a solid understanding of the company's team, product, and market position.",
     },
     visited: [],
     trail: [],
+    blocked_hosts: [],
+    declined_hosts: [],
+    rejected_suggestion_keys: [],
+    depth_profile: { ...DEFAULT_DEPTH_PROFILE },
+    decomposed_tasks: [],
+    is_deep_research: !!args.isDeepResearch,
+    // New hybrid exploration tracking (initialize empty)
+    information_gain_history: new Map(),
+    novelty_scores: new Map(),
+    failed_queries: new Map(),
+    failed_hosts: new Set(),
   };
 }
 
@@ -367,6 +535,100 @@ export function ensureAgendaHasConcreteIntent(agenda: ResearchAgenda, companyNam
   };
 }
 
+export function getActiveResearchTask(agenda: ResearchAgenda): ResearchTask | null {
+  return agenda.decomposed_tasks.find((t) => t.status === "in_progress")
+    ?? agenda.decomposed_tasks.find((t) => t.status === "pending")
+    ?? null;
+}
+
+function seedTasksFromAgenda(agenda: ResearchAgenda): ResearchTask[] {
+  const focus = agenda.focus.trim();
+  const open = agenda.open_gaps.slice(0, 8);
+  const tasks: ResearchTask[] = [];
+  const add = (task: Partial<ResearchTask> & { id: string; description: string }) => {
+    const normalized = normalizeResearchTask(null, task);
+    if (normalized) tasks.push(normalized);
+  };
+
+  if (focus) {
+    const focusLower = focus.toLowerCase();
+    const focusGaps = open.filter((g) => [g.field, ...g.synonyms].some((term) => focusLower.includes(term.toLowerCase())));
+    const gaps = focusGaps.length ? focusGaps : open.slice(0, 3);
+    add({
+      id: "focus-task",
+      description: `Answer the user focus: ${focus.slice(0, 180)}`,
+      status: "in_progress",
+      strategy: agenda.is_deep_research ? "deep_research" : "skimming",
+      priority: 100,
+      evidence_need: focus,
+      target_gap_fields: gaps.map((g) => g.field),
+      source_kinds: uniqStrings(gaps.flatMap((g) => sourceKindsForGap(g.field)), 8) as SourceKind[],
+      query_terms: tokenizeForTask(`${agenda.company.name} ${focus}`, 20),
+    });
+  }
+
+  const groups = [
+    { id: "team-and-origin", label: "Find team, founder, and company-origin evidence", fields: ["founders", "founder_experience", "founder_education", "team_cohesion", "founded_year", "headquarters"] },
+    { id: "traction-and-funding", label: "Find traction, customer, revenue, and funding evidence", fields: ["traction", "customers", "revenue", "funding", "lead_investor", "product_stage"] },
+    { id: "product-and-market", label: "Find product, buyer, market, pricing, and competitor evidence", fields: ["product", "business_model", "economic_buyer", "market_size", "pricing", "competitors"] },
+    { id: "risks-and-defensibility", label: "Find risks, negative signals, defensibility, security, and technical evidence", fields: ["negative_aspects", "defensibility", "security_certifications", "tech_stack", "customer_benefit"] },
+  ];
+
+  for (const group of groups) {
+    const gaps = open.filter((g) => group.fields.includes(g.field));
+    if (!gaps.length) continue;
+    add({
+      id: group.id,
+      description: group.label,
+      status: tasks.some((t) => t.status === "in_progress") ? "pending" : "in_progress",
+      strategy: agenda.is_deep_research ? "deep_research" : "skimming",
+      priority: 80 - tasks.length,
+      evidence_need: `${group.label} for ${agenda.company.name}`,
+      target_gap_fields: gaps.map((g) => g.field),
+      source_kinds: uniqStrings(gaps.flatMap((g) => sourceKindsForGap(g.field)), 8) as SourceKind[],
+      query_terms: tokenizeForTask(`${agenda.company.name} ${group.label} ${gaps.map((g) => `${g.field} ${g.synonyms.join(" ")}`).join(" ")}`, 20),
+    });
+  }
+
+  if (!tasks.length) {
+    add({
+      id: "general-diligence",
+      description: `Find the next material diligence evidence for ${agenda.company.name}`,
+      status: "in_progress",
+      strategy: agenda.is_deep_research ? "deep_research" : "skimming",
+      priority: 50,
+      evidence_need: `Material diligence evidence for ${agenda.company.name}`,
+      target_gap_fields: open.slice(0, 4).map((g) => g.field),
+      source_kinds: ["company_site", "news", "database", "blog", "reference"],
+      query_terms: tokenizeForTask(`${agenda.company.name} ${agenda.focus} ${open.map((g) => g.field).join(" ")}`, 20),
+    });
+  }
+
+  return tasks.slice(0, LIMITS.tasks);
+}
+
+export function ensureTaskPlanForAgenda(agenda: ResearchAgenda): ResearchAgenda {
+  const existing = agenda.decomposed_tasks
+    .map((task) => normalizeResearchTask(task, { id: task.id, description: task.description }))
+    .filter((task): task is ResearchTask => Boolean(task));
+  const tasks = existing.length ? existing : seedTasksFromAgenda(agenda);
+  let activeSeen = false;
+  const normalized = tasks
+    .sort((a, b) => b.priority - a.priority)
+    .map((task) => {
+      if (task.status === "completed" || task.status === "abandoned") return task;
+      if (!activeSeen) {
+        activeSeen = true;
+        return { ...task, status: "in_progress" as const, strategy: agenda.is_deep_research ? "deep_research" as const : task.strategy };
+      }
+      return { ...task, status: "pending" as const };
+    });
+  if (!activeSeen && normalized.length) {
+    normalized[0] = { ...normalized[0], status: "in_progress", strategy: agenda.is_deep_research ? "deep_research" : normalized[0].strategy };
+  }
+  return { ...agenda, decomposed_tasks: normalized.slice(0, LIMITS.tasks) };
+}
+
 /** Best-effort parse of a stored agenda; returns null if the shape is unrecoverable. */
 export function parseStoredAgenda(raw: unknown): ResearchAgenda | null {
   if (!raw || typeof raw !== "object") return null;
@@ -386,6 +648,97 @@ export function parseStoredAgenda(raw: unknown): ResearchAgenda | null {
     intent: parseIntent(r.intent),
     visited: parseVisitedList(r.visited),
     trail: parseTrailList(r.trail),
+    blocked_hosts: Array.isArray(r.blocked_hosts) ? (r.blocked_hosts.filter((h) => typeof h === "string") as string[]) : [],
+    declined_hosts: Array.isArray(r.declined_hosts) ? (r.declined_hosts.filter((h) => typeof h === "string") as string[]) : [],
+    rejected_suggestion_keys: Array.isArray(r.rejected_suggestion_keys) ? (r.rejected_suggestion_keys.filter((k) => typeof k === "string") as string[]) : [],
+    depth_profile: parseDepthProfile(r.depth_profile),
+    decomposed_tasks: parseTasksList(r.decomposed_tasks),
+    is_deep_research: typeof r.is_deep_research === "boolean" ? r.is_deep_research : false,
+    // New hybrid exploration tracking (initialize empty for backward compatibility)
+    information_gain_history: new Map(),
+    novelty_scores: new Map(),
+    failed_queries: new Map(),
+    failed_hosts: new Set(),
+  };
+}
+
+function parseDepthProfile(v: unknown): DepthProfile {
+  if (!v || typeof v !== "object") return { ...DEFAULT_DEPTH_PROFILE };
+  const o = v as Record<string, unknown>;
+  const avg_scroll_depth = typeof o.avg_scroll_depth === "number" && Number.isFinite(o.avg_scroll_depth)
+    ? Math.max(0, Math.min(1, o.avg_scroll_depth))
+    : DEFAULT_DEPTH_PROFILE.avg_scroll_depth;
+  const avg_drafts_per_page = typeof o.avg_drafts_per_page === "number" && Number.isFinite(o.avg_drafts_per_page)
+    ? Math.max(0, o.avg_drafts_per_page)
+    : DEFAULT_DEPTH_PROFILE.avg_drafts_per_page;
+  const avg_viewed_sections = typeof o.avg_viewed_sections === "number" && Number.isFinite(o.avg_viewed_sections)
+    ? Math.max(0, o.avg_viewed_sections)
+    : DEFAULT_DEPTH_PROFILE.avg_viewed_sections;
+  const avg_section_dwell_ms = typeof o.avg_section_dwell_ms === "number" && Number.isFinite(o.avg_section_dwell_ms)
+    ? Math.max(0, o.avg_section_dwell_ms)
+    : DEFAULT_DEPTH_PROFILE.avg_section_dwell_ms;
+  const focused_headings = Array.isArray(o.focused_headings)
+    ? o.focused_headings.filter((h): h is string => typeof h === "string" && h.trim().length > 0).slice(0, 20)
+    : [];
+  const sample_count = typeof o.sample_count === "number" && Number.isFinite(o.sample_count)
+    ? Math.max(0, Math.round(o.sample_count))
+    : 0;
+  const avg_visits_per_host = typeof o.avg_visits_per_host === "number" && Number.isFinite(o.avg_visits_per_host)
+    ? Math.max(0, o.avg_visits_per_host)
+    : DEFAULT_DEPTH_PROFILE.avg_visits_per_host;
+  return { avg_scroll_depth, avg_drafts_per_page, avg_viewed_sections, avg_section_dwell_ms, focused_headings, sample_count, avg_visits_per_host };
+}
+
+/**
+ * Update the depth profile with a new observation from manual-mode page transition.
+ * Uses exponential moving average so recent behavior weighs more than old behavior.
+ */
+export function updateDepthProfile(
+  current: DepthProfile,
+  observation: {
+    scroll_depth: number;
+    draft_count: number;
+    viewed_section_count?: number;
+    section_dwell_ms?: number;
+    focused_headings?: string[];
+    /** Visits to the host being left, at the moment the user transitions away. */
+    visits_to_host?: number;
+  },
+): DepthProfile {
+  const n = current.sample_count;
+  // Exponential moving average: alpha starts high (learns fast) and decays as samples grow.
+  const alpha = Math.max(0.15, 0.5 / (1 + n * 0.1));
+  const avg_scroll_depth = n === 0
+    ? observation.scroll_depth
+    : current.avg_scroll_depth * (1 - alpha) + observation.scroll_depth * alpha;
+  const avg_drafts_per_page = n === 0
+    ? observation.draft_count
+    : current.avg_drafts_per_page * (1 - alpha) + observation.draft_count * alpha;
+  const viewedSections = Math.max(0, observation.viewed_section_count ?? current.avg_viewed_sections);
+  const sectionDwellMs = Math.max(0, observation.section_dwell_ms ?? current.avg_section_dwell_ms);
+  const avg_viewed_sections = n === 0
+    ? viewedSections
+    : current.avg_viewed_sections * (1 - alpha) + viewedSections * alpha;
+  const avg_section_dwell_ms = n === 0
+    ? sectionDwellMs
+    : current.avg_section_dwell_ms * (1 - alpha) + sectionDwellMs * alpha;
+  const visitsToHost = Math.max(0, observation.visits_to_host ?? current.avg_visits_per_host);
+  const avg_visits_per_host = n === 0
+    ? visitsToHost
+    : current.avg_visits_per_host * (1 - alpha) + visitsToHost * alpha;
+  const focused = [
+    ...(observation.focused_headings ?? []),
+    ...(current.focused_headings ?? []),
+  ].map((h) => h.trim()).filter(Boolean);
+  const focused_headings = Array.from(new Set(focused)).slice(0, 20);
+  return {
+    avg_scroll_depth: Math.max(0, Math.min(1, avg_scroll_depth)),
+    avg_drafts_per_page: Math.max(0, avg_drafts_per_page),
+    avg_viewed_sections,
+    avg_section_dwell_ms,
+    focused_headings,
+    sample_count: n + 1,
+    avg_visits_per_host,
   };
 }
 
@@ -486,9 +839,9 @@ function parseCandidate(v: unknown): CandidateIntent | null {
   if (!url) return null;
   const supports = Array.isArray(o.supports)
     ? (o.supports
-        .map((s) => (typeof s === "string" ? s.trim() : ""))
-        .filter((s) => s.length > 0)
-        .slice(0, LIMITS.supports) as string[])
+      .map((s) => (typeof s === "string" ? s.trim() : ""))
+      .filter((s) => s.length > 0)
+      .slice(0, LIMITS.supports) as string[])
     : [];
   return {
     url,
@@ -588,6 +941,139 @@ function parseTrailList(v: unknown): TrailEntry[] {
   return out;
 }
 
+function parseTasksList(v: unknown): ResearchTask[] {
+  if (!Array.isArray(v)) return [];
+  const out: ResearchTask[] = [];
+  for (const raw of v) {
+    if (!raw || typeof raw !== "object") continue;
+    const o = raw as Record<string, unknown>;
+    const id = trim(o.id, 60);
+    const description = trim(o.description, 200);
+    const status = typeof o.status === "string" && ["pending", "in_progress", "completed", "abandoned"].includes(o.status)
+      ? (o.status as ResearchTask["status"])
+      : "pending";
+    const strategy = typeof o.strategy === "string" && (o.strategy === "skimming" || o.strategy === "deep_research")
+      ? o.strategy
+      : "skimming";
+    const priority = typeof o.priority === "number" && Number.isFinite(o.priority) ? o.priority : 50;
+    const evidence_need = trim(o.evidence_need, 300);
+    const target_gap_fields = Array.isArray(o.target_gap_fields)
+      ? (o.target_gap_fields.filter((f) => typeof f === "string") as string[])
+      : [];
+    const source_kinds = Array.isArray(o.source_kinds)
+      ? (o.source_kinds.filter((k) => typeof k === "string" && SOURCE_KIND_SET.has(k)) as SourceKind[])
+      : [];
+    const query_terms = Array.isArray(o.query_terms)
+      ? (o.query_terms.filter((q) => typeof q === "string") as string[])
+      : [];
+    const completion = typeof o.completion === "object" && o.completion
+      ? {
+          evidence_count: typeof (o.completion as Record<string, unknown>).evidence_count === "number" ? (o.completion as Record<string, unknown>).evidence_count as number : 0,
+          exhausted_hosts: Array.isArray((o.completion as Record<string, unknown>).exhausted_hosts)
+            ? ((o.completion as Record<string, unknown>).exhausted_hosts as unknown[]).filter((h: unknown): h is string => typeof h === "string")
+            : [],
+        }
+      : { evidence_count: 0, exhausted_hosts: [] };
+    
+    const task: ResearchTask = {
+      id,
+      description,
+      status,
+      strategy,
+      priority,
+      evidence_need,
+      target_gap_fields,
+      source_kinds,
+      query_terms,
+      completion,
+    };
+    
+    // Optional new fields
+    if (typeof o.research_strategy === "string") {
+      const rs = o.research_strategy as string;
+      if (["seek_primary_sources", "compare_claims", "find_contradictions", "drill_deep", "broad_survey"].includes(rs)) {
+        task.research_strategy = rs as ResearchTask["research_strategy"];
+      }
+    }
+    if (typeof o.abandon_criteria === "string") task.abandon_criteria = o.abandon_criteria;
+    if (typeof o.expected_evidence_type === "string") task.expected_evidence_type = o.expected_evidence_type;
+    if (Array.isArray(o.fallback_queries)) task.fallback_queries = (o.fallback_queries as unknown[]).filter((q: unknown): q is string => typeof q === "string");
+    if (typeof o.information_gain_priority === "number") task.information_gain_priority = o.information_gain_priority;
+    
+    out.push(task);
+  }
+  return out;
+}
+
+// ---------- Hybrid Exploration Helpers ----------
+
+/**
+ * Track information gain from a page visit.
+ * Used to calculate novelty scores for candidate ranking.
+ */
+export function trackInformationGain(agenda: ResearchAgenda, url: string, claims: number, facts: number, entities: number): ResearchAgenda {
+  const host = safeHost(url);
+  if (!host) return agenda;
+  
+  const history = agenda.information_gain_history.get(host) || { claims: 0, facts: 0, entities: 0, timestamp: new Date().toISOString() };
+  const updated = {
+    claims: history.claims + claims,
+    facts: history.facts + facts,
+    entities: history.entities + entities,
+    timestamp: new Date().toISOString(),
+  };
+  
+  const newHistory = new Map(agenda.information_gain_history);
+  newHistory.set(host, updated);
+  
+  // Calculate novelty score (0-1, higher = more novel)
+  // Novelty decreases as we accumulate information from the same host
+  const totalGain = updated.claims + updated.facts + updated.entities;
+  const noveltyScore = Math.min(1, totalGain / 10); // Normalize to 0-1 range
+  
+  const newNoveltyScores = new Map(agenda.novelty_scores);
+  newNoveltyScores.set(host, noveltyScore);
+  
+  return { ...agenda, information_gain_history: newHistory, novelty_scores: newNoveltyScores };
+}
+
+/**
+ * Calculate novelty score for a host based on historical information gain.
+ */
+export function calculateNoveltyScore(agenda: ResearchAgenda, host: string): number {
+  return agenda.novelty_scores.get(host) ?? 0.5; // Default to 0.5 for unknown hosts
+}
+
+/**
+ * Mark a path (query/host) as failed (dead end).
+ * Used to avoid revisiting unproductive paths.
+ */
+export function markPathAsFailed(agenda: ResearchAgenda, query: string, host: string, reason: string): ResearchAgenda {
+  const newFailedQueries = new Map(agenda.failed_queries);
+  newFailedQueries.set(query, { timestamp: new Date().toISOString(), reason });
+  
+  const newFailedHosts = new Set(agenda.failed_hosts);
+  newFailedHosts.add(host);
+  
+  return { ...agenda, failed_queries: newFailedQueries, failed_hosts: newFailedHosts };
+}
+
+/**
+ * Check if a path should be avoided based on failure history.
+ */
+export function shouldAvoidPath(agenda: ResearchAgenda, query: string, host: string): boolean {
+  if (agenda.failed_hosts.has(host)) return true;
+  
+  const failedQuery = agenda.failed_queries.get(query);
+  if (failedQuery) {
+    const timeSinceFailure = Date.now() - new Date(failedQuery.timestamp).getTime();
+    // Avoid for at least 1 hour
+    if (timeSinceFailure < 60 * 60 * 1000) return true;
+  }
+  
+  return false;
+}
+
 // ---------- Recompute (deterministic facts) ----------
 
 /**
@@ -653,10 +1139,15 @@ export function recomputeAgendaFacts(
   return {
     ...prev,
     company: args.company,
-    focus: trim(args.focus, LIMITS.text),
-    preferences_summary: trim(args.preferencesSummary, LIMITS.text),
+    focus: args.focus,
+    preferences_summary: args.preferencesSummary,
     open_gaps: args.openGaps,
     visited: updatedVisited.slice(0, LIMITS.visited),
+    blocked_hosts: prev.blocked_hosts || [],
+    declined_hosts: prev.declined_hosts || [],
+    decomposed_tasks: prev.decomposed_tasks || [],
+    is_deep_research: !!prev.is_deep_research,
+    depth_profile: prev.depth_profile || { ...DEFAULT_DEPTH_PROFILE },
     updated_at: new Date().toISOString(),
   };
 }
@@ -667,6 +1158,7 @@ export type AgendaPatch = {
   intent?: AgendaIntent;
   learned_add?: LearnedFact[];
   hypotheses_upsert?: Hypothesis[];
+  decomposed_tasks?: ResearchTask[];
 };
 
 export const EMPTY_AGENDA_PATCH: AgendaPatch = {};
@@ -721,6 +1213,26 @@ export function validateAgendaPatch(
   if (Array.isArray(r.hypotheses_upsert)) {
     const hyps = parseHypothesesList(r.hypotheses_upsert);
     if (hyps.length) patch.hypotheses_upsert = hyps;
+  }
+
+  if (Array.isArray(r.decomposed_tasks)) {
+    const tasks: ResearchTask[] = [];
+    for (const t of r.decomposed_tasks) {
+      if (!t || typeof t !== "object") continue;
+      const ot = t as Record<string, unknown>;
+      const id = trim(ot.id, 40);
+      const description = trim(ot.description, 200);
+      if (!id || !description) continue;
+      const normalized = normalizeResearchTask(t, {
+        id,
+        description,
+        status: (ot.status === "completed" || ot.status === "in_progress" || ot.status === "abandoned") ? ot.status : "pending",
+        strategy: ot.strategy === "deep_research" ? "deep_research" : "skimming",
+        priority: typeof ot.priority === "number" ? ot.priority : 1,
+      });
+      if (normalized) tasks.push(normalized);
+    }
+    if (tasks.length) patch.decomposed_tasks = tasks;
   }
 
   return { patch, errors };
@@ -795,6 +1307,8 @@ export function applyAgendaPatch(
     }
   }
 
+  const decomposed_tasks = patch.decomposed_tasks ?? prev.decomposed_tasks;
+
   return {
     ...prev,
     intent,
@@ -802,6 +1316,7 @@ export function applyAgendaPatch(
     hypotheses,
     trail,
     visited,
+    decomposed_tasks,
     updated_at: nowIso,
   };
 }
@@ -832,20 +1347,14 @@ export function summarizeAgendaForPrompt(agenda: ResearchAgenda): Record<string,
       next_question: agenda.intent.next_question,
       expected_kind: agenda.intent.expected_kind,
       stop_when: agenda.intent.stop_when,
-      candidate_urls: agenda.intent.candidate_urls.slice(0, LIMITS.candidateUrls),
-      avoid_urls: agenda.intent.avoid_urls.slice(-12),
-      avoid_hosts: agenda.intent.avoid_hosts.slice(-12),
+      candidate_urls: agenda.intent.candidate_urls.slice(0, 5).map(c => ({ url: c.url, why: c.why, supports: c.supports })),
     },
-    visited: agenda.visited.slice(0, 25).map((v) => ({
-      url: v.url,
-      host: v.host,
-      outcome: v.outcome,
-      drafts_added: v.drafts_added,
-    })),
-    trail: agenda.trail.slice(-10),
+    decomposed_tasks: agenda.decomposed_tasks,
+    is_deep_research: agenda.is_deep_research,
+    depth_profile: agenda.depth_profile,
+    visited_summary: agenda.visited.slice(0, 10).map(v => ({ host: v.host, outcome: v.outcome, drafts: v.drafts_added })),
   };
 }
-
 /** Two-line user-facing readout of the agenda's current intent. */
 export function describeAgendaForUI(agenda: ResearchAgenda): { nextQuestion: string; avoidHosts: string[] } {
   return {

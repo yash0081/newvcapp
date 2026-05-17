@@ -5,13 +5,16 @@
  * kind label (e.g. `new` vs `aligns`) collapse to one entry across server
  * and client dedupe paths.
  */
-export function suggestionRepeatKey(summary: string, snippet: string): string {
+export function suggestionRepeatKey(summary: string, snippet: string, linkUrl?: string | null): string {
   const norm = (s: string) =>
     s
       .toLowerCase()
-      .replace(/\s+/g, " ")
-      .replace(/[^a-z0-9:/. -]/g, "")
-      .trim()
-      .slice(0, 220);
-  return `${norm(snippet)}|${norm(summary)}`;
+      .replace(/[^a-z0-9]/g, "");
+
+  // Focus on the content (snippet) and source (linkUrl) more than the LLM-generated summary.
+  const urlPart = linkUrl ? linkUrl.toLowerCase().trim() : "";
+  const sNorm = norm(summary).slice(0, 80);
+  const snNorm = norm(snippet).slice(0, 120);
+  
+  return `${urlPart}|${snNorm}|${sNorm}`;
 }

@@ -3,9 +3,13 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { redirect, notFound } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CompanyHomeActions } from "@/components/crm/company-home-actions";
 import { CompanyDocuments } from "@/components/crm/company-documents";
 import Link from "next/link";
-import { FileText, FolderOpen, Radio, Search, Sparkles } from "lucide-react";
+import { FileText, FolderOpen, Sparkles, Users } from "lucide-react";
+import { ensureOwnerCollaborator } from "@/lib/crm/collaborators";
+import { listCompanyActivity } from "@/lib/crm/activity";
+import { ensureCrmStages, normalizeStageKey } from "@/lib/crm/stages";
 import { stripMarkdownText } from "@/lib/plain-text";
 
 type DocRow = {
@@ -278,14 +282,20 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
     }
     deal = fallback.data ?? null;
   }
-  if (dealErr || !deal) notFound();
+  if (dealErr && !dealViaRls) {
+    console.error("deal detail load:", dealErr);
+  }
+  if (!deal) notFound();
 
   const meta = (deal.metadata && typeof deal.metadata === "object" ? (deal.metadata as Record<string, unknown>) : {}) as Record<
     string,
     unknown
   >;
   const companyName = typeof meta.company_name === "string" ? meta.company_name : "Company";
-  const stage = typeof meta.crm_stage === "string" ? meta.crm_stage : null;
+  const admin = createAdminClient();
+  const stages = await ensureCrmStages(admin, user.id);
+  const stageKey = normalizeStageKey(meta.crm_stage, stages);
+  const stage = stages.find((item) => item.key === stageKey)?.label ?? stageKey;
 
   // Lightweight, non-HttpOnly hint cookie so the Chrome extension knows which
   // deal to default to. Only contains id + display name (no secrets).
@@ -301,7 +311,9 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
     // setting cookies in some render contexts can be a no-op; ignore
   }
 
-  const [{ data: docs }, { data: generatedDocs }, problemRes, solutionRes, tractionRes, peopleRes, factRes] = await Promise.all([
+  const [collaborator, _recentActivity, { data: docs }, { data: generatedDocs }, problemRes, solutionRes, tractionRes, peopleRes, factRes] = await Promise.all([
+    ensureOwnerCollaborator(admin, user.id, id),
+    listCompanyActivity(admin, user.id, id).catch(() => []),
     supabase
       .schema("deal_intel")
       .from("document")
@@ -383,19 +395,24 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
             <div className="min-w-0">
               <h1 className="truncate text-xl font-semibold tracking-tight text-zinc-950">{companyName}</h1>
               <p className="mt-1 text-sm text-zinc-500">
-                Stage <span className="font-medium text-zinc-800">{stage ?? "screened"}</span>
+                Stage <span className="font-medium text-zinc-800">{stage}</span>
               </p>
             </div>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Link className="crm-button-secondary" href={`/home/deal-intel/${id}/research`}>
-              <Search className="h-4 w-4" />
-              Research planner
-            </Link>
-            <Link className="crm-button" href={`/home/deal-intel/${id}/meet`}>
-              <Radio className="h-4 w-4" />
-              Live meeting
-            </Link>
+          <div className="min-w-0 rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+              <Users className="h-3.5 w-3.5" />
+              Collaborators
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-900 text-xs font-semibold text-white">
+                {(user.email || companyName).slice(0, 1).toUpperCase()}
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-xs font-semibold text-zinc-900">{user.email ?? "You"}</p>
+                <p className="text-[11px] text-zinc-500">{collaborator?.role ?? "owner"} · owner-only mode</p>
+              </div>
+            </div>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-0 divide-x divide-zinc-200 md:grid-cols-4">
@@ -417,6 +434,11 @@ export default async function DealIntelDetailPage({ params }: { params: Promise<
           </div>
         </div>
       </div>
+
+      <section className="crm-panel p-5">
+        <CompanyHomeActions dealId={id} companyName={companyName} />
+      </section>
+
 
       <section className="crm-panel">
         <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-5 py-4">

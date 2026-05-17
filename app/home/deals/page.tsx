@@ -1,13 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
-import { CompaniesPipeline, type CompanyStage, type PipelineCompany } from "@/components/crm/companies-pipeline";
+import { CompaniesPipeline, type PipelineCompany } from "@/components/crm/companies-pipeline";
+import { ensureCrmStages, normalizeStageKey } from "@/lib/crm/stages";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 function safeMeta(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
-}
-
-function asStage(v: unknown): CompanyStage {
-  return v === "screened" || v === "in_process" || v === "invested" || v === "passed" ? v : "screened";
 }
 
 export default async function DealsListPage() {
@@ -20,10 +18,14 @@ export default async function DealsListPage() {
     redirect("/");
   }
 
-  const { data: deals, error } = await supabase
+  const admin = createAdminClient();
+  const stages = await ensureCrmStages(admin, user.id);
+
+  const { data: deals, error } = await admin
     .schema("deal_intel")
     .from("deal")
     .select("id, created_at, metadata")
+    .eq("user_id", user.id)
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -38,10 +40,10 @@ export default async function DealsListPage() {
       id: deal.id,
       name,
       website,
-      stage: asStage(meta.crm_stage),
+      stage: normalizeStageKey(meta.crm_stage, stages),
       createdAt: deal.created_at,
     };
   });
 
-  return <CompaniesPipeline initialCompanies={companies} />;
+  return <CompaniesPipeline initialCompanies={companies} stages={stages} />;
 }

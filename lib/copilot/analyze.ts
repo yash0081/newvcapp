@@ -42,7 +42,7 @@ export type DealContext = {
   /** Recent claims for the deal, surfaced as compact "key: value" strings. */
   recentClaims: Array<{ key?: string; value: string; source?: string }>;
   /** Snippets already accepted in this active research session (newest first). */
-  sessionAcceptedSnippets?: Array<{ text: string; source_label?: string | null; accepted_at?: string | null }>;
+  sessionAcceptedSnippets?: Array<{ text: string; source_label?: string | null; source_url?: string | null; accepted_at?: string | null }>;
   /** Recently surfaced suggestions in this session, used to suppress repeats. */
   recentSuggestionKeys?: string[];
   /** URLs already visited by auto-research in this session. */
@@ -51,6 +51,9 @@ export type DealContext = {
   openGaps?: ResearchGap[];
   preferredHostnames?: Array<{ domain: string; score: number; category?: string; focus_guidance?: string }>;
   dislikedHostnames?: string[];
+  /** Fingerprints of suggestions explicitly rejected by the user in this session. */
+  rejectedSuggestionKeys?: string[];
+  playbook?: import("@/lib/research/playbook").LearnedPlaybook;
 };
 
 const ANALYZE_PROMPT = `You are the research copilot. Compare the on-screen extraction against what we already know about a deal/company and produce 0-${MAX_SUGGESTIONS} high-quality actionable suggestions to log.
@@ -152,6 +155,16 @@ export async function analyzeAgainstDeal(args: {
   }));
 
   const visibleText = (args.extracted.visible_text || "").slice(0, MAX_VISIBLE_TEXT_CHARS);
+
+  const PAYWALL_REGEX = /(sign in to continue|log in to|subscribe to read|create an account to|please log in|paywall|join now to see|unlock this profile|sign up for free to|login to view)/i;
+  const isPaywall = args.hostname && (
+    /\/(login|signin|signup|auth|register|subscribe)/i.test(args.hostname) ||
+    (visibleText.length < 1500 && PAYWALL_REGEX.test(visibleText))
+  );
+
+  if (isPaywall) {
+    return [];
+  }
   const outboundLinks = (args.extracted.outbound_links ?? []).slice(0, MAX_OUTBOUND_LINKS);
 
   const steeringTrim = (args.userInstruction ?? "").trim();
@@ -171,6 +184,7 @@ export async function analyzeAgainstDeal(args: {
     { label: "Already visited URLs this session", value: (args.deal.visitedUrls ?? []).slice(0, 50) },
     { label: "Preferred hostnames", value: (args.deal.preferredHostnames ?? []).slice(0, 40) },
     { label: "Disliked hostnames", value: (args.deal.dislikedHostnames ?? []).slice(0, 40) },
+    { label: "Learned User Playbook Rules", value: args.deal.playbook?.rules.map(r => r.rule_text) ?? [] },
     { label: "Auto steering note (from user, optional)", value: args.userInstruction ?? "" },
     { label: "Source label", value: sourceLabel },
   ];
@@ -213,8 +227,24 @@ export async function analyzeAgainstDeal(args: {
     ) {
       continue;
     }
-    const repeatKey = suggestionRepeatKey(summary, snippet);
+    // Filter out if we've already accepted a snippet from this exact link.
+    if (link_url && args.deal.sessionAcceptedSnippets?.some(s => s.source_url === link_url)) continue;
+
+    const repeatKey = suggestionRepeatKey(summary, snippet, link_url);
     if (seenKeys.has(repeatKey)) continue;
+    
+    // Fuzzy Deduplication: check similarity against explicitly rejected suggestions.
+    if (args.deal.rejectedSuggestionKeys?.length) {
+      const isTooSimilar = args.deal.rejectedSuggestionKeys.some(rk => {
+        // Since rejectedSuggestionKeys are already normalized fingerprints, we can compare them.
+        // We calculate Jaccard similarity between the new fingerprint and existing ones.
+        const intersection = [...repeatKey].filter(char => rk.includes(char)).length;
+        const union = new Set([...repeatKey, ...rk]).size;
+        return (intersection / union) > 0.85; 
+      });
+      if (isTooSimilar) continue;
+    }
+
     seenKeys.add(repeatKey);
     out.push({
       client_id: randomUUID(),

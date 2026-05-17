@@ -53,6 +53,8 @@ export async function retrieveContextNodesForQuery(
     focusDealId?: string | null;
     /** Skip second tabular resolve when caller already computed deal IDs */
     precomputedTabularDealIds?: string[];
+    /** Reuse a caller-computed embedding so sibling retrieval paths do not embed the same query twice. */
+    queryEmbedding?: number[] | Promise<number[] | null>;
   }
 ): Promise<ContextChunk[]> {
   const queryType = args.queryType ?? classifyQueryType(args.queryText);
@@ -74,7 +76,7 @@ export async function retrieveContextNodesForQuery(
 
   let queryEmb: number[];
   try {
-    queryEmb = await embedText(qTrim.slice(0, 8000));
+    queryEmb = (args.queryEmbedding ? await args.queryEmbedding : null) ?? (await embedText(qTrim.slice(0, 8000)));
   } catch {
     return [];
   }

@@ -39,6 +39,7 @@ export type UserSitePreference = {
   preference_score: number;
   category: string;
   usage_count: number;
+  success_rate?: number;
   focus_guidance?: string;
   confidence?: number;
   recency_weight?: number;
@@ -83,7 +84,13 @@ export async function recordResearchPreferenceEvents(args: {
       domain: asDomain(e.domain),
       category: String(e.category || "general"),
     }))
-    .filter((e) => e.domain && e.category);
+    .filter((e) => {
+      if (!e.domain || !e.category) return false;
+      if (e.domain === "web" || e.domain === "company-website") return false;
+      // Skip strings that look like company names rather than domains
+      if (e.domain.includes(" ") && !e.domain.includes(".")) return false;
+      return true;
+    });
 
   if (!events.length) return;
 
@@ -98,8 +105,18 @@ export async function recordResearchPreferenceEvents(args: {
 
     const prevPref = sel.data?.preference_score == null ? 0 : Number(sel.data.preference_score);
     const prevUsage = sel.data?.usage_count == null ? 0 : Number(sel.data.usage_count);
-    const nextPref = clamp(prevPref + Number(ev.deltaPreferenceScore || 0), -1, 1);
+    const prevSuccess = sel.data?.success_rate == null ? 0.5 : Number(sel.data.success_rate);
+
+    const deltaPref = Number(ev.deltaPreferenceScore || 0);
+    const nextPref = clamp(prevPref + deltaPref, -1, 1);
     const nextUsage = Math.max(0, prevUsage + Math.floor(Number(ev.deltaUsageCount || 0)));
+
+    let nextSuccessRate = prevSuccess;
+    if (ev.deltaUsageCount > 0 && Math.abs(deltaPref) > 0) {
+      const alpha = 0.2;
+      const isAccept = deltaPref > 0;
+      nextSuccessRate = prevSuccess * (1 - alpha) + (isAccept ? 1.0 : 0.0) * alpha;
+    }
 
     const meta = (sel.data?.metadata && typeof sel.data.metadata === "object" ? sel.data.metadata : {}) as Record<string, unknown>;
     const history = Array.isArray(meta.history) ? (meta.history as unknown[]) : [];
@@ -127,7 +144,7 @@ export async function recordResearchPreferenceEvents(args: {
           category: ev.category,
           preference_score: nextPref,
           usage_count: nextUsage,
-          success_rate: sel.data?.success_rate == null ? 0.5 : Number(sel.data.success_rate),
+          success_rate: clamp(nextSuccessRate, 0, 1),
           metadata: nextMeta,
         },
         { onConflict: "user_id,domain,category" }
@@ -228,7 +245,7 @@ export async function getUserSitePreferences(args: {
   const lim = Math.max(10, Math.min(200, args.limit ?? 80));
   const [siteRes, richRes] = await Promise.all([
     dealIntelTable(args.admin, "user_research_site_preference")
-      .select("domain, preference_score, category, usage_count")
+      .select("domain, preference_score, category, usage_count, success_rate")
       .eq("user_id", args.userId)
       .order("preference_score", { ascending: false })
       .limit(lim),
@@ -244,6 +261,7 @@ export async function getUserSitePreferences(args: {
     preference_score: number | null;
     category: string | null;
     usage_count: number | null;
+    success_rate?: number | null;
   }>;
   const normalized: UserSitePreference[] = siteRows
     .map((r) => ({
@@ -251,6 +269,7 @@ export async function getUserSitePreferences(args: {
       preference_score: Number(r.preference_score ?? 0),
       category: typeof r.category === "string" ? r.category : "general",
       usage_count: Number(r.usage_count ?? 0),
+      success_rate: r.success_rate != null ? Number(r.success_rate) : undefined,
     }))
     .filter((r) => !!r.domain);
   const richRows = ((richRes.data ?? []) as Array<Record<string, unknown>>).flatMap((r): UserSitePreference[] => {

@@ -66,6 +66,24 @@ export async function POST(request: NextRequest, ctx: { params: Promise<{ dealId
   }
   if (!deal) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  const digest = sha256(pdfBuffer);
+  const { data: existingDoc } = await admin
+    .schema("deal_intel")
+    .from("document")
+    .select("id, status, storage_bucket, storage_path")
+    .eq("user_id", user.id)
+    .eq("sha256", digest)
+    .maybeSingle();
+
+  if (existingDoc) {
+    return NextResponse.json({
+      documentId: existingDoc.id,
+      bucket: existingDoc.storage_bucket,
+      storagePath: existingDoc.storage_path,
+      status: existingDoc.status,
+    });
+  }
+
   const documentId = randomUUID();
   const originalName =
     typeof (file as File).name === "string" && (file as File).name.trim() ? (file as File).name : "document.pdf";
@@ -86,8 +104,6 @@ export async function POST(request: NextRequest, ctx: { params: Promise<{ dealId
       { status: 500 },
     );
   }
-
-  const digest = sha256(pdfBuffer);
   const { data: inserted, error: insErr } = await admin
     .schema("deal_intel")
     .from("document")

@@ -1,13 +1,7 @@
 import { NextResponse } from "next/server";
+import { ensureCrmStages, normalizeStageKey } from "@/lib/crm/stages";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-
-type Stage = "screened" | "in_process" | "invested" | "passed";
-
-function asStage(v: unknown): Stage {
-  const s = typeof v === "string" ? v : "";
-  if (s === "screened" || s === "in_process" || s === "invested" || s === "passed") return s;
-  return "screened";
-}
 
 export async function POST(req: Request) {
   const supabase = await createClient();
@@ -16,12 +10,14 @@ export async function POST(req: Request) {
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as { deal_id?: string; crm_stage?: Stage } | null;
+  const body = (await req.json().catch(() => null)) as { deal_id?: string; crm_stage?: string } | null;
   const deal_id = typeof body?.deal_id === "string" ? body.deal_id.trim() : "";
-  const crm_stage = asStage(body?.crm_stage);
   if (!deal_id) return NextResponse.json({ error: "deal_id is required" }, { status: 400 });
+  const admin = createAdminClient();
+  const stages = await ensureCrmStages(admin, user.id);
+  const crm_stage = normalizeStageKey(body?.crm_stage, stages);
 
-  const { data: existing, error: loadErr } = await supabase
+  const { data: existing, error: loadErr } = await admin
     .schema("deal_intel")
     .from("deal")
     .select("id, metadata")
@@ -36,7 +32,7 @@ export async function POST(req: Request) {
     unknown
   >;
 
-  const { error } = await supabase
+  const { error } = await admin
     .schema("deal_intel")
     .from("deal")
     .update({ metadata: { ...meta, crm_stage } })
@@ -46,4 +42,3 @@ export async function POST(req: Request) {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }
-

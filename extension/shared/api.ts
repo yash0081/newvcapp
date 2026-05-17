@@ -95,11 +95,19 @@ export async function observeText(
     signal?: AbortSignal;
     /** Overrides session-stored steering for this request (extension Focus field). */
     steeringHint?: string;
+    page_signals?: {
+      scrollDepthRatio: number;
+      draftItemsOnUrl: number;
+      sectionDwellMs?: number;
+      viewedSectionCount?: number;
+      focusedSectionHeadings?: string[];
+    };
   },
 ): Promise<{ suggestions: Suggestion[]; observationEventId?: string }> {
   const clientMode = options?.clientMode;
   const signal = options?.signal;
   const hint = options?.steeringHint?.trim();
+  const page_signals = options?.page_signals;
   return apiFetch(`/api/copilot/sessions/${sessionId}/observe`, {
     method: "POST",
     signal,
@@ -110,11 +118,14 @@ export async function observeText(
         hostname: snapshot.hostname,
         key_value_claims: snapshot.key_value_claims,
         outbound_links: snapshot.outbound_links ?? [],
+        viewed_elements: snapshot.viewed_elements ?? [],
+        skim_outline: snapshot.skim_outline ?? null,
       },
       urlHint: snapshot.url,
       hostnameHint: snapshot.hostname,
       clientMode,
       ...(hint ? { steering_hint: hint.slice(0, 2000) } : {}),
+      ...(page_signals ? { page_signals } : {}),
     }),
   });
 }
@@ -130,9 +141,15 @@ export async function planNext(
     draft_items_this_url: number;
     pending_suggestions_count: number;
     consecutive_plan_scrolls?: number;
+    skim_section_count?: number;
+    skim_visible_section_count?: number;
+    skim_relevant_section_count?: number;
+    section_dwell_ms?: number;
+    viewed_section_count?: number;
+    focused_section_headings?: string[];
   },
   steeringHint?: string,
-): Promise<{ next: { action: "navigate" | "scroll" | "stop"; url?: string; rationale?: string } }> {
+): Promise<{ next: { action: "navigate" | "scroll" | "stop"; url?: string; rationale?: string; targetScrollRatio?: number; targetSectionHeading?: string } }> {
   const hint = steeringHint?.trim();
   return apiFetch(`/api/copilot/sessions/${sessionId}/plan-next`, {
     method: "POST",
@@ -143,6 +160,7 @@ export async function planNext(
         hostname: snapshot.hostname,
         key_value_claims: snapshot.key_value_claims,
         outbound_links: snapshot.outbound_links ?? [],
+        skim_outline: snapshot.skim_outline ?? null,
       },
       currentUrl,
       ...(copilotExploreLinks?.length ? { copilot_explore_links: copilotExploreLinks } : {}),
@@ -231,10 +249,19 @@ export async function decide(
   action: "accept" | "reject",
   sourceUrl?: string,
   snippet?: Omit<AcceptedSnippet, "accepted_at">,
+  dwellTime?: number,
+  scrollDepth?: number
 ): Promise<void> {
   await apiFetch(`/api/copilot/sessions/${sessionId}/decision`, {
     method: "POST",
-    body: JSON.stringify({ suggestionEventId, action, sourceUrl, snippet }),
+    body: JSON.stringify({ 
+      suggestionEventId, 
+      action, 
+      sourceUrl, 
+      snippet,
+      dwell_time: dwellTime,
+      scroll_depth: scrollDepth
+    }),
   });
 }
 
@@ -254,6 +281,21 @@ export async function recordPreferenceSignal(
     body: JSON.stringify(body),
   });
 }
+
+export async function setDeepResearch(sessionId: string, enabled: boolean): Promise<{ ok: boolean; session: CopilotSession | null }> {
+  return apiFetch(`/api/copilot/sessions/${sessionId}/deep-research`, {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function skipHost(sessionId: string, host: string): Promise<{ session: CopilotSession | null }> {
+  return apiFetch(`/api/copilot/sessions/${sessionId}/skip-host`, {
+    method: "POST",
+    body: JSON.stringify({ host }),
+  });
+}
+
 
 /** Ends the active copilot session; document + facts sync run via background jobs. */
 export async function endCopilotSession(sessionId: string): Promise<{ ok: boolean; ended?: string }> {

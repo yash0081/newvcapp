@@ -1,5 +1,6 @@
 import { ingestTextAsDocument, type AdminClient } from "@/lib/research/document-ingest";
 import type { ResearchSource } from "@/lib/research/types";
+import { sanitizeResearchNotes, sanitizeResearchSources } from "@/lib/research/public-output";
 import { stripMarkdownText } from "@/lib/plain-text";
 
 function formatSources(sources: ResearchSource[]): string {
@@ -25,8 +26,8 @@ export async function ingestResearchStepOutputAsDocument(args: {
   notes: string;
   sources: ResearchSource[];
 }): Promise<{ documentId: string } | null> {
-  const notes = stripMarkdownText(args.notes).trim();
-  const sources = Array.isArray(args.sources) ? args.sources : [];
+  const notes = sanitizeResearchNotes(args.notes);
+  const sources = sanitizeResearchSources(args.sources);
 
   const docText = `${notes}${formatSources(sources)}`.trim();
   if (!docText) return null;

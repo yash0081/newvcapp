@@ -11,6 +11,8 @@ import {
   promptCopilot,
   recordPreferenceSignal,
   setCopilotSteering,
+  setDeepResearch,
+  skipHost,
   startSession,
 } from "@shared/api";
 import type {
@@ -207,6 +209,7 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
             clientMode: req.clientMode,
             signal: controller.signal,
             steeringHint: req.steeringHint,
+            page_signals: req.page_signals,
           });
           if (pendingObserveAbort === controller) pendingObserveAbort = null;
           const payload: ObserveResponse = res;
@@ -242,6 +245,32 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
         const payload: SessionResponse = { session: fresh ?? null };
         return { ok: true, payload };
       }
+      case "SKIP_HOST": {
+        const state = await loadState();
+        if (!state.activeSessionId) return { ok: false, error: "No active session" };
+        const res = await skipHost(state.activeSessionId, req.host);
+        if (res.session) {
+          await saveState({
+            ...(await loadState()),
+            activeSessionId: res.session.id,
+            activeSession: res.session,
+          });
+        }
+        return { ok: true, payload: res };
+      }
+      case "SET_DEEP_RESEARCH": {
+        const state = await loadState();
+        if (!state.activeSessionId) return { ok: false, error: "No active session" };
+        const res = await setDeepResearch(state.activeSessionId, req.enabled);
+        if (res.session) {
+          await saveState({
+            ...(await loadState()),
+            activeSessionId: res.session.id,
+            activeSession: res.session,
+          });
+        }
+        return { ok: true, payload: res };
+      }
       case "PLAN_NEXT": {
         const state = await loadState();
         if (!state.activeSessionId) return { ok: false, error: "No active session" };
@@ -272,7 +301,7 @@ async function handle(req: ExtensionRequest): Promise<ExtensionResponse> {
       case "DECISION": {
         const state = await loadState();
         if (!state.activeSessionId) return { ok: false, error: "No active session" };
-        await decide(state.activeSessionId, req.suggestionEventId, req.action, req.sourceUrl);
+        await decide(state.activeSessionId, req.suggestionEventId, req.action, req.sourceUrl, undefined, req.dwellTime, req.scrollDepth);
         const activeDeal = await readActiveDealCookie();
         if (activeDeal) {
           try {

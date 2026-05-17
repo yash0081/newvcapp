@@ -7,7 +7,9 @@ import { getResearchModel } from "@/lib/research/research-model-env";
 import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 import { loadResearchInternalContext } from "@/lib/research/context";
+import { profileExecuteTimeoutMs, profileFollowUpLimit, researchProfileFromMetadata } from "@/lib/research/mode-router";
 import { stripMarkdownText } from "@/lib/plain-text";
+import { sanitizeResearchNotes, sanitizeResearchSources } from "@/lib/research/public-output";
 import { vertexRunWithTextMulti } from "@/lib/vertex";
 
 function asCompanyName(meta: unknown): string {
@@ -242,6 +244,7 @@ export async function POST(
   const companyName = asCompanyName(dealRes.data?.metadata);
   const companyContext = JSON.stringify((dealRes.data?.metadata ?? {}) as Record<string, unknown>, null, 2);
   const workflowMeta = workflow.metadata && typeof workflow.metadata === "object" ? (workflow.metadata as Record<string, unknown>) : {};
+  const researchProfile = researchProfileFromMetadata(workflowMeta);
   const workflowFocus = typeof workflowMeta.focus === "string" ? workflowMeta.focus : "";
   const planningIntent = workflowMeta.planning_intent ?? null;
   const peerDealIds = Array.isArray(workflowMeta.peer_deal_ids)
@@ -291,10 +294,13 @@ export async function POST(
       website: stepRes.data.website,
       task: stepRes.data.task,
       internalContext,
+      researchProfile,
+      timeoutMs: profileExecuteTimeoutMs(researchProfile),
     });
 
     if (result.ok) {
-      const cleanNotes = stripMarkdownText(result.notes);
+      const cleanNotes = sanitizeResearchNotes(result.notes);
+      const cleanSources = sanitizeResearchSources(result.sources);
       const ingestedDocumentIds = await ingestStepOutputForRun({
         admin,
         userId: user.id,
@@ -305,7 +311,7 @@ export async function POST(
         website: stepRes.data.website,
         task: stepRes.data.task,
         notes: cleanNotes,
-        sources: result.sources,
+        sources: cleanSources,
       });
 
       const upd = await admin
@@ -314,7 +320,7 @@ export async function POST(
         .update({
           run_status: "done",
           output_notes: cleanNotes,
-          sources: result.sources,
+          sources: cleanSources,
           error_message: null,
           metadata: {
             suggestedStepUpdates: result.suggestedStepUpdates,
@@ -342,7 +348,10 @@ export async function POST(
         .eq("workflow_id", workflowId);
       if (stepUpd.error) throw new Error(stepUpd.error.message);
 
-      const requestedFollowUpLimit = clampInt(Number(workflowMeta.follow_up_step_limit ?? 1), 0, 2);
+      const requestedFollowUpLimit =
+        researchProfile === "fast"
+          ? 0
+          : clampInt(Number(workflowMeta.follow_up_step_limit ?? profileFollowUpLimit(researchProfile)), 0, 2);
       const existingFollowUpCount = Number(workflowMeta.follow_up_step_count ?? 0);
       const followUpRoom = Math.max(0, requestedFollowUpLimit - existingFollowUpCount);
       const followUps = await reviewFollowUpsForScope({

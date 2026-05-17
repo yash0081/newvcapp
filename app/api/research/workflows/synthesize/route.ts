@@ -3,6 +3,7 @@ import { getAuthedUser } from "@/lib/research/db";
 import { streamChatResearchAnswer, synthesizeChatResearchAnswer } from "@/lib/research/chat-synthesis";
 import type { ResearchSource } from "@/lib/research/types";
 import { stripMarkdownText } from "@/lib/plain-text";
+import { sanitizeResearchNotes, sanitizeResearchSources } from "@/lib/research/public-output";
 
 type RawRun = {
   dealName?: unknown;
@@ -15,17 +16,17 @@ function parseSources(raw: unknown): ResearchSource[] {
   if (!Array.isArray(raw)) return [];
   const out: ResearchSource[] = [];
   for (const source of raw) {
-      const o = source && typeof source === "object" ? (source as Record<string, unknown>) : {};
-      const url = typeof o.url === "string" ? o.url.trim() : "";
-      if (!url) continue;
-      out.push({
-        url,
-        title: typeof o.title === "string" ? o.title : undefined,
-        snippet: typeof o.snippet === "string" ? o.snippet : undefined,
-      });
-      if (out.length >= 12) break;
+    const o = source && typeof source === "object" ? (source as Record<string, unknown>) : {};
+    const url = typeof o.url === "string" ? o.url.trim() : "";
+    if (!url) continue;
+    out.push({
+      url,
+      title: typeof o.title === "string" ? o.title : undefined,
+      snippet: typeof o.snippet === "string" ? o.snippet : undefined,
+    });
+    if (out.length >= 12) break;
   }
-  return out;
+  return sanitizeResearchSources(out);
 }
 
 function sse(event: unknown): Uint8Array {
@@ -44,7 +45,7 @@ export async function POST(req: Request) {
         .map((run) => ({
           dealName: typeof run.dealName === "string" ? run.dealName.slice(0, 200) : "Company",
           task: typeof run.task === "string" ? run.task.slice(0, 1000) : "Research",
-          notes: typeof run.notes === "string" ? run.notes.slice(0, 12000) : "",
+          notes: sanitizeResearchNotes(typeof run.notes === "string" ? run.notes.slice(0, 12000) : ""),
           sources: parseSources(run.sources),
         }))
         .filter((run) => run.notes.trim())

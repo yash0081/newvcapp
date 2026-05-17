@@ -18,6 +18,8 @@ import {
   normalizePreferenceDomain,
   normalizePreferenceUrl,
 } from "@/lib/copilot/preference-signals";
+import { suggestionRepeatKey } from "@/lib/copilot/repeat-key";
+import { attributeRankingEvents } from "@/lib/copilot/recommender-weights";
 
 const ACCEPT_DELTA = 0.10;
 const REJECT_DELTA = -0.10;
@@ -36,7 +38,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
   if (!user) return withCopilotCors(req, NextResponse.json({ error: "Unauthorized" }, { status: 401 }));
 
   const body = (await req.json().catch(() => null)) as
-    | { suggestionEventId?: string; action?: "accept" | "reject"; sourceUrl?: string }
+    | { 
+        suggestionEventId?: string; 
+        action?: "accept" | "reject"; 
+        sourceUrl?: string;
+        dwell_time?: number;
+        scroll_depth?: number;
+        interaction_history?: unknown;
+      }
     | null;
   const suggestionEventId = asString(body?.suggestionEventId);
   const action = body?.action === "accept" || body?.action === "reject" ? body.action : null;
@@ -99,9 +108,29 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
           kind: "accepted",
           hostname,
           parent_event_id: suggestion.id,
-          payload: { summary, snippet, source_label: sourceLabel, source_url: sourceUrl },
+          payload: { 
+            summary, 
+            snippet, 
+            source_label: sourceLabel, 
+            source_url: sourceUrl,
+            dwell_time: body?.dwell_time,
+            scroll_depth: body?.scroll_depth,
+            interaction_history: body?.interaction_history
+          },
         },
       }),
+      // Log recommender attribution for accept action
+      hostname && sourceUrl ? attributeRankingEvents({
+        admin,
+        sessionId,
+        userId: user.id,
+        candidateHost: hostname,
+        candidateUrl: sourceUrl,
+        label: 1,
+        labelKind: "accept_suggestion",
+        sampleWeight: 1.0,
+        windowMinutes: 30,
+      }).catch(() => {}) : Promise.resolve(),
     ]);
     if (sourceUrl) {
       void mergeResearchAgenda({
@@ -112,16 +141,55 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       }).catch(() => {});
     }
   } else {
-    await insertCopilotEvent({
+    await Promise.all([
+      insertCopilotEvent({
+        admin,
+        event: {
+          session_id: sessionId,
+          kind: "rejected",
+          hostname,
+          parent_event_id: suggestion.id,
+          payload: { 
+            summary, 
+            source_label: sourceLabel, 
+            source_url: sourceUrl,
+            dwell_time: body?.dwell_time,
+            scroll_depth: body?.scroll_depth,
+            interaction_history: body?.interaction_history
+          },
+        },
+      }),
+      // Log recommender attribution for reject action
+      hostname && sourceUrl ? attributeRankingEvents({
+        admin,
+        sessionId,
+        userId: user.id,
+        candidateHost: hostname,
+        candidateUrl: sourceUrl,
+        label: 0,
+        labelKind: "reject_suggestion",
+        sampleWeight: 1.0,
+        windowMinutes: 30,
+      }).catch(() => {}) : Promise.resolve(),
+    ]);
+    const key = suggestionRepeatKey(summary, (payload.snippet as string) || "", sourceUrl);
+    void mergeResearchAgenda({
       admin,
-      event: {
-        session_id: sessionId,
-        kind: "rejected",
-        hostname,
-        parent_event_id: suggestion.id,
-        payload: { summary, source_label: sourceLabel, source_url: sourceUrl },
+      sessionId,
+      userId: user.id,
+      transform: (a) => {
+        if (!a) return null;
+        const declined = a.declined_hosts || [];
+        if (hostname && !declined.includes(hostname)) {
+          declined.push(hostname);
+        }
+        const rejected = a.rejected_suggestion_keys || [];
+        if (!rejected.includes(key)) {
+          rejected.push(key);
+        }
+        return { ...a, declined_hosts: declined, rejected_suggestion_keys: rejected };
       },
-    });
+    }).catch(() => {});
   }
 
   // Preference learning (non-blocking — keep POST latency low).
@@ -144,6 +212,18 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
           }),
         },
       ],
+    }).catch(() => {});
+
+    // Label attribution for recommender SGD (non-blocking).
+    void attributeRankingEvents({
+      admin,
+      sessionId,
+      userId: user.id,
+      candidateHost: hostname,
+      candidateUrl: sourceUrl || undefined,
+      label: action === "accept" ? 1 : 0,
+      labelKind: action === "accept" ? "accept_suggestion" : "reject_suggestion",
+      windowMinutes: 30,
     }).catch(() => {});
   }
 

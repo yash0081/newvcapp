@@ -41,7 +41,7 @@ async function bootstrap() {
   host.style.zIndex = "2147483647";
   document.documentElement.appendChild(host);
 
-  const shadow = host.attachShadow({ mode: "closed" });
+  const shadow = host.attachShadow({ mode: "open", delegatesFocus: true });
   const styleEl = document.createElement("style");
   styleEl.textContent = styles;
   shadow.appendChild(styleEl);

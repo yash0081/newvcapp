@@ -187,8 +187,20 @@ function collectKeyValuePairs(root: Element): DomKeyValue[] {
   return out;
 }
 
-function collectOutboundLinks(root: Element, scope: SnapshotScope): Array<{ url: string; text: string }> {
-  const out: Array<{ url: string; text: string }> = [];
+function getNearestHeading(el: Element): string | null {
+  let prev = el.previousElementSibling;
+  while (prev) {
+    if (/^H[1-6]$/.test(prev.tagName)) return prev.textContent?.trim() || null;
+    const childHeading = prev.querySelector("h1, h2, h3, h4, h5, h6");
+    if (childHeading) return childHeading.textContent?.trim() || null;
+    prev = prev.previousElementSibling;
+  }
+  if (el.parentElement) return getNearestHeading(el.parentElement);
+  return null;
+}
+
+function collectOutboundLinks(root: Element, scope: SnapshotScope): Array<{ url: string; text: string; heading?: string }> {
+  const out: Array<{ url: string; text: string; heading?: string }> = [];
   const seen = new Set<string>();
   for (const link of Array.from(root.querySelectorAll("a[href]"))) {
     if (!isVisible(link)) continue;
@@ -209,8 +221,41 @@ function collectOutboundLinks(root: Element, scope: SnapshotScope): Array<{ url:
     const text = clean(link.textContent ?? "", 120);
     if (!text) continue;
     seen.add(normalized);
-    out.push({ url: normalized, text });
+    const heading = clean(getNearestHeading(link) ?? "", 120);
+    out.push({ url: normalized, text, heading: heading || undefined });
     if (out.length >= MAX_OUTBOUND_LINKS) break;
+  }
+  return out;
+}
+
+function collectViewedElements(root: Element, scope: SnapshotScope): string[] {
+  if (scope === "full") return [];
+  const out: string[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+    acceptNode(node) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as Element;
+        if (SKIP_TAGS.has(el.tagName)) return NodeFilter.FILTER_REJECT;
+        if (!isVisible(el)) return NodeFilter.FILTER_REJECT;
+        if (!isInViewportBand(el)) return NodeFilter.FILTER_SKIP;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+      return NodeFilter.FILTER_SKIP;
+    },
+  });
+
+  let n: Node | null = walker.nextNode();
+  while (n) {
+    const el = n as Element;
+    const tag = el.tagName.toLowerCase();
+    if (tag.startsWith("h") || tag === "p" || tag === "li") {
+      const txt = (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100);
+      if (txt.length > 5) {
+        out.push(`${tag}:${txt}`);
+      }
+    }
+    if (out.length >= 40) break;
+    n = walker.nextNode();
   }
   return out;
 }
@@ -224,6 +269,7 @@ export function extractDomSnapshot(opts?: { scope?: SnapshotScope }): DomSnapsho
   const url = location.href;
   const key_value_claims = collectKeyValuePairs(root);
   const outbound_links = collectOutboundLinks(root, scope);
+  const viewed_elements = collectViewedElements(root, scope);
   return {
     visible_text,
     page_title,
@@ -231,6 +277,7 @@ export function extractDomSnapshot(opts?: { scope?: SnapshotScope }): DomSnapsho
     url,
     key_value_claims,
     outbound_links,
+    viewed_elements,
   };
 }
 

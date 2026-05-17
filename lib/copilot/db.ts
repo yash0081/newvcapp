@@ -201,6 +201,25 @@ export async function setAutoSteeringNote(args: {
     .eq("user_id", args.userId);
 }
 
+export async function mergeSessionMetadata(args: {
+  admin: SupabaseClient;
+  sessionId: string;
+  userId: string;
+  transform: (current: Record<string, any>) => Record<string, any>;
+}): Promise<void> {
+  const meta = await loadLatestSessionMetadata(args.admin, args.sessionId, args.userId);
+  const next = args.transform(meta);
+  await args.admin
+    .schema("deal_intel")
+    .from("copilot_session")
+    .update({
+      metadata: next,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", args.sessionId)
+    .eq("user_id", args.userId);
+}
+
 export function getVisitedHostCounts(visitedUrls: string[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const raw of visitedUrls) {

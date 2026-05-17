@@ -6,6 +6,29 @@ import { stripMarkdownText } from "@/lib/plain-text";
 
 type DealLite = { id: string; metadata: Record<string, unknown> | null; user_id?: string | null };
 type TractionLite = { deal_id: string; investor_list: string[] | null; money_raised_per_stage: string[] | null };
+type SharedEmbedding = Promise<number[] | null>;
+
+const EMBEDDING_CACHE_TTL_MS = 5 * 60 * 1000;
+const EMBEDDING_CACHE_MAX = 500;
+const queryEmbeddingCache = new Map<string, { expiresAt: number; promise: Promise<number[] | null> }>();
+
+function embeddingCacheKey(userId: string, dealId: string, query: string): string {
+  return `${userId}:${dealId}:${query.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 1000)}`;
+}
+
+function getSharedQueryEmbedding(userId: string, dealId: string, query: string): SharedEmbedding {
+  const key = embeddingCacheKey(userId, dealId, query);
+  const now = Date.now();
+  const cached = queryEmbeddingCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.promise;
+  const promise = embedText(query.trim().slice(0, 8000)).catch(() => null);
+  queryEmbeddingCache.set(key, { expiresAt: now + EMBEDDING_CACHE_TTL_MS, promise });
+  if (queryEmbeddingCache.size > EMBEDDING_CACHE_MAX) {
+    const oldest = queryEmbeddingCache.keys().next().value;
+    if (oldest) queryEmbeddingCache.delete(oldest);
+  }
+  return promise;
+}
 
 function safeRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
@@ -62,9 +85,11 @@ async function loadTreeContext(args: {
   userId: string;
   dealId: string;
   query: string;
+  queryEmbedding?: SharedEmbedding;
   limit?: number;
 }): Promise<Array<{ node_type: string; text: string; score: number }>> {
   try {
+    const queryEmbedding = args.queryEmbedding ? await args.queryEmbedding : null;
     const rows = await retrieveContextNodesForQuery(args.admin, {
       userId: args.userId,
       queryText: args.query,
@@ -72,6 +97,7 @@ async function loadTreeContext(args: {
       queryType: "analytical",
       chatTask: "deep_reasoning",
       limit: args.limit ?? 8,
+      queryEmbedding: queryEmbedding ?? undefined,
     });
     return rows
       .filter((row) => row.deal_id === args.dealId && row.raw_text)
@@ -91,37 +117,35 @@ async function loadDocumentContext(args: {
   userId: string;
   dealId: string;
   query: string;
+  queryEmbedding?: SharedEmbedding;
   limit?: number;
 }): Promise<Array<{ document_id: string; page_start: number; page_end: number; text: string; score: number }>> {
   const limit = args.limit ?? 6;
   const query = args.query.trim().slice(0, 700);
   if (!query) return [];
-  const fts = await args.admin.rpc("deal_intel_match_document_chunks_fts", {
+  const ftsPromise = args.admin.rpc("deal_intel_match_document_chunks_fts", {
     p_user_id: args.userId,
     p_query: query,
     p_match_count: limit,
     p_deal_id: args.dealId,
   });
-  const ftsRows = fts.error ? [] : ((fts.data ?? []) as Array<{ document_id: string; page_start: number; page_end: number; text: string; score: number }>);
-
-  let vectorRows: typeof ftsRows = [];
-  try {
-    const emb = await embedText(query.slice(0, 8000));
+  const vectorPromise = (async () => {
+    const emb = args.queryEmbedding ? await args.queryEmbedding : await embedText(query.slice(0, 8000)).catch(() => null);
+    if (!emb) return [] as Array<{ document_id: string; page_start: number; page_end: number; text: string; score: number }>;
     const vec = await args.admin.rpc("deal_intel_match_document_chunks_vector", {
       p_user_id: args.userId,
       p_query_embedding: vectorParam(emb),
       p_match_count: limit,
       p_deal_id: args.dealId,
     });
-    if (!vec.error) {
-      vectorRows = ((vec.data ?? []) as Array<{ document_id: string; page_start: number; page_end: number; text: string; similarity: number }>).map((row) => ({
-        ...row,
-        score: Number(row.similarity ?? 0),
-      }));
-    }
-  } catch {
-    vectorRows = [];
-  }
+    if (vec.error) return [];
+    return ((vec.data ?? []) as Array<{ document_id: string; page_start: number; page_end: number; text: string; similarity: number }>).map((row) => ({
+      ...row,
+      score: Number(row.similarity ?? 0),
+    }));
+  })().catch(() => []);
+  const [fts, vectorRows] = await Promise.all([ftsPromise, vectorPromise]);
+  const ftsRows = fts.error ? [] : ((fts.data ?? []) as Array<{ document_id: string; page_start: number; page_end: number; text: string; score: number }>);
 
   const byKey = new Map<string, (typeof ftsRows)[number]>();
   for (const row of [...vectorRows, ...ftsRows]) {
@@ -132,6 +156,29 @@ async function loadDocumentContext(args: {
     if (!prev || Number(row.score ?? 0) > Number(prev.score ?? 0)) byKey.set(key, { ...row, text: clean });
   }
   return Array.from(byKey.values()).sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0)).slice(0, limit);
+}
+
+function summarizeInternalEvidence(args: {
+  tree: Array<{ node_type: string; text: string; score: number }>;
+  docs: Array<{ document_id: string; page_start: number; page_end: number; text: string; score: number }>;
+}): string {
+  const lines: string[] = [];
+  const byType = new Map<string, number>();
+  for (const row of args.tree) byType.set(row.node_type || "unknown", (byType.get(row.node_type || "unknown") ?? 0) + 1);
+  if (byType.size) {
+    lines.push(`Deal-tree evidence by node type: ${Array.from(byType.entries()).map(([k, v]) => `${k}=${v}`).join(", ")}.`);
+    lines.push(
+      ...args.tree.slice(0, 6).map((row, i) => `Tree ${i + 1} (${row.node_type}, score ${row.score.toFixed(3)}): ${row.text.slice(0, 360)}`),
+    );
+  }
+  if (args.docs.length) {
+    const docCount = new Set(args.docs.map((row) => row.document_id)).size;
+    lines.push(`Internal document evidence: ${args.docs.length} chunks across ${docCount} document${docCount === 1 ? "" : "s"}.`);
+    lines.push(
+      ...args.docs.slice(0, 4).map((row, i) => `Doc ${i + 1} (${row.document_id} pp.${row.page_start}-${row.page_end}, score ${row.score.toFixed(3)}): ${row.text.slice(0, 320)}`),
+    );
+  }
+  return lines.join("\n");
 }
 
 async function loadPeerInvestorSignals(args: {
@@ -185,19 +232,23 @@ export async function loadResearchInternalContext(args: {
   peerDealIds?: string[];
   mode?: "planning" | "execution";
 }): Promise<string> {
+  const sharedEmbedding = getSharedQueryEmbedding(args.userId, args.dealId, args.query);
+  const planning = args.mode === "planning";
   const [snapshot, tree, docs, investorSignals] = await Promise.all([
     loadRelationalSnapshot(args.admin, args.userId, args.dealId).catch(() => ({})),
-    loadTreeContext({ admin: args.admin, userId: args.userId, dealId: args.dealId, query: args.query, limit: args.mode === "planning" ? 6 : 10 }),
-    loadDocumentContext({ admin: args.admin, userId: args.userId, dealId: args.dealId, query: args.query, limit: args.mode === "planning" ? 4 : 8 }),
+    loadTreeContext({ admin: args.admin, userId: args.userId, dealId: args.dealId, query: args.query, queryEmbedding: sharedEmbedding, limit: planning ? 10 : 10 }),
+    loadDocumentContext({ admin: args.admin, userId: args.userId, dealId: args.dealId, query: args.query, queryEmbedding: sharedEmbedding, limit: planning ? 6 : 8 }),
     loadPeerInvestorSignals({ admin: args.admin, userId: args.userId, dealId: args.dealId, peerDealIds: args.peerDealIds ?? [] }).catch(() => ""),
   ]);
+  const evidenceSummary = planning ? summarizeInternalEvidence({ tree, docs }) : "";
 
   const sections = [
-    asTextBlock("Structured company data from the workspace", snapshot, args.mode === "planning" ? 4500 : 7000),
-    tree.length ? asTextBlock("Relevant hierarchical deal-tree retrieval", tree, args.mode === "planning" ? 2500 : 5000) : "",
-    docs.length ? asTextBlock("Relevant internal document chunks", docs, args.mode === "planning" ? 2500 : 5000) : "",
+    asTextBlock("Structured company data from the workspace", snapshot, planning ? 4500 : 7000),
+    evidenceSummary ? asTextBlock("Internal evidence coverage from indexed company context", evidenceSummary, 2800) : "",
+    tree.length ? asTextBlock("Relevant hierarchical deal-tree retrieval", tree, planning ? 3200 : 5000) : "",
+    docs.length ? asTextBlock("Relevant internal document chunks", docs, planning ? 3200 : 5000) : "",
     investorSignals ? asTextBlock("Deterministic database signals", investorSignals, 2000) : "",
   ].filter(Boolean);
 
-  return sections.join("\n\n").slice(0, args.mode === "planning" ? 11000 : 18000);
+  return sections.join("\n\n").slice(0, planning ? 12000 : 18000);
 }

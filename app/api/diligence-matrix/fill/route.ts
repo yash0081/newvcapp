@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fillMatrixCell } from "@/lib/diligence-matrix/matrix";
+import { fillMatrixCell, listAuthorizedDealIds } from "@/lib/diligence-matrix/matrix";
 import { getAuthedUser } from "@/lib/research/db";
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -31,7 +31,6 @@ export async function POST(req: Request) {
           return dealId && columnId ? { dealId, columnId } : null;
         })
         .filter((pair): pair is { dealId: string; columnId: string } => Boolean(pair))
-        .slice(0, 80)
     : [];
   const dealIds = Array.isArray(body?.dealIds)
     ? body.dealIds.filter((x): x is string => typeof x === "string" && Boolean(x)).slice(0, 25)
@@ -44,10 +43,25 @@ export async function POST(req: Request) {
   }
 
   const admin = createAdminClient();
-  const pairs = requestedPairs.length ? requestedPairs : dealIds.flatMap((dealId) => columnIds.map((columnId) => ({ dealId, columnId })));
-  const maxPairs = body?.allowResearch !== false ? 12 : 80;
+  const authorizedDealIds = await listAuthorizedDealIds(admin, user.id, dealIds);
+  const authorizedPairDealIds = await listAuthorizedDealIds(
+    admin,
+    user.id,
+    Array.from(new Set(requestedPairs.map((pair) => pair.dealId))),
+  );
+  const authorizedPairSet = new Set(authorizedPairDealIds);
+  const safeRequestedPairs = requestedPairs.filter((pair) => authorizedPairSet.has(pair.dealId));
+  const pairs = safeRequestedPairs.length
+    ? safeRequestedPairs
+    : authorizedDealIds.flatMap((dealId) => columnIds.map((columnId) => ({ dealId, columnId })));
+  const allowResearch = body?.allowResearch !== false;
+  const maxPairs = allowResearch ? 12 : 100;
   const selectedPairs = pairs.slice(0, maxPairs);
-  const concurrency = body?.allowResearch !== false ? 3 : 8;
+  const concurrency = allowResearch ? 3 : 8;
+  const scopedPeerIds =
+    safeRequestedPairs.length > 0
+      ? authorizedPairDealIds
+      : authorizedDealIds;
   const results = await mapWithConcurrency(selectedPairs, concurrency, async ({ dealId, columnId }) => {
       try {
         const cell = await fillMatrixCell({
@@ -56,7 +70,7 @@ export async function POST(req: Request) {
           dealId,
           columnId,
           allowResearch: body?.allowResearch !== false,
-          peerDealIds: dealIds.filter((id) => id !== dealId),
+          peerDealIds: scopedPeerIds.filter((id) => id !== dealId),
         });
         return { cell, error: null };
       } catch (e) {

@@ -13,6 +13,7 @@ import {
   recordResearchPreferenceEvents,
   type UserSitePreference,
 } from "@/lib/research/preferences";
+import { DEFAULT_MATRIX_COLUMNS } from "@/lib/diligence-matrix/defaults";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import { vertexRunWithTextMulti } from "@/lib/vertex";
 
@@ -186,19 +187,58 @@ export async function listMatrixColumns(admin: SupabaseClient, userId: string): 
   return (res.data ?? []) as MatrixColumn[];
 }
 
-export async function listMatrixCells(admin: SupabaseClient, userId: string): Promise<MatrixCell[]> {
-  const res = await admin
+export async function listMatrixCells(
+  admin: SupabaseClient,
+  userId: string,
+  options?: { dealIds?: string[] },
+): Promise<MatrixCell[]> {
+  let query = admin
     .schema("deal_intel")
     .from("diligence_matrix_cell")
     .select("id, user_id, deal_id, column_id, status, value_text, value_jsonb, confidence, source_kind, rationale, citations, research_notes, error_message, filled_at, created_at, updated_at")
-    .eq("user_id", userId)
-    .order("updated_at", { ascending: false })
-    .limit(2000);
+    .eq("user_id", userId);
+  const dealIds = options?.dealIds?.filter(Boolean).slice(0, 25) ?? [];
+  if (dealIds.length) query = query.in("deal_id", dealIds);
+  const res = await query.order("updated_at", { ascending: false }).limit(2000);
   if (res.error) throw res.error;
   return ((res.data ?? []) as Array<Omit<MatrixCell, "citations"> & { citations: unknown }>).map((c) => ({
     ...c,
     citations: Array.isArray(c.citations) ? c.citations.map(citationFromRaw).filter((x): x is MatrixCitation => Boolean(x)) : [],
   }));
+}
+
+export async function seedDefaultMatrixColumns(admin: SupabaseClient, userId: string): Promise<MatrixColumn[]> {
+  const existing = await listMatrixColumns(admin, userId);
+  if (existing.length) return existing;
+  const created: MatrixColumn[] = [];
+  for (const spec of DEFAULT_MATRIX_COLUMNS) {
+    created.push(
+      await createMatrixColumn(admin, userId, {
+        label: spec.label,
+        description: spec.prompt,
+        dataType: spec.dataType,
+        prompt: spec.prompt,
+        researchEnabled: spec.researchEnabled ?? true,
+      }),
+    );
+  }
+  return created;
+}
+
+export async function listAuthorizedDealIds(
+  admin: SupabaseClient,
+  userId: string,
+  dealIds: string[],
+): Promise<string[]> {
+  if (!dealIds.length) return [];
+  const res = await admin
+    .schema("deal_intel")
+    .from("deal")
+    .select("id")
+    .eq("user_id", userId)
+    .in("id", dealIds.slice(0, 25));
+  if (res.error) throw res.error;
+  return (res.data ?? []).map((row) => String(row.id));
 }
 
 export async function createMatrixColumn(
@@ -302,13 +342,25 @@ async function loadInternalContext(admin: SupabaseClient, userId: string, dealId
   };
 }
 
+function columnNeedsPeerContext(column: MatrixColumn): boolean {
+  const text = `${column.label} ${column.description} ${column.prompt}`.toLowerCase();
+  return /\b(common investors?|investor overlap|shared investors?|compare|comparison|peer overlap|competitor overlap|landscape|versus| vs )\b/.test(
+    text,
+  );
+}
+
 async function inferFromContext(args: {
   companyName: string;
   column: MatrixColumn;
   internalContext: unknown;
   researchNotes?: string | null;
   researchSources?: MatrixCitation[];
+  peerNames?: string[];
 }): Promise<ParsedCell> {
+  const peerConstraint = args.peerNames?.length 
+    ? `CRITICAL DILIGENCE BOUNDARY: Do NOT hallucinate or attribute facts belonging to these competitor/peer companies: ${args.peerNames.join(", ")}. You are ONLY analyzing "${args.companyName}".`
+    : "";
+
   const raw = await vertexRunWithTextMulti(
     getResearchModel("flash"),
     `Fill one diligence matrix cell.
@@ -319,6 +371,8 @@ ${DEAL_INTEL_LAYER1A_SCHEMA_GUIDE}
 ${DEAL_INTEL_QUALITY_GUARDRAILS}
 
 ${USER_PREFERENCE_GUARDRAILS}
+
+${peerConstraint}
 
 Return strict JSON:
 {
@@ -331,10 +385,12 @@ Return strict JSON:
   "researchTask": "specific web research task if status is needs_research"
 }
 	Rules:
-	- Answer the exact column for the company. Do not fill adjacent metrics.
-	- Prefer concise spreadsheet-style values, e.g. "32%", "$18M ARR", "Beat Q3 revenue goal by 12%", or "Not found".
+	- Answer the exact column for the company named in Company. Do not fill adjacent metrics.
+	- Use ONLY evidence under currentCompany for this row. Ignore crossCompanyAndDatabaseSignals unless the column explicitly asks for peer comparison, common investors, or overlap.
+	- Never attribute another company's facts, investors, revenue, or team to this company.
+	- Prefer concise spreadsheet-style values, e.g. "32%", "$18M ARR", or "Not found".
 	- If the available internal documents and facts do not contain the requested value, set answer to "Not present in available documents" and status to "needs_research".
-	- For cross-company fields such as common investors, overlap, peer comparisons, shared backers, relative funding amounts, or competitor overlap, use the crossCompanyAndDatabaseSignals section when present. If that section and research notes do not directly support the answer, return needs_research.
+	- For explicit cross-company columns (common investors, overlap, peer comparison), use crossCompanyAndDatabaseSignals only when it names this company correctly.
 	- If the evidence does not actually answer the column, return status "needs_research" and explain what is missing.
 - If research notes are provided, use them only when they directly answer the column.
 - For confidence, use 0.85+ only when supported by direct evidence.
@@ -424,16 +480,41 @@ export async function fillMatrixCell(args: {
     loadColumn(args.admin, args.userId, args.columnId),
   ]);
   const name = companyName(deal);
+
+  const wantsPeerContext = columnNeedsPeerContext(column);
+  const authorizedPeerIds = wantsPeerContext
+    ? await listAuthorizedDealIds(
+        args.admin,
+        args.userId,
+        (args.peerDealIds ?? []).filter((id) => id !== deal.id),
+      )
+    : [];
+
+  let peerNames: string[] = [];
+  if (authorizedPeerIds.length > 0) {
+    const peerRes = await args.admin
+      .schema("deal_intel")
+      .from("deal")
+      .select("metadata")
+      .eq("user_id", args.userId)
+      .in("id", authorizedPeerIds);
+    if (peerRes.data) {
+      peerNames = peerRes.data
+        .map((d) => (d.metadata as { company_name?: string })?.company_name || "")
+        .filter(Boolean);
+    }
+  }
+
   const query = `${column.label} ${column.description} ${column.prompt} ${name}`;
   const [baseInternalContext, crossCompanyContext] = await Promise.all([
     loadInternalContext(args.admin, args.userId, deal.id, query),
-    args.peerDealIds?.length
+    authorizedPeerIds.length
       ? loadResearchInternalContext({
           admin: args.admin,
           userId: args.userId,
           dealId: deal.id,
           query,
-          peerDealIds: args.peerDealIds,
+          peerDealIds: authorizedPeerIds,
           mode: "execution",
         }).catch(() => "")
       : Promise.resolve(""),
@@ -442,8 +523,8 @@ export async function fillMatrixCell(args: {
     currentCompany: baseInternalContext,
     crossCompanyAndDatabaseSignals: crossCompanyContext || null,
   };
-  const internal = await inferFromContext({ companyName: name, column, internalContext });
-  if (internal.status === "filled" || !args.allowResearch || !column.research_enabled) {
+  const internal = await inferFromContext({ companyName: name, column, internalContext, peerNames });
+  if (internal.status === "filled" || !args.allowResearch) {
     return upsertCell(args.admin, {
       userId: args.userId,
       dealId: deal.id,
@@ -458,10 +539,15 @@ export async function fillMatrixCell(args: {
     });
   }
 
-  const researchTask =
+  let researchTask =
     internal.researchTask ||
     column.prompt ||
     `Find ${column.label} for ${name}. Return only evidence that directly answers the metric.`;
+  
+  if (peerNames.length > 0) {
+    researchTask = `CRITICAL DE-CONFLATION CONSTRAINT: You are searching ONLY for "${name}". Do NOT retrieve or suggest findings that belong to these other peer companies: ${peerNames.join(", ")}.\n\nTask: ${researchTask}`;
+  }
+
   const researchCategory = matrixResearchCategory(column);
   const sitePrefs = await getUserSitePreferences({ admin: args.admin, userId: args.userId, limit: 80 }).catch(() => ({
     preferred: [],

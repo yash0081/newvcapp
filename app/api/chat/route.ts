@@ -10,18 +10,21 @@ type ChatRequest = {
   history?: unknown;
   threadId?: unknown;
   permissions?: unknown;
+  deepMode?: unknown;
 };
 
-function parseHistory(raw: unknown): ChatMessage[] {
+function parseHistory(raw: unknown, deepMode: boolean): ChatMessage[] {
   if (!Array.isArray(raw)) return [];
   const out: ChatMessage[] = [];
+  const maxMessages = deepMode ? 20 : 12;
+  const maxChars = deepMode ? 6000 : 4000;
   for (const item of raw) {
     const o = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
     const role = o.role === "user" || o.role === "assistant" ? o.role : null;
     const content = typeof o.content === "string" ? o.content.trim() : "";
     if (!role || !content) continue;
-    out.push({ role, content: content.slice(0, 4000) });
-    if (out.length >= 12) break;
+    out.push({ role, content: content.slice(0, maxChars) });
+    if (out.length >= maxMessages) break;
   }
   return out;
 }
@@ -50,6 +53,7 @@ export async function POST(req: Request) {
   const message = typeof body?.message === "string" ? body.message.trim() : "";
   const dealId = typeof body?.dealId === "string" && body.dealId.trim() ? body.dealId.trim() : null;
   const requestedThreadId = typeof body?.threadId === "string" && body.threadId.trim() ? body.threadId.trim() : null;
+  const deepMode = body?.deepMode === true;
   if (!message) return NextResponse.json({ error: "message is required" }, { status: 400 });
 
   try {
@@ -63,6 +67,7 @@ export async function POST(req: Request) {
               userId: user.id,
               threadId: requestedThreadId,
               firstMessage: message,
+              dealId,
             });
             await appendSavedChatMessage({
               admin,
@@ -78,8 +83,9 @@ export async function POST(req: Request) {
               userId: user.id,
               message,
               dealId,
-              history: parseHistory(body?.history),
+              history: parseHistory(body?.history, deepMode),
               permissions: parsePermissions(body?.permissions),
+              deepMode,
               onAssistantDelta: (text) => controller.enqueue(sse({ type: "delta", text })),
             });
             await appendSavedChatMessage({
@@ -115,6 +121,7 @@ export async function POST(req: Request) {
       userId: user.id,
       threadId: requestedThreadId,
       firstMessage: message,
+      dealId,
     });
     await appendSavedChatMessage({
       admin,
@@ -130,8 +137,9 @@ export async function POST(req: Request) {
       userId: user.id,
       message,
       dealId,
-      history: parseHistory(body?.history),
+      history: parseHistory(body?.history, deepMode),
       permissions: parsePermissions(body?.permissions),
+      deepMode,
     });
 
     await appendSavedChatMessage({

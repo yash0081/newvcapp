@@ -15,6 +15,13 @@ export type ExtensionRequest =
       clientMode?: "manual" | "auto";
       /** Current focus text (draft or applied); server uses this when set so analysis follows the textarea without waiting for Apply. */
       steeringHint?: string;
+      page_signals?: {
+        scrollDepthRatio: number;
+        draftItemsOnUrl: number;
+        sectionDwellMs?: number;
+        viewedSectionCount?: number;
+        focusedSectionHeadings?: string[];
+      };
     }
   | {
       type: "PLAN_NEXT";
@@ -29,6 +36,12 @@ export type ExtensionRequest =
         draft_items_this_url: number;
         pending_suggestions_count: number;
         consecutive_plan_scrolls?: number;
+        skim_section_count?: number;
+        skim_visible_section_count?: number;
+        skim_relevant_section_count?: number;
+        section_dwell_ms?: number;
+        viewed_section_count?: number;
+        focused_section_headings?: string[];
       };
       steeringHint?: string;
     }
@@ -54,7 +67,8 @@ export type ExtensionRequest =
   | { type: "PROMPT"; text: string; snapshot?: DomSnapshot }
   /** Save natural-language focus for auto mode (observe + plan-next read from session metadata). */
   | { type: "SET_AUTO_STEERING"; note: string }
-  | { type: "DECISION"; suggestionEventId: string; action: "accept" | "reject"; sourceUrl?: string }
+  | { type: "DECISION"; suggestionEventId: string; action: "accept" | "reject"; sourceUrl?: string; dwellTime?: number; scrollDepth?: number; }
+  | { type: "SET_DEEP_RESEARCH"; enabled: boolean }
   | {
       type: "PREFERENCE_SIGNAL";
       action: "manual_visit" | "open_link";
@@ -68,7 +82,8 @@ export type ExtensionRequest =
   | { type: "END_SESSION" }
   /** @deprecated Use END_SESSION — same handler */
   | { type: "FINALIZE" }
-  | { type: "OPEN_APP"; path?: string };
+  | { type: "OPEN_APP"; path?: string }
+  | { type: "SKIP_HOST"; host: string };
 
 export type ExternalExtensionRequest = { type: "OPEN_COPILOT_UI" };
 
@@ -81,7 +96,13 @@ export type ListDealsResponse = { deals: DealListItem[] };
 export type SessionResponse = { session: CopilotSession | null };
 export type ObserveResponse = { suggestions: Suggestion[]; observationEventId?: string };
 export type PlanNextResponse = {
-  next: { action: "navigate" | "scroll" | "stop"; url?: string; rationale?: string };
+  next: {
+    action: "navigate" | "scroll" | "stop";
+    url?: string;
+    rationale?: string;
+    targetScrollRatio?: number;
+    targetSectionHeading?: string;
+  };
 };
 export type AutoDraftSnippet = {
   id: string;

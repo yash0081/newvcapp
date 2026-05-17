@@ -27,7 +27,13 @@ let authClient: GoogleAuth | null = null;
 
 function getAuth(): GoogleAuth {
   ensureGoogleCloudCredentialsFile();
-  if (!authClient) authClient = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+  if (!authClient) {
+    const keyFilename = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+    authClient = new GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      ...(keyFilename ? { keyFilename } : {}),
+    });
+  }
   return authClient;
 }
 

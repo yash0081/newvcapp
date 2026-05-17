@@ -13,6 +13,7 @@ import type {
   AcceptedSnippet,
   ActiveDealHint,
   CopilotSession,
+  DomSnapshot,
   Suggestion,
 } from "@shared/types";
 import { extractDomSnapshot, fingerprintSnapshot, type SnapshotScope } from "@content/extractor";
@@ -141,6 +142,49 @@ function scrollDepthRatio(): number {
   return Math.min(1, Math.max(0, scrollTop / total));
 }
 
+function currentSectionHeading(): string | null {
+  const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+    .filter((el): el is HTMLElement => el instanceof HTMLElement)
+    .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.top <= Math.max(160, window.innerHeight * 0.35));
+  const text = headings.at(-1)?.el.textContent?.replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, 120) : null;
+}
+
+function countRelevantSkimSections(snapshot: DomSnapshot, focus: string): number {
+  const sections = snapshot.skim_outline?.sections ?? [];
+  const tokens = focus
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 2);
+  if (!tokens.length) return 0;
+  return sections.filter((section) => {
+    const text = `${section.heading} ${section.lead_text}`.toLowerCase();
+    return tokens.some((token) => text.includes(token));
+  }).length;
+}
+
+function scrollToPlanTarget(next: PlanNextResponse["next"]): void {
+  if (typeof next.targetScrollRatio === "number" && Number.isFinite(next.targetScrollRatio)) {
+    const doc = document.documentElement;
+    const body = document.body;
+    const maxTop = Math.max(0, Math.max(doc.scrollHeight, body.scrollHeight) - window.innerHeight);
+    window.scrollTo({ top: Math.round(maxTop * Math.max(0, Math.min(1, next.targetScrollRatio))), behavior: "smooth" });
+    return;
+  }
+  if (next.targetSectionHeading) {
+    const target = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+      .filter((el): el is HTMLElement => el instanceof HTMLElement)
+      .find((el) => (el.textContent ?? "").replace(/\s+/g, " ").trim() === next.targetSectionHeading);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+  }
+  window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: "smooth" });
+}
+
 function send<T = unknown>(req: ExtensionRequest): Promise<T> {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(req, (res) => {
@@ -217,6 +261,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   const autoSteeringDirtyRef = useRef(false);
   /** Ensures we merge chrome.storage steering draft once per active session id. */
   const steeringStorageHydratedFor = useRef<string | null>(null);
+  const sectionAttentionRef = useRef<{
+    heading: string | null;
+    since: number;
+    dwellByHeading: Record<string, number>;
+    viewed: Set<string>;
+  }>({ heading: null, since: Date.now(), dwellByHeading: {}, viewed: new Set() });
 
   const sessionId = session?.id ?? null;
   const effectiveScope: SnapshotScope = mode === "auto" ? "full" : scope;
@@ -268,6 +318,47 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     }
     if (!autoSteeringDirty) setAutoSteeringDraft(serverAutoSteering);
   }, [session?.id, serverAutoSteering, autoSteeringDirty]);
+
+  useEffect(() => {
+    const commit = () => {
+      const now = Date.now();
+      const state = sectionAttentionRef.current;
+      if (state.heading) {
+        state.dwellByHeading[state.heading] = (state.dwellByHeading[state.heading] ?? 0) + Math.max(0, now - state.since);
+        state.viewed.add(state.heading);
+      }
+      state.heading = currentSectionHeading();
+      state.since = now;
+      if (state.heading) state.viewed.add(state.heading);
+    };
+    const onScroll = () => commit();
+    const timer = window.setInterval(commit, 2500);
+    commit();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      commit();
+      window.clearInterval(timer);
+      window.removeEventListener("scroll", onScroll);
+    };
+  }, [sessionId]);
+
+  const getSectionAttentionSignals = useCallback(() => {
+    const now = Date.now();
+    const state = sectionAttentionRef.current;
+    const dwellByHeading = { ...state.dwellByHeading };
+    if (state.heading) {
+      dwellByHeading[state.heading] = (dwellByHeading[state.heading] ?? 0) + Math.max(0, now - state.since);
+    }
+    const focusedSectionHeadings = Object.entries(dwellByHeading)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([heading]) => heading);
+    return {
+      sectionDwellMs: Object.values(dwellByHeading).reduce((sum, ms) => sum + ms, 0),
+      viewedSectionCount: state.viewed.size,
+      focusedSectionHeadings,
+    };
+  }, []);
 
   /** Echo steering draft locally so it survives reloads before “Apply focus”. */
   useEffect(() => {
@@ -409,12 +500,13 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     persistPrefs(pausedRef.current, scopeRef.current, next);
   }, [haltAutomation, cancelAgentWork, persistPrefs]);
 
+
   // Listen for SESSION_STARTED broadcasts from popup → service worker → tabs.
   useEffect(() => {
     const handler = (msg: unknown) => {
       if (!msg || typeof msg !== "object") return;
       const m = msg as { type?: string; session?: CopilotSession };
-      if (m.type === "SESSION_STARTED" && m.session) {
+      if ((m.type === "SESSION_STARTED" || m.type === "SESSION_UPDATED") && m.session) {
         const incomingId = m.session.id;
         const currentId = sessionRef.current?.id ?? null;
         /** Full navigation remounts the overlay; same id means reinject / replay, not a brand-new session. */
@@ -562,6 +654,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         snapshot,
         clientMode: modeRef.current,
         ...(effectiveSteeringHint ? { steeringHint: effectiveSteeringHint } : {}),
+        page_signals: {
+          scrollDepthRatio: scrollDepthRatio(),
+          draftItemsOnUrl: autoDraft.length,
+          ...getSectionAttentionSignals(),
+        },
       });
       if (controller.signal.aborted || pausedRef.current) return;
       lastSnapshotRef.current = { fingerprint: fp, at: Date.now() };
@@ -575,6 +672,9 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           const key = suggestionKey(s);
           if (seenKeys.has(key)) return false;
           seenKeys.add(key);
+          if (id) {
+            suggestionReceivedAtRef.current.set(id, Date.now());
+          }
           return true;
         });
         return [...fresh, ...prev].slice(0, MAX_VISIBLE_SUGGESTIONS);
@@ -593,7 +693,45 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         setBusy(null);
       }
     }
-  }, [sessionId, effectiveScope, effectiveSteeringHint]);
+  }, [sessionId, effectiveScope, effectiveSteeringHint, autoDraft.length]);
+
+  const onSkipHost = useCallback(async () => {
+    const hn = window.location.hostname;
+    if (!sessionId || !hn) return;
+    setBusy("Skipping site…");
+    try {
+      const res = await send<SessionResponse>({ type: "SKIP_HOST", host: hn });
+      if (res.session) {
+        setSession(res.session);
+        setInfo(`Skipped ${hn} for this session.`);
+        // Trigger immediate re-plan to leave the skipped host.
+        if (modeRef.current === "auto") {
+          analyzePage();
+        }
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }, [sessionId, analyzePage]);
+
+  const onToggleDeepResearch = useCallback(async () => {
+    if (!sessionId) return;
+    const current = !!sessionRef.current?.metadata?.is_deep_research;
+    setBusy(current ? "Disabling deep research…" : "Enabling deep research…");
+    try {
+      const res = await send<SessionResponse>({ type: "SET_DEEP_RESEARCH", enabled: !current });
+      if (res.session) {
+        setSession(res.session);
+        setInfo(res.session.metadata?.is_deep_research ? "Deep research enabled." : "Deep research disabled.");
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }, [sessionId]);
 
   useEffect(() => {
     if (mode !== "auto" || !session) return;
@@ -665,10 +803,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
     const t = window.setInterval(() => {
       if (snippets.length === 0) return;
       if (Date.now() - lastObserveSuccessAtRef.current < OBSERVE_IDLE_END_MS) return;
-      void send({ type: "END_SESSION" }).catch(() => {});
+      void send({ type: "END_SESSION" }).catch(() => { });
     }, 60_000);
     return () => window.clearInterval(t);
   }, [sessionId, paused, snippets.length]);
+
+  const suggestionReceivedAtRef = useRef<Map<string, number>>(new Map());
 
   const decide = useCallback(async (
     suggestion: Suggestion,
@@ -677,6 +817,10 @@ export function Overlay({ activeDeal, initialSession }: Props) {
   ) => {
     if (!sessionId || !suggestion.event_id) return;
     const sid = suggestion.event_id;
+    const receivedAt = suggestionReceivedAtRef.current.get(sid) ?? Date.now();
+    const dwellTimeMs = Date.now() - receivedAt;
+    const scrollDepth = scrollDepthRatio();
+
     setError(null);
     setSuggestions((prev) => prev.filter((s) => s.event_id !== sid));
     if (action === "accept") {
@@ -699,6 +843,8 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         suggestionEventId: sid,
         action,
         sourceUrl: location.href,
+        dwellTime: dwellTimeMs,
+        scrollDepth,
       });
       void refreshSession();
       if (!opts?.silent) {
@@ -736,6 +882,9 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           const key = suggestionKey(s);
           if (seenKeys.has(key)) return false;
           seenKeys.add(key);
+          if (id) {
+            suggestionReceivedAtRef.current.set(id, Date.now());
+          }
           return true;
         });
         return [...fresh, ...prev].slice(0, MAX_VISIBLE_SUGGESTIONS);
@@ -888,6 +1037,12 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         pending_suggestions_count: pendingSuggestionsCount,
         /** Lets server stop deferring navigate after repeated scroll-without-yield (e.g. Wikipedia citations). */
         consecutive_plan_scrolls: agentScrollStreakRef.current,
+        skim_section_count: snapshot.skim_outline?.sections.length ?? 0,
+        skim_visible_section_count: snapshot.skim_outline?.sections.filter((s) => s.visible).length ?? 0,
+        skim_relevant_section_count: countRelevantSkimSections(snapshot, effectiveSteeringHint ?? ""),
+        section_dwell_ms: getSectionAttentionSignals().sectionDwellMs,
+        viewed_section_count: getSectionAttentionSignals().viewedSectionCount,
+        focused_section_headings: getSectionAttentionSignals().focusedSectionHeadings,
       };
       setResearchActivity("Thinking about what page to visit next…");
       const res = await send<PlanNextResponse>({
@@ -914,7 +1069,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
         }
         setResearchActivity("Scrolling to read more of this page…");
         lastSnapshotRef.current = null;
-        window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: "smooth" });
+        scrollToPlanTarget(res.next);
         scrollKickTimerRef.current = window.setTimeout(() => {
           scrollKickTimerRef.current = null;
           if (stopped()) return;
@@ -1082,6 +1237,16 @@ export function Overlay({ activeDeal, initialSession }: Props) {
           <button className={`mode-btn${mode === "manual" ? " active" : ""}`} onClick={() => setMode("manual")}>
             Manual
           </button>
+          {mode === "auto" && (
+            <button
+              className={`deep-toggle${session?.metadata?.is_deep_research ? " active" : ""}`}
+              onClick={onToggleDeepResearch}
+              disabled={!session}
+              title="Deep Research Mode: Exhaustive page reading before moving on"
+            >
+              Deep
+            </button>
+          )}
           <button
             className={`mode-btn${mode === "auto" ? " active" : ""}`}
             onClick={() => setMode("auto")}
@@ -1101,7 +1266,33 @@ export function Overlay({ activeDeal, initialSession }: Props) {
       </div>
 
       {error ? <div className="banner">{error}</div> : null}
-      {info && !error ? <div className="banner info">{info}</div> : null}
+      {info && !error ? (
+        <div className="banner info">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+            <span>{info}</span>
+            {(info.toLowerCase().includes("paywall") || info.toLowerCase().includes("login")) && (
+              <button
+                onClick={onSkipHost}
+                disabled={!!busy}
+                style={{
+                  marginLeft: 8,
+                  padding: "4px 10px",
+                  fontSize: 11,
+                  fontWeight: "bold",
+                  background: "#be123c",
+                  border: "none",
+                  borderRadius: 12,
+                  color: "white",
+                  cursor: "pointer",
+                  boxShadow: "0 4px 12px rgba(190, 18, 60, 0.2)"
+                }}
+              >
+                Skip & Go Elsewhere
+              </button>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {!collapsed ? (
         <>
@@ -1125,6 +1316,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                 rows={2}
                 placeholder="HQ, funding, team, competitors…"
                 value={autoSteeringDraft}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  (e.target as HTMLTextAreaElement).focus();
+                }}
                 onChange={(e) => {
                   setAutoSteeringDraft(e.target.value);
                   setAutoSteeringDirty(true);
@@ -1169,7 +1365,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
             </div>
           ) : null}
 
-            <div className="body">
+          <div className="body">
             {mode === "auto" && session ? (
               <>
                 <div className="company-status in-body">
@@ -1191,6 +1387,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                     rows={2}
                     placeholder="HQ, funding, team, competitors…"
                     value={autoSteeringDraft}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      (e.target as HTMLTextAreaElement).focus();
+                    }}
                     onChange={(e) => {
                       setAutoSteeringDraft(e.target.value);
                       setAutoSteeringDirty(true);
@@ -1270,7 +1471,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                           task: sg.summary,
                           summary: sg.summary,
                           snippet: sg.snippet,
-                        }).catch(() => {});
+                        }).catch(() => { });
                         if (sg.link_url) window.open(sg.link_url, "_blank", "noopener,noreferrer");
                         setSuggestions((prev) => prev.filter((x) => (x.event_id ?? x.client_id) !== (sg.event_id ?? sg.client_id)));
                       }}
@@ -1317,6 +1518,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                   rows={3}
                   placeholder="e.g. add the 2025 revenue stats from this page"
                   value={promptText}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    (e.target as HTMLTextAreaElement).focus();
+                  }}
                   onChange={(e) => setPromptText(e.target.value)}
                 />
                 <div className="row" style={{ marginTop: 6 }}>
@@ -1337,6 +1543,7 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                     <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                       <input
                         type="checkbox"
+                        onClick={(e) => e.stopPropagation()}
                         checked={reviewState[sn.id]?.checked ?? true}
                         onChange={(e) =>
                           setReviewState((prev) => ({
@@ -1351,6 +1558,11 @@ export function Overlay({ activeDeal, initialSession }: Props) {
                       className="prompt-input"
                       rows={2}
                       value={reviewState[sn.id]?.text ?? sn.text}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        (e.target as HTMLTextAreaElement).focus();
+                      }}
                       onChange={(e) =>
                         setReviewState((prev) => ({
                           ...prev,
@@ -1490,9 +1702,9 @@ function SuggestionCard({
   const exploreUrl = suggestion.kind === "explore" && suggestion.link_url ? suggestion.link_url : null;
   const exploreUrlLabel = exploreUrl
     ? (() => {
-        const disp = exploreUrl.replace(/^https?:\/\//i, "");
-        return disp.length > 72 ? `${disp.slice(0, 72)}…` : disp;
-      })()
+      const disp = exploreUrl.replace(/^https?:\/\//i, "");
+      return disp.length > 72 ? `${disp.slice(0, 72)}…` : disp;
+    })()
     : null;
   return (
     <div className="card">

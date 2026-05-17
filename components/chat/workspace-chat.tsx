@@ -1,20 +1,36 @@
 "use client";
 
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, CheckCircle2, Circle, ExternalLink, FileText, Loader2, MessageSquare, Plus, Settings2, Sparkles, Trash2, Workflow } from "lucide-react";
+import { ArrowUp, CheckCircle2, Circle, ExternalLink, FileText, Loader2, MessageSquare, Plus, Settings2, Sparkles, Trash2, Workflow, StopCircle, Search, History, Library, UploadCloud, Square, X, Paperclip, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SelectBox } from "@/components/ui/select-box";
 import { stripMarkdownText } from "@/lib/plain-text";
 
-type DealOption = { id: string; name: string };
+const promptTemplates = [
+  {
+    category: "Due Diligence",
+    prompts: [
+      { title: "SaaS Diligence Analysis", text: "Conduct a deep analysis of the company's SaaS business model. Detail their churn patterns, logo retention rates, CAC payback periods, LTV/CAC, and growth efficiency based on the uploaded files." },
+      { title: "Strategic Risk Evaluation", text: "Identify the top strategic, technological, and execution risks for this deal. Highlight critical diligence areas we must double-click on." }
+    ]
+  },
+  {
+    category: "Financials & Unit Economics",
+    prompts: [
+      { title: "Revenue & Margins Analysis", text: "Analyze their historical revenue growth, gross margins, EBITDA margins, and current net burn. Summarize key trends." },
+      { title: "Cohort & Retention Study", text: "Perform a cohort analysis focusing on customer lifetime value, cohort dollar retention, and customer acquisition efficiency over time." }
+    ]
+  },
+  {
+    category: "Executive Synthesis",
+    prompts: [
+      { title: "Investment Memo Summary", text: "Draft a high-quality 2-page investment memo covering business overview, market size (TAM), competitive barriers, team quality, and our core investment thesis." },
+      { title: "1-Page Deal Teaser", text: "Create a highly concise, structured 1-page executive summary outlining the core product innovation and target transaction metrics." }
+    ]
+  }
+];
 
-type MatrixColumnDraft = {
-  label: string;
-  description?: string;
-  dataType?: "text" | "number" | "percent" | "currency" | "boolean" | "json";
-  prompt: string;
-  researchEnabled?: boolean;
-};
+type DealOption = { id: string; name: string };
 
 type ChatAction =
   | {
@@ -65,27 +81,7 @@ type ChatAction =
       userPrompt?: string;
       dealIds: string[];
       dealNames: string[];
-    }
-  | {
-      type: "propose_matrix_fill";
-      label: string;
-      dealIds: string[];
-      dealNames: string[];
-      columnIds: string[];
-      columnLabels: string[];
-      columnsToCreate?: MatrixColumnDraft[];
-    }
-  | {
-      type: "matrix_preview";
-      label: string;
-      href: string;
-      detail?: string;
-      columns: Array<{ id: string; label: string }>;
-      rows: Array<{
-        dealId: string;
-        dealName: string;
-        values: Array<{ columnId: string; columnLabel: string; value: string; status?: string }>;
-      }>;
+      researchProfile?: "fast" | "standard" | "deep";
     }
   | {
       type: "document_preview";
@@ -152,7 +148,6 @@ type ChatToolPermissions = {
   useSimilarCompanySearch: boolean;
   useCriteriaAnalysis: boolean;
   runWorkflows: boolean;
-  useMatrix: boolean;
 };
 
 const DEFAULT_TOOL_PERMISSIONS: ChatToolPermissions = {
@@ -163,7 +158,6 @@ const DEFAULT_TOOL_PERMISSIONS: ChatToolPermissions = {
   useSimilarCompanySearch: true,
   useCriteriaAnalysis: true,
   runWorkflows: true,
-  useMatrix: true,
 };
 
 const TOOL_PERMISSION_LABELS: Array<{ key: keyof ChatToolPermissions; label: string }> = [
@@ -174,7 +168,6 @@ const TOOL_PERMISSION_LABELS: Array<{ key: keyof ChatToolPermissions; label: str
   { key: "useSimilarCompanySearch", label: "Use similar-company search" },
   { key: "useCriteriaAnalysis", label: "Use criteria analysis" },
   { key: "runWorkflows", label: "Run saved workflows" },
-  { key: "useMatrix", label: "Use matrix" },
 ];
 
 type PreflightResearchStep = {
@@ -222,17 +215,6 @@ type WorkflowRunResponse = {
     artifacts: Array<{ kind: string; label: string; href?: string; detail?: string }>;
     stepResults: Array<{ title: string; type: string; status: string; detail: string }>;
   };
-  error?: string;
-};
-
-type MatrixFillResponse = {
-  cells?: Array<{ id?: string; deal_id?: string; column_id?: string; status?: string; value_text?: string | null }>;
-  errors?: Array<{ error?: string }>;
-  error?: string;
-};
-
-type MatrixColumnResponse = {
-  column?: { id: string; label: string };
   error?: string;
 };
 
@@ -402,7 +384,6 @@ function isProposalAction(action: ChatAction): boolean {
   return (
     action.type === "propose_generate_document" ||
     action.type === "propose_research" ||
-    action.type === "propose_matrix_fill" ||
     action.type === "propose_record_update" ||
     action.type === "propose_custom_workflow"
   );
@@ -413,8 +394,15 @@ function isRunnableAction(action: ChatAction, permissions: ChatToolPermissions):
     (action.type === "propose_generate_document" && permissions.generateDocuments) ||
     (action.type === "propose_research" && permissions.runResearch) ||
     (action.type === "propose_record_update" && permissions.editRecords) ||
-    (action.type === "propose_custom_workflow" && permissions.runWorkflows) ||
-    (action.type === "propose_matrix_fill" && permissions.useMatrix)
+    (action.type === "propose_custom_workflow" && permissions.runWorkflows)
+  );
+}
+
+function isLegacyMatrixAction(action: { type?: unknown; href?: unknown }): boolean {
+  return (
+    action.type === "propose_matrix_fill" ||
+    action.type === "matrix_preview" ||
+    (action.type === "open_link" && typeof action.href === "string" && action.href.startsWith("/home/matrix"))
   );
 }
 
@@ -471,6 +459,8 @@ function documentFormatFromMetadata(metadata: Record<string, unknown> | null | u
   return value || "document";
 }
 
+import { Check } from "lucide-react";
+
 function ResearchTracePanel({
   action,
   trace,
@@ -517,46 +507,53 @@ function ResearchTracePanel({
         </span>
         <span className="shrink-0 text-xs text-zinc-950">{failed ? "Needs attention" : running ? "Working" : "Ready"}</span>
       </button>
-      <div className="mt-1 space-y-2 px-1">
+      <div className="mt-2 space-y-4 px-1 relative">
+        <div className="absolute left-[13px] top-4 bottom-4 w-px bg-zinc-200" />
         {rows.map((step, index) => {
           const stepRunning = step.status === "running";
           const stepDone = step.status === "done";
           const stepFailed = step.status === "failed";
           const collapsed = stepDone && !step.expanded && (activeIndex < 0 || index < activeIndex);
-          const hosts = (step.sources ?? [])
+          const allHosts = (step.sources ?? [])
             .map((source) => (source.url ? { host: sourceHost(source.url), url: source.url } : null))
-            .filter((source): source is { host: string; url: string } => Boolean(source))
-            .slice(0, 3);
+            .filter((source): source is { host: string; url: string } => Boolean(source));
+          const hosts = allHosts.slice(0, 3);
+          const extraSourcesCount = allHosts.length - 3;
+          
           return (
             <div
               key={step.key}
               className={cn(
-                "flex w-full items-start gap-2 py-1.5 text-left text-sm text-zinc-950",
+                "flex w-full items-start gap-3 relative text-left text-sm text-zinc-950",
               )}
             >
-              <span className="mt-0.5 shrink-0">
+              <div className="shrink-0 relative z-10 flex h-6 w-6 items-center justify-center bg-white mt-0.5">
                 {stepRunning ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-950" />
+                  <Loader2 className="h-4 w-4 animate-spin text-zinc-950" />
                 ) : stepDone ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 text-zinc-950" />
+                  <div className="h-4 w-4 rounded-full bg-black flex items-center justify-center">
+                    <Check className="h-2.5 w-2.5 text-white" />
+                  </div>
                 ) : stepFailed ? (
-                  <Sparkles className="h-3.5 w-3.5 text-rose-600" />
+                  <div className="h-4 w-4 rounded-full bg-rose-600 flex items-center justify-center">
+                    <X className="h-2.5 w-2.5 text-white" />
+                  </div>
                 ) : (
-                  <Circle className="h-3.5 w-3.5 text-zinc-950" />
+                  <div className="h-2.5 w-2.5 rounded-full bg-zinc-300" />
                 )}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className={cn("block text-zinc-900", collapsed ? "truncate" : "")}>{plainChatText(step.task)}</span>
+              </div>
+              <div className="min-w-0 flex-1 pt-0.5">
+                <span className={cn("block text-zinc-900 font-medium", collapsed ? "truncate" : "")}>{plainChatText(step.task)}</span>
                 {!collapsed ? (
-                  <span className="mt-0.5 block text-xs text-zinc-950">
+                  <span className="mt-0.5 block text-xs text-zinc-500">
                     {step.dealName ? `${step.dealName}. ` : ""}
                     {plainChatText(step.detail || (step.kind === "internal_db" ? "Searching saved records and database signals" : step.website && step.website !== "web" ? `Opening ${step.website}` : "Searching the web"))}
                   </span>
                 ) : (
-	                  <span className="mt-0.5 block text-xs text-zinc-950">Sources hidden</span>
+                  <span className="mt-0.5 block text-[11px] text-zinc-400">Sources hidden</span>
                 )}
                 {hosts.length && !collapsed ? (
-                  <span className="mt-1 flex flex-wrap gap-1.5">
+                  <div className="mt-2 flex flex-wrap gap-2">
                     {hosts.map((source) => (
                       <a
                         key={`${step.key}:${source.url}`}
@@ -564,72 +561,33 @@ function ResearchTracePanel({
                         target="_blank"
                         rel="noreferrer"
                         onClick={(e) => e.stopPropagation()}
-	                        className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] text-zinc-950 hover:bg-white"
+                        className="rounded-lg bg-zinc-100 border border-zinc-200/50 px-2.5 py-1 text-xs text-zinc-600 hover:bg-zinc-200/50 transition-colors"
                       >
                         {source.host}
                       </a>
                     ))}
-                  </span>
+                    {extraSourcesCount > 0 ? (
+                      <button className="rounded-lg bg-zinc-100 border border-zinc-200/50 px-2.5 py-1 text-xs text-zinc-600 font-medium hover:bg-zinc-200/50 transition-colors">
+                        +{extraSourcesCount} extra sources
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
                 {stepDone ? (
                   <button
                     type="button"
                     onClick={() => onToggleStep(actionKey, step.key)}
-	                    className="mt-1 text-xs font-medium text-zinc-950 hover:text-zinc-700"
+                    className="mt-2 text-[11px] font-semibold text-zinc-400 hover:text-zinc-600 uppercase tracking-wide"
                   >
                     {collapsed ? "Show sources" : "Hide sources"}
                   </button>
                 ) : null}
-              </span>
+              </div>
             </div>
           );
         })}
       </div>
     </div>
-  );
-}
-
-function MatrixPreviewCard({ action }: { action: Extract<ChatAction, { type: "matrix_preview" }> }) {
-  const columns = action.columns.length ? action.columns : [];
-  const gridTemplateColumns = `minmax(132px, 0.9fr) repeat(${Math.max(columns.length, 1)}, minmax(140px, 1fr))`;
-  return (
-    <a
-      href={action.href}
-      target="_blank"
-      rel="noreferrer"
-      className="block w-full max-w-full rounded-2xl border border-zinc-200 bg-white p-3 text-left shadow-sm transition hover:border-zinc-300 hover:shadow-md md:w-[760px]"
-    >
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
-          <div className="text-xs font-semibold text-zinc-950">{action.label || "Matrix output"}</div>
-          {action.detail ? <div className="mt-0.5 text-[11px] text-zinc-950">{plainChatText(action.detail)}</div> : null}
-        </div>
-        <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-950" />
-      </div>
-      <div className="overflow-x-auto rounded-xl border border-zinc-100">
-        <div className="min-w-[520px] text-xs" style={{ display: "grid", gridTemplateColumns }}>
-          <div className="border-b border-r border-zinc-100 bg-zinc-50 px-3 py-2 font-medium text-zinc-950">Company</div>
-          {columns.map((column) => (
-            <div key={column.id} className="border-b border-r border-zinc-100 bg-zinc-50 px-3 py-2 font-medium text-zinc-700 last:border-r-0">
-              {column.label}
-            </div>
-          ))}
-          {action.rows.map((row) => (
-            <div key={row.dealId} className="contents">
-              <div className="border-r border-t border-zinc-100 px-3 py-2 font-medium text-zinc-900">{row.dealName}</div>
-              {columns.map((column) => {
-                const value = row.values.find((item) => item.columnId === column.id);
-                return (
-                  <div key={`${row.dealId}:${column.id}`} className="border-r border-t border-zinc-100 px-3 py-2 text-zinc-700 last:border-r-0">
-                    {value?.value || "Not found"}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-      </div>
-    </a>
   );
 }
 
@@ -674,9 +632,19 @@ function DocumentPreviewCard({ action }: { action: Extract<ChatAction, { type: "
   );
 }
 
-export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; initialThreads: SavedThread[] }) {
+export function WorkspaceChat({
+  deals,
+  initialThreads,
+  initialDealId = "",
+  initialThreadId = null,
+}: {
+  deals: DealOption[];
+  initialThreads: SavedThread[];
+  initialDealId?: string;
+  initialThreadId?: string | null;
+}) {
   const [mounted, setMounted] = useState(false);
-  const [dealId, setDealId] = useState<string>("");
+  const [dealId, setDealId] = useState<string>(initialDealId);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [threads, setThreads] = useState<SavedThread[]>(initialThreads);
@@ -703,12 +671,26 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
   const [autoActionKeys, setAutoActionKeys] = useState<Set<string>>(() => new Set());
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const restoredThreadRef = useRef(false);
+  const [deepThink, setDeepThink] = useState(false);
+  const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [abortController, setAbortController] = useState<AbortController | null>(null);
+  const sessionAbortRef = useRef<AbortController | null>(null);
+  const cancelRequestedRef = useRef(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
   const selectedDeal = useMemo(() => deals.find((d) => d.id === dealId) ?? null, [deals, dealId]);
+  const historyDealScope = initialDealId ? dealId || initialDealId : null;
+  const sessionActive = useMemo(
+    () =>
+      busy ||
+      Boolean(busyAction) ||
+      Object.values(researchTraces).some((trace) => trace.status === "running"),
+    [busy, busyAction, researchTraces],
+  );
   const savedResearchLinksByDeal = useMemo(() => {
     const links = new Map<string, { label: string; href: string }>();
     for (const message of messages) {
@@ -731,9 +713,53 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
   }
 
   async function refreshThreads() {
-    const res = await fetch("/api/chat/threads");
+    const scope = historyDealScope;
+    const url = scope ? `/api/chat/threads?dealId=${encodeURIComponent(scope)}` : "/api/chat/threads";
+    const res = await fetch(url);
     const data = (await res.json().catch(() => ({}))) as { threads?: SavedThread[] };
     if (res.ok && Array.isArray(data.threads)) setThreads(data.threads);
+  }
+
+  function stopSession() {
+    cancelRequestedRef.current = true;
+    sessionAbortRef.current?.abort();
+    setAbortController(null);
+    sessionAbortRef.current = null;
+    setBusy(false);
+    setBusyAction(null);
+    setResearchTraces((prev) => {
+      const next: Record<string, ResearchTraceState> = { ...prev };
+      for (const [key, trace] of Object.entries(next)) {
+        if (trace.status !== "running") continue;
+        next[key] = {
+          ...trace,
+          status: "failed",
+          steps: trace.steps.map((step) =>
+            step.status === "running" || step.status === "queued"
+              ? { ...step, status: "failed", detail: "Stopped" }
+              : step,
+          ),
+        };
+      }
+      return next;
+    });
+  }
+
+  function beginSessionAbort(): AbortSignal | undefined {
+    cancelRequestedRef.current = false;
+    const controller = new AbortController();
+    sessionAbortRef.current = controller;
+    setAbortController(controller);
+    return controller.signal;
+  }
+
+  function endSessionAbort() {
+    sessionAbortRef.current = null;
+    setAbortController(null);
+  }
+
+  function isCancelled(): boolean {
+    return cancelRequestedRef.current;
   }
 
   async function loadThread(threadId: string) {
@@ -751,7 +777,7 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
           if (typeof window !== "undefined") window.localStorage.removeItem("workspace-chat-active-thread-id");
           setActiveThreadId(null);
           setMessages([]);
-          setDealId("");
+          setDealId(initialDealId);
           setThreads((prev) => prev.filter((thread) => thread.id !== threadId));
           return;
         }
@@ -763,7 +789,7 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         content: plainChatText(message.content),
         actions: stripStaleProposalActions(message.actions),
       })));
-      setDealId(data.thread?.dealId ?? "");
+      setDealId(data.thread?.dealId ?? initialDealId ?? "");
       setToolRuns({});
       setResearchTraces({});
       setAutoActionKeys(new Set());
@@ -776,9 +802,12 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
   useEffect(() => {
     if (restoredThreadRef.current || typeof window === "undefined") return;
     restoredThreadRef.current = true;
-    const storedThreadId = window.localStorage.getItem("workspace-chat-active-thread-id");
+    const storedThreadId = initialThreadId || window.localStorage.getItem("workspace-chat-active-thread-id");
     if (storedThreadId) {
-      void loadThread(storedThreadId);
+      const scope = initialDealId || null;
+      const allowed =
+        !scope || initialThreads.some((thread) => thread.id === storedThreadId && thread.dealId === scope);
+      if (allowed) void loadThread(storedThreadId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialThreads]);
@@ -794,11 +823,12 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
     if (typeof window !== "undefined") window.localStorage.removeItem("workspace-chat-active-thread-id");
     setActiveThreadId(null);
     setMessages([]);
-    setDealId("");
+    setDealId(initialDealId);
     setInput("");
     setToolRuns({});
     setResearchTraces({});
     setAutoActionKeys(new Set());
+    setChatHistoryOpen(false);
     setTimeout(() => inputRef.current?.focus(), 0);
   }
 
@@ -814,7 +844,7 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         if (typeof window !== "undefined") window.localStorage.removeItem("workspace-chat-active-thread-id");
         setActiveThreadId(null);
         setMessages([]);
-        setDealId("");
+        setDealId(initialDealId);
       }
     } catch (e) {
       setMessages((prev) => [
@@ -876,13 +906,95 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
     });
   }
 
+  const [attachedFiles, setAttachedFiles] = useState<
+    Array<{ id: string; name: string; status: "uploading" | "ready" | "failed"; fileObj: File; docId?: string }>
+  >([]);
+
+  function removeAttachedFile(id: string) {
+    setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  }
+
+  async function uploadChatFile(item: { id: string; name: string; status: "uploading" | "ready" | "failed"; fileObj: File }) {
+    if (!dealId) {
+      setAttachedFiles((prev) =>
+        prev.map((f) => (f.id === item.id ? { ...f, status: "ready" as const } : f))
+      );
+      return;
+    }
+    try {
+      const fd = new FormData();
+      fd.append("file", item.fileObj);
+      const res = await fetch(`/api/crm/companies/${dealId}/documents/upload`, {
+        method: "POST",
+        body: fd,
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      const data = (await res.json()) as { documentId?: string };
+      setAttachedFiles((prev) =>
+        prev.map((f) => (f.id === item.id ? { ...f, status: "ready" as const, docId: data.documentId } : f))
+      );
+    } catch {
+      setAttachedFiles((prev) =>
+        prev.map((f) => (f.id === item.id ? { ...f, status: "failed" as const } : f))
+      );
+    }
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const list = e.target.files;
+    if (!list || !list.length) return;
+    const newFiles = Array.from(list).map((file) => ({
+      id: newId(),
+      name: file.name,
+      status: "uploading" as const,
+      fileObj: file,
+    }));
+    setAttachedFiles((prev) => [...prev, ...newFiles]);
+    for (const item of newFiles) {
+      void uploadChatFile(item);
+    }
+    e.target.value = "";
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    const raw = e.dataTransfer.getData("application/json");
+    if (!raw) return;
+    try {
+      const data = JSON.parse(raw);
+      if (data.type === "deal_document" && data.id && data.name) {
+        setAttachedFiles((prev) => {
+          if (prev.some((f) => f.id === data.id || f.name === data.name)) return prev;
+          return [...prev, { id: data.id, name: data.name, status: "ready" as const, fileObj: new File([], data.name), docId: data.id }];
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || sessionActive) return;
+
+    let finalPrompt = text;
+    if (attachedFiles.length > 0) {
+      const readyFiles = attachedFiles.filter((f) => f.status === "ready");
+      if (readyFiles.length > 0) {
+        finalPrompt = `${text}\n\n[Attached Documents: ${readyFiles.map((f) => f.name).join(" | ")}]`;
+      }
+    }
+
     setInput("");
-    const userMsg: ChatMessage = { id: newId(), role: "user", content: text };
+    setAttachedFiles([]);
+    const userMsg: ChatMessage = { id: newId(), role: "user", content: finalPrompt };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
+    const signal = beginSessionAbort();
     try {
       const history = messages
         .filter((m) => m.role === "user" || m.role === "assistant")
@@ -891,7 +1003,15 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ message: text, dealId: dealId || null, history, threadId: activeThreadId, permissions: toolPermissions }),
+        signal,
+        body: JSON.stringify({
+          message: finalPrompt,
+          dealId: dealId || null,
+          history,
+          threadId: activeThreadId,
+          permissions: deepThink ? { ...toolPermissions, runResearch: true } : toolPermissions,
+          deepMode: deepThink,
+        }),
       });
       if (res.headers.get("content-type")?.includes("text/event-stream") && res.body) {
         const assistantId = newId();
@@ -925,6 +1045,11 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let pendingAutoActions: {
+          actions: ChatAction[];
+          assistantId: string;
+          threadId: string | null;
+        } | null = null;
         const handleEvent = (event: ChatStreamEvent) => {
           if (event.type === "start") {
             if (event.threadId) setActiveThreadId(event.threadId);
@@ -961,7 +1086,13 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
                 return next;
               });
             }
-            void runAutoActions(assistantActions, assistantId, finalResult.threadId ?? activeThreadId);
+            if (!isCancelled()) {
+              pendingAutoActions = {
+                actions: assistantActions,
+                assistantId,
+                threadId: finalResult.threadId ?? activeThreadId,
+              };
+            }
             return;
           }
           if (event.type === "error") throw new Error(event.error || "Chat failed");
@@ -982,6 +1113,13 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         }
         if (!finalResult && streamedContent) {
           updateAssistantMessage({ content: plainChatText(streamedContent) });
+        }
+        if (pendingAutoActions && !isCancelled()) {
+          await runAutoActions(
+            pendingAutoActions.actions,
+            pendingAutoActions.assistantId,
+            pendingAutoActions.threadId,
+          );
         }
         void refreshThreads();
         return;
@@ -1027,18 +1165,23 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
           citations: data.citations ?? [],
         },
       ]);
-      void runAutoActions(assistantActions, assistantId, threadIdForSave);
+      if (!isCancelled()) {
+        await runAutoActions(assistantActions, assistantId, threadIdForSave);
+      }
       void refreshThreads();
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: newId(),
-          role: "assistant",
-          content: e instanceof Error ? e.message : "Chat failed.",
-        },
-      ]);
+      if (!isCancelled() && !(e instanceof DOMException && e.name === "AbortError")) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: newId(),
+            role: "assistant",
+            content: e instanceof Error ? e.message : "Chat failed.",
+          },
+        ]);
+      }
     } finally {
+      endSessionAbort();
       setBusy(false);
       setTimeout(() => inputRef.current?.focus(), 0);
     }
@@ -1051,7 +1194,8 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
     autoStarted = autoActionKeys.has(key),
     options: { suppressResearchAnswer?: boolean } = {},
   ) {
-    if (busyAction) return;
+    if (busyAction || isCancelled()) return;
+    const actionSignal = sessionAbortRef.current?.signal;
     let runKey = key;
     let transientMessageId: string | null = null;
     if (autoStarted && action.type !== "propose_research") {
@@ -1106,6 +1250,7 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         replacePreviewMessage(previewAction);
 
         const res = await fetch("/api/document-generation/drafts/stream", {
+          signal: actionSignal,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1265,6 +1410,7 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         }
         let sharedInternalStepCompleted = false;
         for (let i = 0; i < action.dealIds.length; i++) {
+          if (isCancelled()) break;
           const dealIdForRun = action.dealIds[i]!;
           const dealNameForRun = action.dealNames[i] ?? "Company";
           const internalStepKey = sharedInternalStepKey ?? `${dealIdForRun}:internal-db`;
@@ -1292,11 +1438,13 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
           const res = await fetch("/api/research/workflows/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            signal: actionSignal,
             body: JSON.stringify({
               dealId: dealIdForRun,
               focus: action.focus,
               peerDealIds: action.dealIds.filter((id) => id !== dealIdForRun),
               peerDealNames: action.dealNames.filter((_, idx) => action.dealIds[idx] !== dealIdForRun),
+              researchProfile: action.researchProfile ?? (deepThink ? "deep" : "standard"),
             }),
           });
           const json = (await res.json().catch(() => null)) as ResearchWorkflowResponse | null;
@@ -1315,6 +1463,7 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
           const allRuns: ResearchRun[] = [];
           if (workflowId && workflowSteps.length) {
             for (let stepIndex = 0; stepIndex < workflowSteps.length; stepIndex++) {
+              if (isCancelled()) break;
               const step = workflowSteps[stepIndex]!;
               const stepKey = `${dealIdForRun}:${step.id}`;
               setResearchTrace(key, (trace) => {
@@ -1336,7 +1485,10 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
                     : [...current.steps.map((item) => ({ ...item, expanded: false })), nextStep],
                 };
               });
-              const execRes = await fetch(`/api/research/workflows/${workflowId}/execute/${step.id}`, { method: "POST" });
+              const execRes = await fetch(`/api/research/workflows/${workflowId}/execute/${step.id}`, {
+                method: "POST",
+                signal: actionSignal,
+              });
               const execJson = (await execRes.json().catch(() => null)) as ResearchExecuteResponse | null;
               if (!execRes.ok) {
                 updateResearchTraceStep(key, stepKey, {
@@ -1380,6 +1532,16 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
               })),
           });
         }
+        if (isCancelled()) {
+          setResearchTrace(key, (trace) => ({
+            title: trace?.title ?? `Researching ${listNames(action.dealNames)}`,
+            status: "failed",
+            steps: trace?.steps ?? [],
+            links: trace?.links ?? [],
+          }));
+          markToolRun(runKey, { status: "error", label: action.label, detail: "Stopped" });
+          return;
+        }
         setResearchTrace(key, (trace) => ({
           title: `Research for ${listNames(action.dealNames)}`,
           status: "done",
@@ -1414,9 +1576,10 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
           const res = await fetch("/api/research/workflows/synthesize", {
             method: "POST",
             headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+            signal: actionSignal,
             body: JSON.stringify({
               userPrompt: action.userPrompt || action.focus,
-              researchFocus: action.focus,
+              researchFocus: action.userPrompt || action.focus,
               companies: created.map((item) => item.dealName),
               runs,
             }),
@@ -1464,89 +1627,6 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
         }
         void saveAssistantMessage({ ...message, content: finalContent }, threadIdForSave);
         markToolRun(runKey, { status: "done", label: action.label, detail: created.length === 1 ? "Research finished" : `${created.length} research runs finished` });
-      } else if (action.type === "propose_matrix_fill") {
-        const columnIds = [...action.columnIds];
-        const columnLabelById = new Map<string, string>();
-        action.columnIds.forEach((columnId, index) => {
-          columnLabelById.set(columnId, action.columnLabels[index] || columnId);
-        });
-        const dealLabelById = new Map(action.dealIds.map((dealId, index) => [dealId, action.dealNames[index] || dealId]));
-        let createdColumns = 0;
-        for (const draft of action.columnsToCreate ?? []) {
-          const createRes = await fetch("/api/diligence-matrix/columns", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              label: draft.label,
-              description: draft.description || "",
-              dataType: draft.dataType || "text",
-              prompt: draft.prompt,
-              researchEnabled: draft.researchEnabled !== false,
-            }),
-          });
-          const createJson = (await createRes.json().catch(() => null)) as MatrixColumnResponse | null;
-          if (!createRes.ok || !createJson?.column?.id) {
-            throw new Error(createJson?.error || `Failed to create matrix column (${createRes.status})`);
-          }
-          columnIds.push(createJson.column.id);
-          columnLabelById.set(createJson.column.id, createJson.column.label || draft.label);
-          createdColumns += 1;
-        }
-        if (!columnIds.length) throw new Error("No matrix columns were available for this request.");
-        const res = await fetch("/api/diligence-matrix/fill", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dealIds: action.dealIds, columnIds, allowResearch: true }),
-        });
-        const json = (await res.json().catch(() => null)) as MatrixFillResponse | null;
-        if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
-        const cells = json?.cells ?? [];
-        const filled = cells.filter((cell) => cell.status === "filled").length;
-        const errors = json?.errors?.length ?? 0;
-        const cellByPair = new Map(cells.map((cell) => [`${cell.deal_id || ""}:${cell.column_id || ""}`, cell]));
-        const matrixRows = action.dealIds
-          .map((dealId) => {
-            const values: Array<{ columnId: string; columnLabel: string; value: string; status?: string }> = [];
-            for (const columnId of columnIds) {
-              const cell = cellByPair.get(`${dealId}:${columnId}`);
-              const label = columnLabelById.get(columnId) || "Matrix field";
-              const value = plainChatText(cell?.value_text || (cell?.status === "needs_research" ? "Needs more evidence" : ""));
-              if (value) values.push({ columnId, columnLabel: label, value, status: cell?.status });
-            }
-            return {
-              dealId,
-              dealName: dealLabelById.get(dealId) || dealId,
-              values,
-            };
-          })
-          .filter((row) => row.values.length);
-	        const message: ChatMessage = {
-	          id: newId(),
-	          role: "assistant",
-	          content: matrixRows.length
-	            ? ""
-	            : [
-	                createdColumns ? `Created ${createdColumns} matrix column${createdColumns === 1 ? "" : "s"} for this request.` : "",
-	                filled ? `Updated ${filled} matrix cell${filled === 1 ? "" : "s"}.` : "I checked the matrix cells, but nothing was filled.",
-	                errors ? `${errors} cell${errors === 1 ? "" : "s"} need attention.` : "",
-	              ].filter(Boolean).join("\n\n"),
-          actions: matrixRows.length
-            ? [
-                {
-                  type: "matrix_preview",
-                  label: "Matrix output",
-                  href: "/home/matrix",
-                  detail: filled ? `${filled} cells updated` : "Open the full matrix",
-                  columns: columnIds.map((columnId) => ({ id: columnId, label: columnLabelById.get(columnId) || "Matrix field" })),
-                  rows: matrixRows,
-                },
-              ]
-            : [],
-        };
-        clearTransientMessage();
-        setMessages((prev) => [...prev, message]);
-        await saveAssistantMessage(message, threadIdForSave);
-        markToolRun(runKey, { status: "done", label: action.label, detail: filled ? `${filled} cells updated` : "Matrix checked" });
       } else if (action.type === "propose_record_update") {
         const res = await fetch("/api/chat/actions", {
           method: "POST",
@@ -1647,12 +1727,11 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
     const runnable = actions
       .map((action, index) => ({ action, index }))
       .filter(({ action }) => isRunnableAction(action, toolPermissions));
-    const hasDocumentOrMatrix = runnable.some(({ action }) => action.type === "propose_generate_document" || action.type === "propose_matrix_fill");
+    const hasDocument = runnable.some(({ action }) => action.type === "propose_generate_document");
     const ordered = runnable.slice().sort((a, b) => {
       const priority = (action: ChatAction) => {
         if (action.type === "propose_research") return 0;
         if (action.type === "propose_generate_document") return 1;
-        if (action.type === "propose_matrix_fill") return 2;
         return 3;
       };
       return priority(a.action) - priority(b.action) || a.index - b.index;
@@ -1665,16 +1744,17 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
       });
     }
     for (const { action, index } of ordered) {
+      if (isCancelled()) break;
       await runAction(action, `${messageId}-${action.type}-${index}`, threadIdForSave, true, {
-        suppressResearchAnswer: action.type === "propose_research" && hasDocumentOrMatrix,
+        suppressResearchAnswer: action.type === "propose_research" && hasDocument,
       });
     }
   }
 
   function shouldRenderActionForMessage(action: ChatAction, key: string): boolean {
     if (action.type === "tool_call") return false;
-    if (action.type === "matrix_preview" || action.type === "document_preview") return true;
-    if (action.type === "open_link" && action.href.startsWith("/home/matrix")) return false;
+    if (isLegacyMatrixAction(action)) return false;
+    if (action.type === "document_preview") return true;
     if (action.type === "open_document" || action.type === "open_link" || action.type === "record_update") return true;
     const runState = toolRuns[key];
     if (runState?.status === "done") return false;
@@ -1691,118 +1771,120 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
     return true;
   }
 
+  const filteredThreads = threads.filter((t) => {
+    if (historyDealScope && t.dealId !== historyDealScope) return false;
+    if (!historyQuery) return true;
+    const q = historyQuery.toLowerCase();
+    return (t.title || "").toLowerCase().includes(q) || (t.preview || "").toLowerCase().includes(q);
+  });
+
   return (
-    <div className="flex min-h-0 flex-1 bg-white">
-      <aside className="hidden w-72 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50/70 md:flex">
-        <div className="border-b border-zinc-200 p-3">
-          <button
-            type="button"
-            onClick={startNewChat}
-            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-zinc-900 px-3 text-sm font-medium text-white hover:bg-zinc-800"
-          >
-            <Plus className="h-4 w-4" />
-            New chat
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Saved chats</div>
-          {threads.length ? (
-            <div className="space-y-1">
-              {threads.map((thread) => {
-                const active = thread.id === activeThreadId;
-                return (
-                  <div
-                    key={thread.id}
-                    className={cn(
-                      "group flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left transition-colors",
-                      active ? "bg-white text-zinc-950 shadow-sm ring-1 ring-zinc-200" : "text-zinc-700 hover:bg-white/80",
-                    )}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => void loadThread(thread.id)}
-                      className="flex min-w-0 flex-1 items-start gap-2 text-left"
+    <div className="flex h-full w-full bg-white relative overflow-hidden select-none">
+      {/* Centered Chat History Modal */}
+      {chatHistoryOpen && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/20 backdrop-blur-md p-4 transition-all duration-300">
+          <div className="w-full max-w-2xl bg-white rounded-3xl border border-zinc-200/80 shadow-[0_24px_64px_rgba(0,0,0,0.12)] flex flex-col max-h-[85vh] overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-100">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-zinc-500" />
+                <h2 className="text-sm font-bold text-zinc-950 tracking-tight">
+                  {historyDealScope && selectedDeal ? `${selectedDeal.name} chats` : "Conversation History"}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChatHistoryOpen(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-xl hover:bg-zinc-100 text-zinc-500 hover:text-zinc-950 transition-all"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 border-b border-zinc-100 bg-zinc-50/50">
+              <div className="relative">
+                <Search className="absolute left-3.5 top-2.5 w-4 h-4 text-zinc-400" />
+                <input
+                  type="text"
+                  className="w-full bg-white border border-zinc-200 rounded-xl pl-10 pr-4 py-2 text-xs outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/5 transition-all"
+                  placeholder="Search previous conversations..."
+                  value={historyQuery}
+                  onChange={(e) => setHistoryQuery(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+              {filteredThreads.length > 0 ? (
+                filteredThreads.map((thread) => {
+                  const active = thread.id === activeThreadId;
+                  return (
+                    <div
+                      key={thread.id}
+                      className={cn(
+                        "group flex w-full items-start gap-3 rounded-2xl border px-4 py-3.5 text-left transition-all cursor-pointer active:scale-[0.99]",
+                        active
+                          ? "bg-zinc-950 border-zinc-950 text-white shadow-md shadow-zinc-950/10"
+                          : "bg-white border-zinc-200/60 hover:border-zinc-300 hover:bg-zinc-50"
+                      )}
+                      onClick={() => {
+                        loadThread(thread.id);
+                        setChatHistoryOpen(false);
+                      }}
                     >
-                      <MessageSquare className={cn("mt-0.5 h-4 w-4 shrink-0", active ? "text-zinc-900" : "text-zinc-400")} />
-                      <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-semibold">{thread.title || "New chat"}</span>
-                      <span className="mt-0.5 block truncate text-[11px] text-zinc-500">{thread.preview || "No messages yet"}</span>
-                      </span>
-                    </button>
-                    <span className="relative mt-0.5 flex shrink-0 items-center gap-1">
-                      <span className="text-[10px] text-zinc-400" suppressHydrationWarning>
+                      <MessageSquare className={cn("mt-0.5 h-4 w-4 shrink-0", active ? "text-white" : "text-zinc-400")} />
+                      <div className="min-w-0 flex-1">
+                        <span className={cn("block truncate text-xs font-bold uppercase tracking-wider", active ? "text-white" : "text-zinc-950")}>
+                          {thread.title || "Untitled Conversation"}
+                        </span>
+                        <span className={cn("mt-1 block truncate text-[11px] font-medium leading-relaxed", active ? "text-zinc-300" : "text-zinc-500")}>
+                          {thread.preview || "No messages yet"}
+                        </span>
+                      </div>
+                      <span className={cn("text-[9px] font-semibold uppercase tracking-wider shrink-0", active ? "text-zinc-400" : "text-zinc-400")}>
                         {mounted ? relativeTime(thread.updated_at) : ""}
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => setPendingDeleteThreadId((current) => (current === thread.id ? null : thread.id))}
-                        disabled={deletingThreadId === thread.id}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-full text-zinc-400 opacity-0 transition hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50 group-hover:opacity-100 group-focus-within:opacity-100"
-                        title="Delete chat"
-                        aria-label={`Delete ${thread.title || "chat"}`}
-                      >
-                        {deletingThreadId === thread.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                      </button>
-                      {pendingDeleteThreadId === thread.id ? (
-                        <div className="absolute right-0 top-8 z-30 w-52 rounded-2xl border border-zinc-200 bg-white p-2 text-left shadow-xl">
-                          <p className="px-1 text-xs font-semibold text-zinc-950">Delete this chat?</p>
-                          <p className="mt-0.5 px-1 text-[11px] leading-snug text-zinc-500">This removes the saved thread.</p>
-                          <div className="mt-2 flex justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => setPendingDeleteThreadId(null)}
-                              className="inline-flex h-7 items-center rounded-full px-2.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void deleteThread(thread)}
-                              disabled={deletingThreadId === thread.id}
-                              className="inline-flex h-7 items-center gap-1.5 rounded-full bg-rose-600 px-2.5 text-xs font-medium text-white hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                              {deletingThreadId === thread.id ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                              Delete
-                            </button>
-                          </div>
-                        </div>
-                      ) : null}
-                    </span>
-                  </div>
-                );
-              })}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="text-center py-12 text-zinc-400 text-xs font-medium">{historyDealScope ? "No conversations for this company yet." : "No conversations found."}</div>
+              )}
             </div>
-          ) : (
-            <div className="rounded-xl border border-dashed border-zinc-200 bg-white px-3 py-6 text-center text-xs text-zinc-500">
-              Chats you start will appear here.
-            </div>
-          )}
+          </div>
         </div>
-      </aside>
+      )}
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="shrink-0 border-b border-zinc-100 bg-white px-4 py-3 md:px-5">
-          <div className="mx-auto flex max-w-5xl flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      {/* Main Chat Interface Panel */}
+      <div className="flex h-full w-full min-w-0 flex-col bg-white">
+        {/* Workspace Top Header Bar */}
+        <div className="shrink-0 border-b border-zinc-200/80 bg-white px-5 py-4">
+          <div className="mx-auto flex max-w-5xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h1 className="text-base font-semibold tracking-tight text-zinc-950">Workspace chat</h1>
-              <p className="text-xs text-zinc-500">
-                {selectedDeal ? `Focused on ${selectedDeal.name}` : activeThreadId ? "Saved chat" : "New workspace-wide chat"}
+              <h1 className="text-sm font-extrabold uppercase tracking-widest text-zinc-950">Workspace Chat</h1>
+              <p className="mt-0.5 text-[11px] font-medium text-zinc-500">
+                {selectedDeal ? `Context focused on ${selectedDeal.name}` : activeThreadId ? "Viewing saved conversation" : "New workspace-wide assistant session"}
               </p>
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={startNewChat}
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-zinc-200 bg-white px-3 text-sm font-medium text-zinc-800 hover:bg-zinc-50 md:hidden"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 active:scale-95 transition-all shadow-sm"
+                title="Start a new chat session"
               >
                 <Plus className="h-4 w-4" />
-                New
+              </button>
+              <button
+                type="button"
+                onClick={() => setChatHistoryOpen(true)}
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 active:scale-95 transition-all shadow-sm"
+              >
+                <History className="h-3.5 w-3.5 text-zinc-500" />
+                <span>History</span>
               </button>
               <SelectBox
                 value={dealId}
                 onChange={(e) => setDealId(e.target.value)}
-                wrapperClassName="w-56 md:w-72"
-                className="h-10 max-w-full py-2"
+                wrapperClassName="w-52 sm:w-64"
+                className="h-9 max-w-full py-1 text-xs"
               >
                 <option value="">All companies</option>
                 {deals.map((d) => (
@@ -1815,262 +1897,352 @@ export function WorkspaceChat({ deals, initialThreads }: { deals: DealOption[]; 
                 <button
                   type="button"
                   onClick={() => setSettingsOpen((v) => !v)}
-                  className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
-                  title="Chat tool settings"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 active:scale-95 transition-all shadow-sm"
+                  title="Configure chat tools and parameters"
                 >
                   <Settings2 className="h-4 w-4" />
                 </button>
-                {settingsOpen ? (
-                  <div className="absolute right-0 z-20 mt-2 w-72 rounded-2xl border border-zinc-200 bg-white p-2 shadow-xl">
-                    <div className="px-2 pb-2 pt-1">
-                      <p className="text-xs font-semibold text-zinc-950">Chat tool permissions</p>
-                      <p className="mt-0.5 text-[11px] leading-snug text-zinc-500">Turn off anything chat should not run automatically.</p>
+                {settingsOpen && (
+                  <div className="absolute right-0 z-20 mt-2 w-72 rounded-2xl border border-zinc-200 bg-white p-3 shadow-xl animate-in fade-in slide-in-from-top-1 duration-150">
+                    <div className="px-1 pb-2">
+                      <p className="text-xs font-bold text-zinc-950 uppercase tracking-wide">Workspace Permissions</p>
+                      <p className="mt-0.5 text-[10px] leading-relaxed text-zinc-500">Toggle assistant automation permissions.</p>
                     </div>
                     <div className="space-y-1">
                       {TOOL_PERMISSION_LABELS.map((item) => (
                         <label
                           key={item.key}
-                          className="flex cursor-pointer items-center justify-between gap-3 rounded-xl px-2 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
+                          className="flex cursor-pointer items-center justify-between gap-3 rounded-xl px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-50 transition-colors"
                         >
-                          <span>{item.label}</span>
+                          <span className="font-medium text-zinc-600">{item.label}</span>
                           <input
                             type="checkbox"
                             checked={toolPermissions[item.key]}
                             onChange={(e) => setToolPermission(item.key, e.target.checked)}
-                            className="h-4 w-4 rounded border-zinc-300 text-zinc-900"
+                            className="h-4 w-4 rounded border-zinc-300 text-zinc-950 focus:ring-0 focus:ring-offset-0"
                           />
                         </label>
                       ))}
                     </div>
                   </div>
-                ) : null}
+                )}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8 md:px-6">
+        {/* Scrollable Chat Message List */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 bg-zinc-50/30">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-            {loadingThread ? (
-              <div className="flex justify-center py-10 text-sm text-zinc-500">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Loading chat
+            {loadingThread && (
+              <div className="flex justify-center items-center py-16 text-xs font-semibold text-zinc-500 gap-2">
+                <Loader2 className="h-4 w-4 animate-spin text-zinc-800" />
+                <span>Syncing message database...</span>
               </div>
-            ) : null}
-            {!loadingThread && messages.length === 0 ? (
-              <div className="mx-auto flex min-h-[44svh] max-w-xl flex-col items-center justify-center text-center">
-                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-zinc-100">
-                  <MessageSquare className="h-5 w-5 text-zinc-600" />
+            )}
+            {!loadingThread && messages.length === 0 && (
+              <div className="mx-auto flex min-h-[48svh] max-w-lg flex-col items-center justify-center text-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-950 text-white shadow-md shadow-zinc-950/10 animate-bounce">
+                  <Sparkles className="h-5 w-5" />
                 </div>
-                <h2 className="mt-4 text-lg font-semibold tracking-tight text-zinc-950">Start a workspace chat</h2>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-500">
-                  Ask about companies, documents, diligence facts, or request a tool action. The conversation will be saved automatically.
+                <h2 className="mt-5 text-sm font-extrabold uppercase tracking-widest text-zinc-950">Workspace Assistant</h2>
+                <p className="mt-2 text-xs leading-relaxed text-zinc-500 font-medium max-w-xs">
+                  Ask me about SaaS diligence criteria, financial statement runs, executive summaries, or run custom research playbooks automatically.
                 </p>
               </div>
-            ) : null}
-	            {messages.map((m) => {
-	              const contentText = plainChatText(m.content);
-	              const hasVisibleActions = Boolean(
-	                m.actions?.some((action, actionIndex) => shouldRenderActionForMessage(action, `${m.id}-${action.type}-${actionIndex}`)),
-	              );
-	              if (!contentText && !hasVisibleActions && !m.citations?.length) return null;
-	              return (
-	            <div key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-              <div
-                className={cn(
-                  "max-w-[88%] px-4 py-3 text-sm leading-relaxed",
-                  m.role === "assistant" &&
-                    m.actions?.some((a) =>
-                      a.type === "propose_research" ||
-                      a.type === "propose_matrix_fill" ||
-                      a.type === "propose_generate_document" ||
-                      a.type === "propose_custom_workflow" ||
-                      a.type === "matrix_preview" ||
-                      a.type === "document_preview",
-                    )
-                    ? "w-full max-w-full"
-                    : "",
-                  m.role === "user"
-                    ? "rounded-3xl bg-zinc-100 text-zinc-950"
-                    : "text-zinc-900",
-                )}
-              >
-	                {contentText ? <div className="whitespace-pre-wrap">{contentText}</div> : null}
-	                {hasVisibleActions ? (
-                  <div className="mt-3 flex w-full flex-col gap-2 border-t border-zinc-100 pt-3">
-	                    {(m.actions ?? []).map((a, i) => {
-                      const key = `${m.id}-${a.type}-${i}`;
-                      const runState = toolRuns[key];
-                      const isRunning = busyAction === key || runState?.status === "running";
-                      const runDone = runState?.status === "done";
-                      const runError = runState?.status === "error";
-                      if (!shouldRenderActionForMessage(a, key)) return null;
-                      if (a.type === "tool_call") {
-                        return null;
-                      }
-                      if (a.type === "matrix_preview") {
-                        return <MatrixPreviewCard key={key} action={a} />;
-                      }
-                      if (a.type === "document_preview") {
-                        return <DocumentPreviewCard key={key} action={a} />;
-                      }
-	                      if (a.type === "open_document" || a.type === "open_link") {
-	                        return (
-	                          <a
-	                            key={key}
-	                            href={a.href}
-	                            target="_blank"
-	                            rel="noreferrer"
-	                            className="flex w-full max-w-full items-center justify-between gap-3 border-t border-zinc-200 px-1 py-2 text-left text-xs font-medium text-zinc-950 hover:bg-zinc-50 md:w-[760px]"
-	                          >
-	                            <span className="min-w-0">
-	                              <span className="block truncate">{a.label}</span>
-	                              {"detail" in a && a.detail ? <span className="mt-0.5 block truncate font-normal text-zinc-950">{a.detail}</span> : null}
-	                            </span>
-	                            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-	                          </a>
-	                        );
-	                      }
-                      if (a.type === "propose_generate_document") {
-                        return (
-                          <ToolActionButton
-                            key={key}
-                            label={a.label}
-                            detail={runState?.detail || `${a.outputFormat.toUpperCase()}${a.dealName ? ` - ${a.dealName}` : ""}`}
-                            status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
-                            icon={<FileText className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
-                            onClick={() => runAction(a, key)}
-                            disabled={Boolean(busyAction)}
-                          />
-                        );
-                      }
-                      if (a.type === "propose_research") {
-                        const savedLinks = a.dealIds
-                          .map((id) => savedResearchLinksByDeal.get(id))
-                          .filter((link): link is { label: string; href: string } => Boolean(link));
-                        if (!researchTraces[key] && savedLinks.length === a.dealIds.length && savedLinks.length) {
-                          return null;
-                        }
-                        return (
-                          <ResearchTracePanel
-                            key={key}
-                            action={a}
-                            trace={researchTraces[key]}
-                            actionKey={key}
-                            busyAction={busyAction}
-                            onRun={(nextAction, nextKey) => void runAction(nextAction, nextKey)}
-                            onToggleStep={toggleResearchTraceStep}
-                          />
-                        );
-                      }
-                      if (a.type === "propose_custom_workflow") {
-                        return (
-                          <ToolActionButton
-                            key={key}
-                            label={a.label}
-                            detail={runState?.detail || a.dealName || a.workflowName}
-                            status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
-                            icon={<Workflow className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
-                            onClick={() => runAction(a, key)}
-                            disabled={Boolean(busyAction)}
-                          />
-                        );
-                      }
-                      if (a.type === "propose_matrix_fill") {
-                        return (
-                          <ToolActionButton
-                            key={key}
-                            label={a.label}
-                            detail={runState?.detail || `${a.dealNames.length} row${a.dealNames.length === 1 ? "" : "s"} / ${a.columnLabels.length} column${a.columnLabels.length === 1 ? "" : "s"}`}
-                            status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
-                            icon={<Workflow className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
-                            onClick={() => runAction(a, key)}
-                            disabled={Boolean(busyAction)}
-                          />
-                        );
-                      }
-                      if (a.type === "propose_record_update") {
-                        return (
-                          <ToolActionButton
-                            key={key}
-                            label={a.label}
-                            detail={runState?.detail || a.dealName}
-                            status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
-                            icon={<CheckCircle2 className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
-                            onClick={() => runAction(a, key)}
-                            disabled={Boolean(busyAction)}
-                          />
-                        );
-                      }
-                      return (
-                        <div key={key} className="w-full max-w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 shadow-sm md:w-[760px]">
-                          <span className="font-semibold">{a.label}:</span> {a.detail}
+            )}
+            {!loadingThread &&
+              messages.map((m) => {
+                const contentText = plainChatText(m.content);
+                const hasVisibleActions = Boolean(
+                  m.actions?.some((action, actionIndex) => shouldRenderActionForMessage(action, `${m.id}-${action.type}-${actionIndex}`))
+                );
+                if (!contentText && !hasVisibleActions && !m.citations?.length) return null;
+
+                if (m.role === "user") {
+                  let displayContent = contentText;
+                  let attachedSnippetFiles: string[] = [];
+                  const attachMatch = contentText.match(/\n\n\[Attached Documents:\s*(.*?)\]$/);
+                  if (attachMatch) {
+                    displayContent = contentText.slice(0, attachMatch.index);
+                    attachedSnippetFiles = attachMatch[1].split(" | ").filter(Boolean);
+                  }
+
+                  return (
+                    <div key={m.id} className="flex flex-col items-end gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200 mt-1">
+                      <div className="max-w-[78%] rounded-2xl border border-zinc-200/80 bg-white px-4 py-3 text-sm font-medium text-zinc-950 shadow-[0_2px_8px_rgba(0,0,0,0.03)] leading-relaxed">
+                        <div className="whitespace-pre-wrap">{displayContent}</div>
+                      </div>
+                      {attachedSnippetFiles.length > 0 && (
+                        <div className="flex flex-wrap justify-end gap-2 max-w-[78%]">
+                          {attachedSnippetFiles.map((fname, i) => (
+                            <div key={i} className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-1.5 shadow-sm select-none">
+                              <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-100">
+                                <FileText className="h-3 w-3 text-zinc-600" />
+                              </div>
+                              <span className="text-xs font-medium text-zinc-950 max-w-[180px] truncate">{fname}</span>
+                            </div>
+                          ))}
                         </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
-                {m.citations?.length ? (
-                  <details className="mt-3 border-t border-zinc-200 pt-2">
-                    <summary className="cursor-pointer text-xs font-medium text-zinc-500">Context used</summary>
-                    <div className="mt-2 space-y-2">
-                      {m.citations.slice(0, 6).map((c, i) => (
-                        <div key={`${c.label}-${i}`} className="rounded-2xl bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
-                          <div className="font-medium text-zinc-800">
-                            {c.href ? (
-                              <a className="hover:underline" href={c.href} target="_blank" rel="noreferrer">
-                                {c.label}
-                              </a>
-                            ) : (
-                              c.label
-                            )}
-                          </div>
-                          <div className="mt-0.5 line-clamp-3">{c.snippet}</div>
-                        </div>
-                      ))}
+                      )}
                     </div>
-                  </details>
-                ) : null}
-              </div>
-            </div>
-	              );
-	            })}
-            {busy ? (
-              <div className="flex justify-start">
-                <div className="inline-flex items-center gap-2 rounded-3xl bg-zinc-50 px-4 py-3 text-sm text-zinc-950">
-                  Thinking
+                  );
+                }
+
+                return (
+                  <div key={m.id} className="flex justify-start items-start gap-4 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                    <div className="flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-800 shadow-sm">
+                      <Sparkles className="h-4 w-4 text-zinc-700" />
+                    </div>
+                    <div className="flex-1 min-w-0 space-y-3 pt-0.5">
+                      {contentText && (
+                        <div className="whitespace-pre-wrap text-zinc-800 leading-relaxed text-sm">
+                          {contentText}
+                        </div>
+                      )}
+                      {hasVisibleActions && (
+                        <div className="flex w-full flex-col gap-2 pt-1">
+                          {(m.actions ?? []).map((a, i) => {
+                            const key = `${m.id}-${a.type}-${i}`;
+                            const runState = toolRuns[key];
+                            const isRunning = busyAction === key || runState?.status === "running";
+                            const runDone = runState?.status === "done";
+                            const runError = runState?.status === "error";
+
+                            if (!shouldRenderActionForMessage(a, key)) return null;
+                            if (a.type === "tool_call") return null;
+
+                            if (a.type === "document_preview") {
+                              return <DocumentPreviewCard key={key} action={a} />;
+                            }
+                            if (a.type === "open_document" || a.type === "open_link") {
+                              return (
+                                <a
+                                  key={key}
+                                  href={a.href}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="flex w-full max-w-full items-center justify-between gap-3 border border-zinc-200 bg-white px-4 py-3 rounded-2xl text-left text-xs font-semibold text-zinc-950 hover:bg-zinc-50/50 shadow-sm transition-all md:w-[760px] active:scale-[0.99]"
+                                >
+                                  <span className="min-w-0">
+                                    <span className="block truncate">{a.label}</span>
+                                    {"detail" in a && a.detail ? (
+                                      <span className="mt-0.5 block truncate font-medium text-zinc-500">{a.detail}</span>
+                                    ) : null}
+                                  </span>
+                                  <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                                </a>
+                              );
+                            }
+                            if (a.type === "propose_generate_document") {
+                              return (
+                                <ToolActionButton
+                                  key={key}
+                                  label={a.label}
+                                  detail={runState?.detail || `${a.outputFormat.toUpperCase()}${a.dealName ? ` - ${a.dealName}` : ""}`}
+                                  status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
+                                  icon={<FileText className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
+                                  onClick={() => runAction(a, key)}
+                                  disabled={Boolean(busyAction)}
+                                />
+                              );
+                            }
+                            if (a.type === "propose_research") {
+                              const savedLinks = a.dealIds
+                                .map((id) => savedResearchLinksByDeal.get(id))
+                                .filter((link): link is { label: string; href: string } => Boolean(link));
+                              if (!researchTraces[key] && savedLinks.length === a.dealIds.length && savedLinks.length) {
+                                return null;
+                              }
+                              return (
+                                <ResearchTracePanel
+                                  key={key}
+                                  action={a}
+                                  trace={researchTraces[key]}
+                                  actionKey={key}
+                                  busyAction={busyAction}
+                                  onRun={(nextAction, nextKey) => void runAction(nextAction, nextKey)}
+                                  onToggleStep={toggleResearchTraceStep}
+                                />
+                              );
+                            }
+                            if (a.type === "propose_custom_workflow") {
+                              return (
+                                <ToolActionButton
+                                  key={key}
+                                  label={a.label}
+                                  detail={runState?.detail || a.dealName || a.workflowName}
+                                  status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
+                                  icon={<Workflow className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
+                                  onClick={() => runAction(a, key)}
+                                  disabled={Boolean(busyAction)}
+                                />
+                              );
+                            }
+                            if (a.type === "propose_record_update") {
+                              return (
+                                <ToolActionButton
+                                  key={key}
+                                  label={a.label}
+                                  detail={runState?.detail || a.dealName}
+                                  status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
+                                  icon={<CheckCircle2 className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
+                                  onClick={() => runAction(a, key)}
+                                  disabled={Boolean(busyAction)}
+                                />
+                              );
+                            }
+                            return (
+                              <div key={key} className="w-full max-w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-xs text-zinc-700 shadow-sm md:w-[760px]">
+                                <span className="font-semibold">{a.label}:</span> {a.detail}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {m.citations?.length ? (
+                        <details className="mt-3 border border-zinc-200/60 bg-white/50 rounded-2xl overflow-hidden transition-all shadow-sm">
+                          <summary className="cursor-pointer text-[10px] font-bold uppercase tracking-wider text-zinc-500 hover:text-zinc-950 px-4 py-2 border-b border-transparent open:border-zinc-200/60 transition-all select-none">
+                            Context Citations used
+                          </summary>
+                          <div className="p-3 space-y-2 max-h-56 overflow-y-auto bg-zinc-50/50">
+                            {m.citations.slice(0, 6).map((c, i) => (
+                              <div key={`${c.label}-${i}`} className="rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[11px] text-zinc-600 shadow-sm">
+                                <div className="font-bold text-zinc-950">
+                                  {c.href ? (
+                                    <a className="hover:underline" href={c.href} target="_blank" rel="noreferrer">
+                                      {c.label}
+                                    </a>
+                                  ) : (
+                                    c.label
+                                  )}
+                                </div>
+                                <div className="mt-1 line-clamp-3 text-zinc-500 leading-normal font-medium">{c.snippet}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            {busy && (
+              <div className="flex justify-start items-center gap-4 animate-pulse">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white">
+                  <Sparkles className="h-4 w-4 text-zinc-700" />
+                </div>
+                <div className="inline-flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-600 shadow-sm">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-800" />
+                  <span>Thinking...</span>
                 </div>
               </div>
-            ) : null}
+            )}
           </div>
         </div>
 
-        <div className="shrink-0 bg-white px-4 pb-4 pt-3 md:px-6">
-          <div className="mx-auto max-w-3xl rounded-[28px] border border-zinc-200 bg-white p-2 shadow-sm">
-            <div className="flex items-end gap-2">
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void send();
-                  }
-                }}
-                placeholder="Ask about traction, open the latest deck, or update a record..."
-                className="min-h-[44px] flex-1 resize-none border-0 bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400"
-                rows={2}
-              />
-              <button
-                type="button"
-                onClick={send}
-                disabled={busy || !input.trim()}
-                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-900 text-white shadow-sm hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-                title="Send"
-              >
-                {busy ? <Sparkles className="h-4 w-4" /> : <ArrowUp className="h-4 w-4" />}
-              </button>
+        {/* Locked Workspace Bottom Input Bar */}
+        <div className="shrink-0 border-t border-zinc-200 bg-gradient-to-b from-white to-zinc-50/30 px-4 pb-5 pt-3 md:px-6 relative">
+          <div className="mx-auto max-w-3xl flex flex-col gap-2">
+            {/* Input Box Container */}
+            <div
+              className="rounded-xl border border-zinc-200 bg-white p-2.5 shadow-[0_2px_12px_rgba(0,0,0,0.03)] focus-within:border-zinc-400 focus-within:shadow-[0_4px_20px_rgba(0,0,0,0.05)] transition-all"
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+            >
+              {attachedFiles.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2.5 pb-2 border-b border-zinc-100">
+                  {attachedFiles.map((file) => (
+                    <div
+                      key={file.id}
+                      className={cn(
+                        "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs border transition-all select-none",
+                        file.status === "uploading"
+                          ? "bg-zinc-50 border-zinc-200 text-zinc-400 animate-pulse"
+                          : file.status === "failed"
+                          ? "bg-rose-50 border-rose-200 text-rose-600 font-semibold"
+                          : "bg-white border-zinc-200 text-zinc-950 shadow-sm font-medium"
+                      )}
+                    >
+                      <FileText className="h-3.5 w-3.5 shrink-0" />
+                      <span className="max-w-[140px] truncate">{file.name}</span>
+                      {file.status === "uploading" ? (
+                        <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => removeAttachedFile(file.id)}
+                          className="hover:scale-110 active:scale-95 transition-all text-zinc-400 hover:text-rose-400 p-0.5 shrink-0"
+                          title="Remove attachment"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-end gap-2">
+                <label className="flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-xl text-zinc-400 hover:bg-zinc-50 hover:text-zinc-950 transition-all active:scale-95 shadow-none border border-transparent hover:border-zinc-200/60">
+                  <Paperclip className="h-4.5 w-4.5" />
+                  <input type="file" className="hidden" multiple onChange={handleFileChange} />
+                </label>
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void send();
+                    }
+                  }}
+                  placeholder="Message copilot or attach diligence documents..."
+                  className="min-h-[44px] flex-1 resize-none border-0 bg-transparent px-1 py-2 text-sm text-zinc-800 outline-none placeholder:text-zinc-400/80 leading-relaxed font-medium"
+                  rows={2}
+                />
+                {sessionActive ? (
+                  <button
+                    type="button"
+                    onClick={stopSession}
+                    className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-950 text-white shadow-sm hover:bg-zinc-900 active:scale-95 transition-all"
+                    title="Stop response and research"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-white text-white" />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={send}
+                    disabled={!input.trim() || sessionActive}
+                    className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-950 text-white shadow-sm hover:bg-zinc-900 active:scale-95 transition-all disabled:opacity-30 disabled:cursor-not-allowed disabled:active:scale-100"
+                    title="Send query"
+                  >
+                    <Send className="h-4 w-4 ml-0.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Deep Think Selector */}
+            <div className="flex justify-end items-center gap-3 px-2 pt-1.5 select-none">
+              <label className="flex items-center gap-2 cursor-pointer text-[11px] font-bold uppercase tracking-wider text-zinc-500 hover:text-zinc-950 transition-colors">
+                <div
+                  className={cn(
+                    "flex h-4 w-8 items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out border border-transparent",
+                    deepThink ? "bg-zinc-950" : "bg-zinc-200 hover:bg-zinc-300"
+                  )}
+                  onClick={() => setDeepThink(!deepThink)}
+                >
+                  <div
+                    className={cn(
+                      "h-3 w-3 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out",
+                      deepThink ? "translate-x-4" : "translate-x-0"
+                    )}
+                  />
+                </div>
+                <span>Deep Research</span>
+              </label>
             </div>
           </div>
         </div>

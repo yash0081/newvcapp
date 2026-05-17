@@ -94,7 +94,7 @@ export async function loadDocumentType(
     .from("document_generation_type")
     .select("id, user_id, name, output_format, description, instructions, learned_preferences, metadata, created_at, updated_at")
     .eq("id", typeId)
-    .eq("user_id", userId)
+    .or(`user_id.eq.${userId},user_id.is.null`)
     .maybeSingle();
   if (res.error) throw res.error;
   return (res.data as DocumentTypeRow | null) ?? null;

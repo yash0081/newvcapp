@@ -129,16 +129,27 @@ export default async function DealResearchPage(props: { params: Promise<{ id: st
     }
   }
 
+  // Fetch all known company names in the workspace to filter out hallucinated source hints
+  const allDealsRes = await admin
+    .schema("deal_intel")
+    .from("deal")
+    .select("metadata")
+    .eq("user_id", user.id);
+  const knownCompanyNames: string[] = [];
+  for (const d of allDealsRes.data ?? []) {
+    const m = d.metadata && typeof d.metadata === "object" ? (d.metadata as Record<string, unknown>) : {};
+    if (typeof m.company_name === "string" && m.company_name.trim()) knownCompanyNames.push(m.company_name.trim());
+  }
+
   return (
-    <div className="space-y-4">
-      <ResearchPlanner
-        dealId={dealId}
-        companyName={companyName}
-        initialWorkflow={workflow}
-        initialWorkflows={workflows}
-        initialSteps={steps}
-        initialRuns={runs}
-      />
-    </div>
+    <ResearchPlanner
+      dealId={dealId}
+      companyName={companyName}
+      initialWorkflow={workflow}
+      initialWorkflows={workflows}
+      initialSteps={steps}
+      initialRuns={runs}
+      knownCompanyNames={knownCompanyNames}
+    />
   );
 }

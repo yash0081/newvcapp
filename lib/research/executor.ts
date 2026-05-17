@@ -1,6 +1,12 @@
 import { parseJsonFromResponseOrNull } from "@/lib/gemini";
 import { vertexRunWithTextMulti } from "@/lib/vertex";
 import { getResearchModel } from "@/lib/research/research-model-env";
+import {
+  profileExecuteModelTier,
+  profileExecuteTimeoutMs,
+  profileFollowUpLimit,
+  type ResearchProfile,
+} from "@/lib/research/mode-router";
 import type { ResearchSource } from "@/lib/research/types";
 import {
   DEAL_INTEL_LAYER1A_SCHEMA_GUIDE,
@@ -8,6 +14,7 @@ import {
   USER_PREFERENCE_GUARDRAILS,
 } from "@/lib/deal-intel/prompt-guidance";
 import { stripMarkdownText } from "@/lib/plain-text";
+import { sanitizeResearchNotes, sanitizeResearchSources } from "@/lib/research/public-output";
 
 export type ExecutionOk = {
   ok: true;
@@ -89,7 +96,7 @@ function parseExecution(raw: string): Omit<ExecutionOk, "ok"> | null {
     if (!p || typeof p !== "object") return null;
 
     const sourcesRaw = Array.isArray(p.sources) ? p.sources : Array.isArray(p.evidence) ? p.evidence : [];
-    const sources = sourcesRaw.map(normalizeSource).filter((s): s is ResearchSource => Boolean(s));
+    const sources = sanitizeResearchSources(sourcesRaw.map(normalizeSource).filter((s): s is ResearchSource => Boolean(s)));
     const updates = normalizeUpdates(p.suggestedStepUpdates);
     const notes =
       typeof p.notes === "string"
@@ -102,8 +109,9 @@ function parseExecution(raw: string): Omit<ExecutionOk, "ok"> | null {
                 .filter(Boolean)
                 .join("\n")
             : "";
-    if (!notes && sources.length === 0) return null;
-    return { notes: stripMarkdownText(notes), sources, suggestedStepUpdates: updates };
+    const cleanNotes = sanitizeResearchNotes(notes);
+    if (!cleanNotes && sources.length === 0) return null;
+    return { notes: cleanNotes, sources, suggestedStepUpdates: updates };
   } catch {
     return null;
   }
@@ -132,10 +140,26 @@ function fallbackFromRaw(raw: string): Omit<ExecutionOk, "ok"> | null {
   if (!lines && sources.length === 0) return null;
 
   return {
-    notes: stripMarkdownText(lines || "Execution completed, but model output was unstructured."),
-    sources,
+    notes: sanitizeResearchNotes(lines || "Execution completed, but model output was unstructured."),
+    sources: sanitizeResearchSources(sources),
     suggestedStepUpdates: [],
   };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 export async function executeResearchStep(args: {
@@ -144,7 +168,13 @@ export async function executeResearchStep(args: {
   website: string;
   task: string;
   internalContext?: string;
+  researchProfile?: ResearchProfile;
+  timeoutMs?: number;
 }): Promise<ExecutionResult> {
+  const profile = args.researchProfile ?? "standard";
+  const timeoutMs = args.timeoutMs ?? profileExecuteTimeoutMs(profile);
+  const modelTier = profileExecuteModelTier(profile);
+  const maxFollowUps = profileFollowUpLimit(profile);
   const sourceConstraint = isBroadWebSource(args.website)
     ? {
         mode: "broad_web",
@@ -172,7 +202,7 @@ Rules:
 - Use the internal workspace context first. If it answers part of the task, incorporate it and use web research to verify, update, or fill missing details. Do not repeat internal context as if it came from the web.
 - Use deterministic database signals when supplied for keyword or SQL-style questions, such as common investors, saved traction, saved competitors, saved customers, and prior document evidence.
 - Include 2-6 sources when available.
-- suggestedStepUpdates: return **[]** when this step fully answers the task and leaves no new blocking gap. Otherwise return **1–3** items (never more than 3).
+- suggestedStepUpdates: return **[]** when this step fully answers the task and leaves no new blocking gap. Otherwise return up to ${maxFollowUps || 0} items (never more than 3).
 - Each suggestedStepUpdates entry must be **plan-quality**: a concrete next research step a human would add to the workflow, not a vague "dig deeper."
   - **reason**: one sentence naming **the company**, what **new** gap or conflict appeared (or what remained **unverified**), and why the **current step list** would miss it. Forbidden: "further research", "learn more", "continue investigating" without naming the gap.
   - **task**: a single **answerable** instruction that names the company and a **schema angle** (e.g. funding_round, competitors, founder_experience) or a **named entity** to resolve. Must differ from the step you just ran.
@@ -189,17 +219,21 @@ ${USER_PREFERENCE_GUARDRAILS}`;
 
   let raw = "";
   try {
-    raw = await vertexRunWithTextMulti(
-      getResearchModel("flash"),
-      prompt,
-      [
-        { label: "Company name", value: args.companyName || "Unknown" },
-        { label: "Company context", value: args.companyContext || "No context." },
-        { label: "Internal workspace retrieval and database signals", value: args.internalContext || "No additional internal context was retrieved for this step." },
-        { label: "Source constraint", value: sourceConstraint },
-        { label: "Research task", value: args.task },
-      ],
-      true
+    raw = await withTimeout(
+      vertexRunWithTextMulti(
+        getResearchModel(modelTier),
+        prompt,
+        [
+          { label: "Company name", value: args.companyName || "Unknown" },
+          { label: "Company context", value: args.companyContext || "No context." },
+          { label: "Internal workspace retrieval and database signals", value: args.internalContext || "No additional internal context was retrieved for this step." },
+          { label: "Source constraint", value: sourceConstraint },
+          { label: "Research task", value: args.task },
+        ],
+        true,
+      ),
+      timeoutMs,
+      "Research step",
     );
   } catch (e) {
     return {
@@ -210,7 +244,15 @@ ${USER_PREFERENCE_GUARDRAILS}`;
 
   const parsed = parseExecution(raw);
   if (parsed) {
-    return { ok: true, ...parsed, notes: stripMarkdownText(parsed.notes) };
+    const updates =
+      maxFollowUps <= 0 ? [] : parsed.suggestedStepUpdates.slice(0, maxFollowUps);
+    return {
+      ok: true,
+      ...parsed,
+      notes: sanitizeResearchNotes(parsed.notes),
+      sources: sanitizeResearchSources(parsed.sources),
+      suggestedStepUpdates: updates,
+    };
   }
 
   if (raw) {

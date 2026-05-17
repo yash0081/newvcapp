@@ -38,7 +38,31 @@ export type Extracted = {
   page_title?: string;
   hostname?: string;
   key_value_claims: ExtractedKeyValue[];
-  outbound_links?: Array<{ url: string; text: string }>;
+  outbound_links?: Array<{ url: string; text: string; heading?: string }>;
+  // New semantic DOM extraction fields
+  page_type?: string;
+  navigation_structure?: {
+    nav_bars: string[];
+    sidebars: string[];
+    breadcrumbs: string[];
+  };
+  interactive_elements?: {
+    accordions: string[];
+    tabs: string[];
+    modals: string[];
+    expandable_sections: string[];
+  };
+  content_density_regions?: {
+    high: string[];
+    medium: string[];
+    low: string[];
+  };
+  semantic_sections?: {
+    headers: string[];
+    body: string[];
+    footer: string[];
+    sidebar: string[];
+  };
 };
 
 export type SuggestionKind = "new" | "aligns" | "contradicts" | "explore";

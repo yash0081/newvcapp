@@ -1,4 +1,5 @@
 import type { ChatTask } from "@/lib/retrieval-orchestrator";
+import type { ResearchProfile } from "@/lib/research/mode-router";
 import { classifyChatTask } from "@/lib/chat-router";
 import { vertexRunWithText } from "@/lib/vertex";
 
@@ -65,12 +66,17 @@ export function retrieveLimitForTask(task: ChatTask): number {
   }
 }
 
-export function chatModelForTask(task: ChatTask): string {
+export function chatModelForTask(task: ChatTask, profile: ResearchProfile = "standard"): string {
   const lite =
     process.env.GEMINI_MODEL_FLASH_LITE ||
     process.env.GEMINI_MODEL_FLASH_SUMMARY ||
     "gemini-2.5-flash-lite";
   const full = process.env.GEMINI_MODEL_FLASH || lite;
+  if (profile === "deep") {
+    if (task === "deep_reasoning" || task === "why") return full;
+    return lite;
+  }
+  if (profile === "fast") return lite;
   if (task === "deep_reasoning" || task === "why") return full;
   return lite;
 }

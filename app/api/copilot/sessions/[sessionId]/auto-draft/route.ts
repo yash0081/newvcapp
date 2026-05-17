@@ -21,6 +21,7 @@ import {
   normalizePreferenceDomain,
 } from "@/lib/copilot/preference-signals";
 import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
+import { attributeRankingEvents } from "@/lib/copilot/recommender-weights";
 
 export async function OPTIONS(req: Request) {
   return copilotPreflight(req);
@@ -143,7 +144,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
     await editAutoDraftSnippet({ admin, session, id, text });
   } else if (op === "remove") {
     const id = typeof body?.id === "string" ? body.id : "";
-    if (!id) return withCopilotCors(req, NextResponse.json({ error: "id is required" }, { status: 400 }));
+    if (!id) {
+      return withCopilotCors(req, NextResponse.json({ error: "id is required" }, { status: 400 }));
+    }
     const draft = getAutoDraft(session.metadata);
     const removed = draft.snippets.find((s) => s.id === id);
     await removeAutoDraftSnippet({ admin, session, id });
@@ -158,6 +161,19 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       : null;
     if (event) {
       void recordResearchPreferenceEvents({ admin, userId: user.id, dealId: session.deal_id, events: [event] }).catch(() => {});
+    }
+    // Label attribution for recommender SGD (non-blocking).
+    if (removed?.hostname) {
+      void attributeRankingEvents({
+        admin,
+        sessionId,
+        userId: user.id,
+        candidateHost: removed.hostname,
+        candidateUrl: removed.source_url || undefined,
+        label: 0,
+        labelKind: "reject_suggestion",
+        windowMinutes: 30,
+      }).catch(() => {});
     }
   } else if (op === "discard") {
     const draft = getAutoDraft(session.metadata);
@@ -175,6 +191,20 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       .filter((event): event is NonNullable<typeof event> => Boolean(event));
     if (events.length) {
       void recordResearchPreferenceEvents({ admin, userId: user.id, dealId: session.deal_id, events }).catch(() => {});
+    }
+    // Label attribution for recommender SGD (non-blocking, bulk mode for all hosts).
+    const uniqueHosts = new Set(draft.snippets.map((s) => s.hostname).filter((h): h is string => Boolean(h)));
+    for (const host of uniqueHosts) {
+      void attributeRankingEvents({
+        admin,
+        sessionId,
+        userId: user.id,
+        candidateHost: host,
+        label: 0,
+        labelKind: "reject_suggestion",
+        windowMinutes: 30,
+        bulk: true,
+      }).catch(() => {});
     }
   } else if (op === "approve") {
     const result = await promoteAutoDraftToAccepted({
@@ -204,6 +234,21 @@ export async function POST(req: Request, ctx: { params: Promise<{ sessionId: str
       .filter((event): event is NonNullable<typeof event> => Boolean(event));
     if (events.length) {
       void recordResearchPreferenceEvents({ admin, userId: user.id, dealId: session.deal_id, events }).catch(() => {});
+    }
+    // Label attribution for recommender SGD (non-blocking).
+    for (const snippet of result.promoted) {
+      if (snippet.hostname) {
+        void attributeRankingEvents({
+          admin,
+          sessionId,
+          userId: user.id,
+          candidateHost: snippet.hostname,
+          candidateUrl: snippet.source_url || undefined,
+          label: 1,
+          labelKind: "accept_draft",
+          windowMinutes: 30,
+        }).catch(() => {});
+      }
     }
   } else {
     return withCopilotCors(req, NextResponse.json({ error: "Unsupported op" }, { status: 400 }));

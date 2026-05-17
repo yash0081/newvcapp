@@ -3,8 +3,15 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser, getDealForUser } from "@/lib/research/db";
 import { generateResearchPlan } from "@/lib/research/planner";
 import { getRecentDealClaims } from "@/lib/copilot/db";
+import { profileFollowUpLimit, profileMaxSteps, type ResearchProfile } from "@/lib/research/mode-router";
 import { getUserSitePreferences, recordResearchPreferenceEvents } from "@/lib/research/preferences";
 import { loadResearchInternalContext } from "@/lib/research/context";
+import { buildPlannerFocus, buildPlannerGuidanceBlock } from "@/lib/research/public-output";
+
+function parseResearchProfile(raw: unknown): ResearchProfile {
+  if (raw === "fast" || raw === "standard" || raw === "deep") return raw;
+  return "standard";
+}
 
 function isPreferenceSource(website: string): boolean {
   const s = website.trim().toLowerCase();
@@ -15,16 +22,32 @@ export async function POST(req: Request) {
   const user = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as { dealId?: string; focus?: string; peerDealIds?: unknown; peerDealNames?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as {
+    dealId?: string;
+    focus?: string;
+    peerDealIds?: unknown;
+    peerDealNames?: unknown;
+    researchProfile?: unknown;
+  } | null;
   const dealId = typeof body?.dealId === "string" ? body.dealId : "";
-  const focus = typeof body?.focus === "string" ? body.focus.trim().slice(0, 1800) : "";
+  if (!dealId) return NextResponse.json({ error: "dealId is required" }, { status: 400 });
+
+  const userFocus = typeof body?.focus === "string" ? body.focus.trim().slice(0, 1800) : "";
+  const researchProfile = parseResearchProfile(body?.researchProfile);
   let peerDealIds = Array.isArray(body?.peerDealIds)
     ? body.peerDealIds.filter((id): id is string => typeof id === "string" && id !== dealId).slice(0, 8)
     : [];
   let peerDealNames = Array.isArray(body?.peerDealNames)
     ? body.peerDealNames.filter((name): name is string => typeof name === "string").slice(0, 8)
     : [];
-  if (!dealId) return NextResponse.json({ error: "dealId is required" }, { status: 400 });
+  const plannerFocus = buildPlannerFocus(
+    userFocus,
+    buildPlannerGuidanceBlock({
+      message: userFocus,
+      useCriteria: false,
+      useSimilarCompanies: peerDealIds.length > 0,
+    }),
+  );
 
   const { data: deal, error: dealErr } = await getDealForUser(dealId, user.id);
   if (dealErr) return NextResponse.json({ error: dealErr.message }, { status: 500 });
@@ -59,7 +82,7 @@ export async function POST(req: Request) {
     admin,
     userId: user.id,
     dealId,
-    query: focus || companyName,
+    query: userFocus || companyName,
     peerDealIds,
     mode: "planning",
   }).catch(() => "");
@@ -77,7 +100,9 @@ export async function POST(req: Request) {
     preferences: sitePrefs.preferred.map((p) => ({ ...p, usage_count: p.usage_count })),
     dislikedPreferences: sitePrefs.disliked.map((p) => ({ ...p, usage_count: p.usage_count })),
     recentClaims,
-    focus,
+    focus: plannerFocus,
+    peerCompanyNames: peerDealNames,
+    researchProfile,
   });
 
   const existing = await admin
@@ -116,12 +141,15 @@ export async function POST(req: Request) {
       version: 1,
       metadata: {
         summary: suggestion.summary,
-        focus: focus || null,
+        focus: userFocus || null,
+        planner_focus: plannerFocus !== userFocus ? plannerFocus : null,
         peer_deal_ids: peerDealIds,
         peer_deal_names: peerDealNames,
         planning_intent: suggestion.intent ?? null,
+        research_profile: researchProfile,
+        max_steps_cap: profileMaxSteps(researchProfile),
         pruning_notes: suggestion.pruningNotes ?? [],
-        follow_up_step_limit: suggestion.intent?.breadth === "broad" ? 2 : 1,
+        follow_up_step_limit: profileFollowUpLimit(researchProfile),
         initial_step_count: suggestion.steps.length,
         internal_context_used: Boolean(internalContext),
         generated_at: new Date().toISOString(),
@@ -136,7 +164,9 @@ export async function POST(req: Request) {
 
   if (!workflow) return NextResponse.json({ error: "Failed to create workflow" }, { status: 500 });
 
-  const stepRows = suggestion.steps.map((s, i) => ({
+  const maxSteps = profileMaxSteps(researchProfile);
+  const planSteps = suggestion.steps.slice(0, maxSteps);
+  const stepRows = planSteps.map((s, i) => ({
     workflow_id: workflow.id,
     position: i,
     status: "todo",
@@ -147,7 +177,7 @@ export async function POST(req: Request) {
       category: s.category ?? "general",
       generated: true,
       source_constrained: isPreferenceSource(s.website),
-      planning_intent_user_goal: suggestion.intent?.userGoal ?? (focus || null),
+      planning_intent_user_goal: suggestion.intent?.userGoal ?? (userFocus || null),
     },
   }));
   const stepIns = await admin
@@ -169,8 +199,8 @@ export async function POST(req: Request) {
           category: s.category ?? "general",
           deltaPreferenceScore: 0.02,
           deltaUsageCount: 0,
-          reason: focus
-            ? `Research planner selected this source for a focused plan: ${focus}`
+          reason: userFocus
+            ? `Research planner selected this source for a focused plan: ${userFocus}`
             : "Research planner selected this source for an auto-generated plan.",
           task: s.task,
         })),

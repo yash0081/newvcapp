@@ -1,11 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { StageSelect } from "@/components/crm/stage-select";
+import { StageSelect, type CrmStageOption } from "@/components/crm/stage-select";
 
-type Stage = "screened" | "in_process" | "invested" | "passed";
-
-export function NewCompanyForm() {
+export function NewCompanyForm({ stages }: { stages: CrmStageOption[] }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -18,7 +16,7 @@ export function NewCompanyForm() {
       const fd = new FormData(e.currentTarget);
       const company_name = String(fd.get("company_name") || "").trim();
       const website = String(fd.get("website") || "").trim();
-      const crm_stage = String(fd.get("crm_stage") || "screened") as Stage;
+      const crm_stage = String(fd.get("crm_stage") || "screened");
       const res = await fetch("/api/crm/companies/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -47,7 +45,7 @@ export function NewCompanyForm() {
         </div>
         <div className="w-full md:w-44">
           <label className="block text-xs text-zinc-600 mb-1">Stage</label>
-          <StageSelect name="crm_stage" defaultValue="screened" />
+          <StageSelect name="crm_stage" stages={stages} defaultValue="screened" />
         </div>
         <button className="crm-button" disabled={busy} type="submit">
           {busy ? "Creating…" : "Create"}

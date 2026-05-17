@@ -6,6 +6,7 @@ import { mapWithConcurrency } from "@/lib/async/concurrency";
 import { ingestStepOutputForRun, recomputeWorkflowStatus } from "@/lib/research/run-helpers";
 import { recordResearchPreferenceEvents } from "@/lib/research/preferences";
 import { loadResearchInternalContext } from "@/lib/research/context";
+import { profileExecuteTimeoutMs, researchProfileFromMetadata, type ResearchProfile } from "@/lib/research/mode-router";
 import { stripMarkdownText } from "@/lib/plain-text";
 
 function asCompanyName(meta: unknown): string {
@@ -62,8 +63,9 @@ async function runOneStep(args: {
   companyContext: string;
   peerDealIds: string[];
   workflowFocus: string;
+  researchProfile: ResearchProfile;
 }) {
-  const { admin, userId, workflowId, dealId, step, companyName, companyContext, peerDealIds, workflowFocus } = args;
+  const { admin, userId, workflowId, dealId, step, companyName, companyContext, peerDealIds, workflowFocus, researchProfile } = args;
 
   // Mark running.
   const runIns = await admin
@@ -108,6 +110,8 @@ async function runOneStep(args: {
       website: step.website,
       task: step.task,
       internalContext,
+      researchProfile,
+      timeoutMs: profileExecuteTimeoutMs(researchProfile),
     });
 
     if (result.ok) {
@@ -267,6 +271,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
     ? workflowMeta.peer_deal_ids.filter((id): id is string => typeof id === "string").slice(0, 8)
     : [];
   const workflowFocus = typeof workflowMeta.focus === "string" ? workflowMeta.focus : "";
+  const researchProfile = researchProfileFromMetadata(workflowMeta);
 
   const runs = await mapWithConcurrency(toRun, concurrency, (step) =>
     runOneStep({
@@ -279,6 +284,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ workflowId: s
       companyContext,
       peerDealIds,
       workflowFocus,
+      researchProfile,
     })
   );
 

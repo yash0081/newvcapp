@@ -1,6 +1,7 @@
 import { parseJsonFromResponseOrNull } from "@/lib/gemini";
 import { stripMarkdownText } from "@/lib/plain-text";
 import { getResearchModel } from "@/lib/research/research-model-env";
+import { sanitizeResearchNotes, sanitizeResearchSources } from "@/lib/research/public-output";
 import type { ResearchSource } from "@/lib/research/types";
 import { vertexRunWithTextMulti, vertexStreamText } from "@/lib/vertex";
 
@@ -23,21 +24,18 @@ function compactRun(run: ResearchSynthesisRun): Record<string, unknown> {
   return {
     company: stripMarkdownText(run.dealName),
     task: stripMarkdownText(run.task),
-    findings: stripMarkdownText(run.notes).slice(0, 5000),
-    sources: (run.sources ?? [])
-      .filter((source) => source.url)
-      .slice(0, 8)
-      .map((source) => ({
-        title: stripMarkdownText(source.title || host(source.url || "")),
-        url: source.url,
-        snippet: stripMarkdownText(source.snippet || "").slice(0, 500),
-      })),
+    findings: sanitizeResearchNotes(run.notes).slice(0, 5000),
+    sources: sanitizeResearchSources(run.sources).map((source) => ({
+      title: stripMarkdownText(source.title || host(source.url || "")),
+      url: source.url,
+      snippet: stripMarkdownText(source.snippet || "").slice(0, 500),
+    })),
   };
 }
 
 function fallbackAnswer(runs: ResearchSynthesisRun[]): string {
   const chunks = runs
-    .map((run) => stripMarkdownText(run.notes).trim())
+    .map((run) => sanitizeResearchNotes(run.notes).trim())
     .filter(Boolean)
     .slice(0, 5);
   return chunks.length

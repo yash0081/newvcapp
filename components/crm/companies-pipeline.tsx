@@ -8,68 +8,36 @@ import {
   CheckCircle2,
   FileUp,
   GripVertical,
+  LayoutGrid,
   Loader2,
   Plus,
+  Rows3,
   Search,
   UploadCloud,
 } from "lucide-react";
 import { NewCompanyForm } from "@/components/crm/new-company-form";
+import { stageAccentClass, stageDotClass } from "@/lib/crm/stages";
 import { cn } from "@/lib/utils";
-
-export type CompanyStage = "screened" | "in_process" | "invested" | "passed";
 
 export type PipelineCompany = {
   id: string;
   name: string;
   website: string;
-  stage: CompanyStage;
+  stage: string;
   createdAt: string;
+  activityCount?: number;
 };
 
-const stages: Array<{
-  id: CompanyStage;
+export type PipelineStage = {
+  key: string;
   label: string;
-  description: string;
-  dot: string;
-  accent: string;
-}> = [
-  {
-    id: "screened",
-    label: "Screened",
-    description: "Newly tracked",
-    dot: "bg-zinc-400",
-    accent: "border-zinc-200 bg-zinc-50",
-  },
-  {
-    id: "in_process",
-    label: "In process",
-    description: "Active diligence",
-    dot: "bg-blue-500",
-    accent: "border-blue-200 bg-blue-50",
-  },
-  {
-    id: "invested",
-    label: "Invested",
-    description: "Won deals",
-    dot: "bg-emerald-500",
-    accent: "border-emerald-200 bg-emerald-50",
-  },
-  {
-    id: "passed",
-    label: "Passed",
-    description: "Closed out",
-    dot: "bg-rose-500",
-    accent: "border-rose-200 bg-rose-50",
-  },
-];
+  position?: number;
+  is_default?: boolean;
+};
 
 function dateLabel(value: string): string {
   if (!value) return "No date";
   return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
-
-function stageLabel(stage: CompanyStage): string {
-  return stages.find((s) => s.id === stage)?.label ?? "Screened";
 }
 
 async function postJson(url: string, body?: unknown) {
@@ -83,31 +51,35 @@ async function postJson(url: string, body?: unknown) {
   return data as Record<string, unknown>;
 }
 
-export function CompaniesPipeline({ initialCompanies }: { initialCompanies: PipelineCompany[] }) {
+export function CompaniesPipeline({ initialCompanies, stages }: { initialCompanies: PipelineCompany[]; stages: PipelineStage[] }) {
   const [companies, setCompanies] = useState<PipelineCompany[]>(initialCompanies);
   const [query, setQuery] = useState("");
-  const [dragOverStage, setDragOverStage] = useState<CompanyStage | null>(null);
+  const [dragOverStage, setDragOverStage] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [busyIntake, setBusyIntake] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const activeCount = companies.filter((c) => c.stage === "screened" || c.stage === "in_process").length;
+  const stageList = useMemo(() => (stages.length ? stages : [{ key: "screened", label: "Screened" }]), [stages]);
+  const stageByKey = useMemo(() => new Map(stageList.map((stage) => [stage.key, stage])), [stageList]);
+  const activeCount = companies.filter((c) => c.stage !== "passed" && c.stage !== "invested").length;
 
   const filteredCompanies = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return companies;
     return companies.filter((company) =>
-      `${company.name} ${company.website} ${stageLabel(company.stage)}`.toLowerCase().includes(q),
+      `${company.name} ${company.website} ${stageByKey.get(company.stage)?.label ?? company.stage}`.toLowerCase().includes(q),
     );
-  }, [companies, query]);
+  }, [companies, query, stageByKey]);
 
-  async function moveCompany(dealId: string, nextStage: CompanyStage) {
+  const labelForStage = (stage: string) => stageByKey.get(stage)?.label ?? stage;
+
+  async function moveCompany(dealId: string, nextStage: string) {
     const company = companies.find((c) => c.id === dealId);
     if (!company || company.stage === nextStage) return;
     const previous = companies;
     setCompanies((prev) => prev.map((c) => (c.id === dealId ? { ...c, stage: nextStage } : c)));
     setError(null);
-    setMessage(`${company.name} moved to ${stageLabel(nextStage)}.`);
+    setMessage(`${company.name} moved to ${labelForStage(nextStage)}.`);
     try {
       await postJson("/api/crm/companies/stage", { deal_id: dealId, crm_stage: nextStage });
     } catch (e) {
@@ -214,7 +186,7 @@ export function CompaniesPipeline({ initialCompanies }: { initialCompanies: Pipe
             <Plus className="h-3.5 w-3.5 text-zinc-500" />
             <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Add company</h2>
           </div>
-          <NewCompanyForm />
+          <NewCompanyForm stages={stageList} />
         </div>
       </div>
 
@@ -226,39 +198,42 @@ export function CompaniesPipeline({ initialCompanies }: { initialCompanies: Pipe
               {filteredCompanies.length} shown
             </span>
           </div>
-          <p className="hidden text-xs text-zinc-500 sm:block">Drag between columns to update CRM stage</p>
+          <p className="hidden text-xs text-zinc-500 sm:block">
+            Drag between columns to update CRM stage
+          </p>
         </div>
 
-        <div className="grid flex-1 items-stretch gap-px bg-zinc-200 md:grid-cols-4">
-          {stages.map((stage) => {
-            const stageCompanies = filteredCompanies.filter((company) => company.stage === stage.id);
-            const isOver = dragOverStage === stage.id;
+        <div className="grid flex-1 items-stretch gap-px overflow-auto bg-zinc-200 md:auto-cols-[minmax(240px,1fr)] md:grid-flow-col">
+          {stageList.map((stage) => {
+            const stageCompanies = filteredCompanies.filter((company) => company.stage === stage.key);
+            const isOver = dragOverStage === stage.key;
             return (
               <div
-                key={stage.id}
+                key={stage.key}
                 className={cn(
-                  "flex min-h-[260px] flex-col bg-zinc-50 p-2.5 transition-colors",
-                  isOver && "bg-white ring-2 ring-inset ring-zinc-900/15",
+                  "flex min-h-[260px] flex-col p-2.5 transition-colors",
+                  stageAccentClass(stage.key),
+                  isOver && "ring-2 ring-inset ring-zinc-900/15",
                 )}
                 onDragOver={(e) => {
                   e.preventDefault();
-                  setDragOverStage(stage.id);
+                  setDragOverStage(stage.key);
                 }}
                 onDragLeave={() => setDragOverStage(null)}
                 onDrop={(e) => {
                   e.preventDefault();
                   const dealId = e.dataTransfer.getData("text/plain");
                   setDragOverStage(null);
-                  void moveCompany(dealId, stage.id);
+                  void moveCompany(dealId, stage.key);
                 }}
               >
                 <div className="mb-2 flex items-start justify-between gap-3 px-1">
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className={cn("h-2.5 w-2.5 rounded-full", stage.dot)} />
+                      <span className={cn("h-2.5 w-2.5 rounded-full", stageDotClass(stage.key))} />
                       <h3 className="text-sm font-semibold text-zinc-950">{stage.label}</h3>
                     </div>
-                    <p className="mt-1 text-xs text-zinc-500">{stage.description}</p>
+                    <p className="mt-1 text-xs text-zinc-500">{stage.is_default ? "Default stage" : "Custom stage"}</p>
                   </div>
                   <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-zinc-700 ring-1 ring-zinc-200">
                     {stageCompanies.length}
@@ -314,7 +289,7 @@ export function CompaniesPipeline({ initialCompanies }: { initialCompanies: Pipe
               </div>
             );
           })}
-        </div>
+          </div>
       </section>
     </div>
   );

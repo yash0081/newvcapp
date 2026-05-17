@@ -24,6 +24,7 @@ export type SavedChatMessage = {
 type ThreadRow = {
   id: string;
   title: string | null;
+  deal_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -60,13 +61,18 @@ function asSavedMessage(row: MessageRow): SavedChatMessage | null {
   };
 }
 
-export async function listSavedChatThreads(admin: SupabaseClient, userId: string): Promise<SavedChatThread[]> {
-  const threadsRes = await admin
+export async function listSavedChatThreads(
+  admin: SupabaseClient,
+  userId: string,
+  options?: { dealId?: string | null },
+): Promise<SavedChatThread[]> {
+  let query = admin
     .from("chat_threads")
-    .select("id, title, created_at, updated_at")
-    .eq("user_id", userId)
-    .order("updated_at", { ascending: false })
-    .limit(40);
+    .select("id, title, deal_id, created_at, updated_at")
+    .eq("user_id", userId);
+  const dealId = options?.dealId?.trim();
+  if (dealId) query = query.eq("deal_id", dealId);
+  const threadsRes = await query.order("updated_at", { ascending: false }).limit(40);
   if (threadsRes.error) throw threadsRes.error;
 
   const rows = (threadsRes.data ?? []) as ThreadRow[];
@@ -93,7 +99,7 @@ export async function listSavedChatThreads(admin: SupabaseClient, userId: string
       title,
       created_at: thread.created_at,
       updated_at: thread.updated_at,
-      dealId: typeof meta.dealId === "string" ? meta.dealId : null,
+      dealId: typeof thread.deal_id === "string" ? thread.deal_id : typeof meta.dealId === "string" ? meta.dealId : null,
       preview: stripMarkdownText(latest?.content ?? "").trim().slice(0, 120),
     };
   });
@@ -102,7 +108,7 @@ export async function listSavedChatThreads(admin: SupabaseClient, userId: string
 export async function loadSavedChatThread(admin: SupabaseClient, userId: string, threadId: string) {
   const threadRes = await admin
     .from("chat_threads")
-    .select("id, title, created_at, updated_at")
+    .select("id, title, deal_id, created_at, updated_at")
     .eq("id", threadId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -118,7 +124,7 @@ export async function loadSavedChatThread(admin: SupabaseClient, userId: string,
   if (messagesRes.error) throw messagesRes.error;
 
   const messages = ((messagesRes.data ?? []) as MessageRow[]).map(asSavedMessage).filter((m): m is SavedChatMessage => Boolean(m));
-  const lastDealId = [...messages].reverse().find((m) => m.dealId)?.dealId ?? null;
+  const lastDealId = typeof threadRes.data.deal_id === "string" ? threadRes.data.deal_id : [...messages].reverse().find((m) => m.dealId)?.dealId ?? null;
   const thread = threadRes.data as ThreadRow;
   return {
     thread: {
@@ -150,6 +156,7 @@ export async function ensureSavedChatThread(args: {
   userId: string;
   threadId?: string | null;
   firstMessage: string;
+  dealId?: string | null;
 }) {
   if (args.threadId) {
     const existing = await args.admin
@@ -159,7 +166,12 @@ export async function ensureSavedChatThread(args: {
       .eq("user_id", args.userId)
       .maybeSingle();
     if (existing.error) throw existing.error;
-    if (existing.data?.id) return { id: existing.data.id as string, created: false };
+    if (existing.data?.id) {
+      if (args.dealId) {
+        await args.admin.from("chat_threads").update({ deal_id: args.dealId }).eq("id", existing.data.id).eq("user_id", args.userId);
+      }
+      return { id: existing.data.id as string, created: false };
+    }
   }
 
   const inserted = await args.admin
@@ -167,6 +179,7 @@ export async function ensureSavedChatThread(args: {
     .insert({
       user_id: args.userId,
       title: titleFromMessage(args.firstMessage),
+      deal_id: args.dealId ?? null,
     })
     .select("id")
     .single();
@@ -216,6 +229,7 @@ export async function appendSavedChatMessage(args: {
     .update({
       updated_at: new Date().toISOString(),
       title: thread.data.title || titleFromMessage(args.content),
+      ...(args.dealId ? { deal_id: args.dealId } : {}),
     })
     .eq("id", args.threadId)
     .eq("user_id", args.userId);

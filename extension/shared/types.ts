@@ -48,13 +48,30 @@ export type DealListItem = {
 
 export type DomKeyValue = { key: string; value: string; confidence: number };
 
+export type DomSkimSection = {
+  index: number;
+  heading: string;
+  lead_text: string;
+  visible: boolean;
+  top_ratio: number;
+  link_count: number;
+};
+
+export type DomSkimOutline = {
+  sections: DomSkimSection[];
+  heading_text: string;
+  coverage_ratio: number;
+};
+
 export type DomSnapshot = {
   visible_text: string;
   page_title: string;
   hostname: string;
   url: string;
   key_value_claims: DomKeyValue[];
-  outbound_links?: Array<{ url: string; text: string }>;
+  outbound_links?: Array<{ url: string; text: string; heading?: string }>;
+  viewed_elements?: string[];
+  skim_outline?: DomSkimOutline;
 };
 
 export type ActiveDealHint = {

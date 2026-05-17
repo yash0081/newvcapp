@@ -9,6 +9,11 @@ import {
   sortPreferredRowsForSteering,
   trustedDomainSearchUrl,
 } from "@/lib/copilot/plan-next";
+import {
+  profileMaxSteps,
+  profilePlannerModelTier,
+  type ResearchProfile,
+} from "@/lib/research/mode-router";
 import type { ResearchPlanScope, ResearchPlanStepInput, ResearchPlanSuggestion, WebsiteCategory } from "@/lib/research/types";
 import {
   DEAL_INTEL_LAYER1A_SCHEMA_GUIDE,
@@ -51,6 +56,7 @@ function researchPlannerReasoningModel(): string {
 
 const BROAD_WEB_SOURCE = "web";
 const ALL_CATEGORIES: WebsiteCategory[] = ["founder", "product", "market", "traction", "hiring", "legal", "news", "general"];
+const BROAD_PLAN_SOFT_LIMIT = Number(process.env.RESEARCH_PLANNER_BROAD_MAX_STEPS || 14);
 
 const CATEGORY_TOPIC_HINTS: Record<WebsiteCategory, string[]> = {
   founder: ["founder", "team", "leadership", "education", "university", "school", "career", "background", "achievement"],
@@ -84,7 +90,45 @@ function asCategory(v: unknown): WebsiteCategory | undefined {
   return undefined;
 }
 
-function parseSuggestion(raw: string, candidates?: PlannerCandidate[], companyName?: string): ResearchPlanSuggestion | null {
+function isCompanyNameSourceHint(raw: string, companyNames: string[]): boolean {
+  const hint = stripMarkdownText(raw).trim().toLowerCase().replace(/\s+/g, " ");
+  if (!hint) return false;
+  // If the hint is literally "web" or "company-website", it's valid.
+  if (hint === "web" || hint === "company-website") return false;
+  // If the hint has a space and no dot, it's almost certainly a company name hallucinated as a source
+  if (hint.includes(" ") && !hint.includes(".")) return true;
+  // If it matches a known peer/company name exactly or contains it
+  return companyNames.some((name) => {
+    const normalized = name.trim().toLowerCase().replace(/\s+/g, " ");
+    return normalized.length >= 2 && (hint === normalized || hint.includes(normalized));
+  });
+}
+
+function normalizePlannerWebsiteHint(args: {
+  rawWebsite: string;
+  candidates?: PlannerCandidate[];
+  companyName?: string;
+  peerCompanyNames?: string[];
+}): { website: string; candidate?: PlannerCandidate } {
+  const rawWebsite = args.rawWebsite.trim();
+  if (!rawWebsite) return { website: BROAD_WEB_SOURCE };
+  const companyNames = [args.companyName ?? "", ...(args.peerCompanyNames ?? [])].filter(Boolean);
+  if (isCompanyNameSourceHint(rawWebsite, companyNames)) return { website: BROAD_WEB_SOURCE };
+  const candidateByWebsite = new Map<string, PlannerCandidate>(
+    (args.candidates ?? []).map((c): [string, PlannerCandidate] => [c.website.toLowerCase(), c])
+  );
+  const candidateByDomain = new Map<string, PlannerCandidate>();
+  for (const candidate of args.candidates ?? []) {
+    const domain = normalizeDomain(candidate.website);
+    if (domain) candidateByDomain.set(domain, candidate);
+  }
+  const exact = candidateByWebsite.get(rawWebsite.toLowerCase());
+  const domainMatch = candidateByDomain.get(normalizeDomain(rawWebsite));
+  const candidate = rawWebsite && args.candidates?.length ? exact ?? domainMatch : undefined;
+  return { website: candidate?.website ?? BROAD_WEB_SOURCE, candidate };
+}
+
+function parseSuggestion(raw: string, candidates?: PlannerCandidate[], companyName?: string, peerCompanyNames?: string[]): ResearchPlanSuggestion | null {
   const parsed = parseJsonFromResponseOrNull(raw) as
     | {
         summary?: unknown;
@@ -93,24 +137,13 @@ function parseSuggestion(raw: string, candidates?: PlannerCandidate[], companyNa
     | null;
   if (!parsed || typeof parsed !== "object") return null;
 
-  const candidateByWebsite = new Map<string, PlannerCandidate>(
-    (candidates ?? []).map((c): [string, PlannerCandidate] => [c.website.toLowerCase(), c])
-  );
-  const candidateByDomain = new Map<string, PlannerCandidate>();
-  for (const candidate of candidates ?? []) {
-    const domain = normalizeDomain(candidate.website);
-    if (domain) candidateByDomain.set(domain, candidate);
-  }
-
   const steps = Array.isArray(parsed.steps)
     ? parsed.steps
         .map((s): ResearchPlanStepInput | null => {
           const rawWebsite = (toStringSafe(s.website) || toStringSafe(s.sourceHint)).trim();
-          const exact = candidateByWebsite.get(rawWebsite.toLowerCase());
-          const domainMatch = rawWebsite ? candidateByDomain.get(normalizeDomain(rawWebsite)) : undefined;
-          const candidate = rawWebsite && candidates?.length ? exact ?? domainMatch : undefined;
+          const { website, candidate } = normalizePlannerWebsiteHint({ rawWebsite, candidates, companyName, peerCompanyNames });
           return {
-            website: rawWebsite ? candidate?.website ?? BROAD_WEB_SOURCE : BROAD_WEB_SOURCE,
+            website,
             task: stripMarkdownText(toStringSafe(s.task)),
             category: asCategory(s.category) ?? candidate?.category,
             dependsOnStepIds: Array.isArray(s.dependsOnStepIds)
@@ -147,7 +180,7 @@ function fallbackFromRaw(args: {
   for (const line of lines) {
     const m = line.match(/^(?:\d+[.)]|[-*•])\s+(.+)$/);
     if (m && m[1]) enumeratedTasks.push(m[1].trim());
-    if (enumeratedTasks.length >= 6) break;
+    if (enumeratedTasks.length >= 12) break;
   }
 
   if (enumeratedTasks.length < 3) return null;
@@ -238,15 +271,27 @@ function clampInt(n: number, lo: number, hi: number): number {
 }
 
 function stepBudgetForBreadth(breadth: ResearchPlanIntent["breadth"]): number {
-  if (breadth === "broad") return 6;
-  if (breadth === "standard") return 4;
+  if (breadth === "broad") return Math.max(12, BROAD_PLAN_SOFT_LIMIT);
+  if (breadth === "standard") return 6;
   return 3;
 }
 
-function capIntentSteps(intent: ResearchPlanIntent): ResearchPlanIntent {
-  return {
+function capIntentSteps(intent: ResearchPlanIntent, profile: ResearchProfile = "standard"): ResearchPlanIntent {
+  const profileCap = profileMaxSteps(profile);
+  const budget = Math.min(stepBudgetForBreadth(intent.breadth), profileCap);
+  let minSteps = profile === "fast" ? 1 : 2;
+  if (intent.breadth === "standard") minSteps = profile === "fast" ? 1 : 3;
+  if (intent.breadth === "broad") minSteps = profile === "fast" ? 2 : profile === "standard" ? 3 : 5;
+  const capped = {
     ...intent,
-    maxSteps: clampInt(intent.maxSteps, 1, stepBudgetForBreadth(intent.breadth)),
+    maxSteps: intent.breadth === "broad"
+      ? Math.max(minSteps, Number.isFinite(intent.maxSteps) ? Math.round(intent.maxSteps) : budget)
+      : clampInt(intent.maxSteps, minSteps, budget),
+  };
+  return {
+    ...capped,
+    maxSteps: Math.min(capped.maxSteps, profileCap),
+    breadth: profile === "fast" && capped.breadth === "broad" ? "standard" : capped.breadth,
   };
 }
 
@@ -388,6 +433,28 @@ function extractExplicitExclusions(text: string): string[] {
   return uniqueCleanStrings(excluded, 12);
 }
 
+/** Sync planner intent (no LLM) — used for fast chat web checks and query shaping. */
+export function inferLightweightResearchIntent(args: {
+  message: string;
+  openGapFields?: string[];
+}): Pick<
+  ResearchPlanIntent,
+  "userGoal" | "requiredTopics" | "allowedCategories" | "excludedTopics" | "includeRiskCheck" | "mustCompare"
+> {
+  const intent = defaultIntent({
+    focus: args.message.trim().slice(0, 1800),
+    openGapFields: args.openGapFields ?? [],
+  });
+  return {
+    userGoal: intent.userGoal,
+    requiredTopics: intent.requiredTopics,
+    allowedCategories: intent.allowedCategories,
+    excludedTopics: intent.excludedTopics,
+    includeRiskCheck: intent.includeRiskCheck,
+    mustCompare: intent.mustCompare,
+  };
+}
+
 function defaultIntent(args: {
   focus: string;
   openGapFields: string[];
@@ -404,17 +471,20 @@ function defaultIntent(args: {
   const finalCategories = allowedCategories.length ? allowedCategories : (["general"] as WebsiteCategory[]);
   const requiredTopics = focus ? uniqueCleanStrings([...extractTopicHints(focus), focus], 10) : args.openGapFields.slice(0, 8);
 
-  return capIntentSteps({
+  return capIntentSteps(
+    {
     userGoal: focus || "Fill the highest-signal open diligence gaps for this company.",
     breadth: broad ? "broad" : finalCategories.length <= 2 ? "narrow" : "standard",
     requiredTopics,
     excludedTopics: extractExplicitExclusions(focus),
     allowedCategories: finalCategories,
     sourceStrategy: "Use user-preferred sources only when they fit the inferred task categories and avoid disliked sources.",
-    maxSteps: broad ? 6 : finalCategories.length <= 2 ? 3 : 4,
+    maxSteps: broad ? 8 : finalCategories.length <= 2 ? 3 : 6,
     includeRiskCheck: /\b(risk|negative|red flag|concern|lawsuit|compliance|security|privacy|regulatory)\b/i.test(focus),
     mustCompare: /\b(compare|versus| vs |similar|overlap|common|between|against|alternative|competitor)\b/i.test(focus),
-  });
+  },
+    "standard",
+  );
 }
 
 function parseIntent(raw: string, fallback: ResearchPlanIntent): ResearchPlanIntent | null {
@@ -442,7 +512,10 @@ function parseIntent(raw: string, fallback: ResearchPlanIntent): ResearchPlanInt
         .filter((c): c is WebsiteCategory => Boolean(c))
     : [];
   const allowedCategories = allowed.length ? Array.from(new Set(allowed)) : fallback.allowedCategories;
-  const maxSteps = clampInt(Number(parsed.maxSteps ?? fallback.maxSteps), 1, 6);
+  const parsedMax = Number(parsed.maxSteps ?? fallback.maxSteps);
+  const maxSteps = breadth === "broad"
+    ? Math.max(4, Number.isFinite(parsedMax) ? Math.round(parsedMax) : fallback.maxSteps)
+    : clampInt(parsedMax, 1, stepBudgetForBreadth(breadth));
 
   return capIntentSteps({
     userGoal: stripMarkdownText(toStringSafe(parsed.userGoal)).trim() || fallback.userGoal,
@@ -463,16 +536,24 @@ async function deriveResearchIntent(args: {
   recentClaims?: Array<{ key?: string; value: string; source?: string }>;
   focus: string;
   preferencesSummary: string;
+  researchProfile?: ResearchProfile;
 }): Promise<ResearchPlanIntent> {
+  const profile = args.researchProfile ?? "standard";
   const openGaps = computeOpenGaps({
     metadata: args.metadata ?? undefined,
     recentClaims: args.recentClaims ?? [],
     sessionAcceptedSnippets: [],
   });
-  const fallback = defaultIntent({
-    focus: args.focus,
-    openGapFields: openGaps.map((g) => g.field),
-  });
+  const fallback = capIntentSteps(
+    defaultIntent({
+      focus: args.focus,
+      openGapFields: openGaps.map((g) => g.field),
+    }),
+    profile,
+  );
+  if (profile === "fast" && process.env.RESEARCH_ENABLE_LLM_INTENT !== "1") {
+    return fallback;
+  }
   if (process.env.RESEARCH_ENABLE_LLM_INTENT !== "1") {
     return fallback;
   }
@@ -501,7 +582,7 @@ Rules:
 - For competitor requests, only companies explicitly framed as competitors, alternatives, substitutes, or similar products should drive competitor/product research. Other named companies should stay limited to the role the user gave them.
 - A matrix, table, or side-by-side output request changes the output format/tool choice; it does not expand the research scope.
 - Use user source preferences for source selection and evidence style only; never expand the research scope just because a preferred website exists.
-- Keep maxSteps between 1 and 6. Use 1-3 for narrow asks, 3-4 for standard asks, and 4-6 for broad asks.
+- For narrow asks, use 2-3 maxSteps. For standard asks, 3-6 steps. For broad/deep asks, use 5-12 steps. Never produce 1-2 giant vague steps.
 - userGoal must name the company (or "this company" if unknown) and state the **deliverable** in plain language (what will be verified, mapped, or decided) — not "do diligence" or "research the startup."
 - Use plain text only inside JSON strings; do not use formatting markers.`;
 
@@ -519,7 +600,8 @@ Rules:
       ],
       false,
     );
-    return parseIntent(raw, fallback) ?? fallback;
+    const parsed = parseIntent(raw, fallback);
+    return parsed ? capIntentSteps(parsed, profile) : fallback;
   } catch {
     return fallback;
   }
@@ -543,9 +625,10 @@ function filterSuggestionForIntent(suggestion: ResearchPlanSuggestion, intent: R
 
   const scopedFallback = suggestion.steps.filter((step) => intent.breadth === "broad" || allowed.has(step.category ?? "general"));
   const steps = dedupeResearchSteps(filtered.length ? filtered : scopedFallback.length ? scopedFallback : suggestion.steps.slice(0, 1));
+  const cappedSteps = intent.breadth === "broad" ? steps : steps.slice(0, intent.maxSteps);
   return {
     summary: suggestion.summary,
-    steps: steps.slice(0, intent.maxSteps),
+    steps: cappedSteps,
   };
 }
 
@@ -555,8 +638,11 @@ async function reviewResearchPlan(args: {
   suggestion: ResearchPlanSuggestion;
   candidates: PlannerCandidate[];
   preferencesSummary: string;
+  peerCompanyNames?: string[];
+  researchProfile?: ResearchProfile;
 }): Promise<ResearchPlanSuggestion> {
-  if (process.env.RESEARCH_ENABLE_LLM_PLAN_REVIEW !== "1") {
+  const profile = args.researchProfile ?? "standard";
+  if (profile === "fast" || process.env.RESEARCH_ENABLE_LLM_PLAN_REVIEW !== "1") {
     return filterSuggestionForIntent(args.suggestion, args.intent);
   }
   const prompt = `You are the lightweight review and pruning agent for a VC research plan.
@@ -587,8 +673,10 @@ Rules:
 - Do not research how two companies compare just because both are named. Compare only the dimensions requested by intent.userGoal.
 - Treat matrix/table output as an output format request, not as permission to add broad comparison dimensions.
 - Remove duplicate steps that research the same concept from the same angle. If a second pass is genuinely needed because it follows up on a new hypothesis, contradiction, missing source, or newly found entity, the task text must say what changed and what the new angle is.
-- Keep at most intent.maxSteps steps. Prefer fewer precise steps over a broad sweep when intent.breadth is narrow.
+- For narrow asks, keep 2-3 focused steps. For standard asks, 3-6 steps. For broad/deep asks, 5-12 steps. Never produce 1-2 giant vague steps.
 - Preserve user website preferences when they fit the intent, but never let preferences add irrelevant topics.
+- Never use a company name as the website/source hint. If a step is not constrained to a real source family or candidate hint, use "web".
+- Peer/benchmark company names are not source hints and should not appear in the website field.
 - Every task must be directly answerable, company-specific, and useful to the final answer.
 - summary must **start with the company name** and state what this plan will **produce** (outcome), not generic "research" language.
 - Use plain text only inside JSON strings; do not use formatting markers.`;
@@ -601,11 +689,12 @@ Rules:
         { label: "Research intent", value: args.intent },
         { label: "Draft plan", value: args.suggestion },
         { label: "Candidate source hints", value: args.candidates },
+        { label: "Peer or benchmark company names that must not be source hints", value: args.peerCompanyNames ?? [] },
         { label: "User website preferences summary", value: args.preferencesSummary || "No learned source preferences yet." },
       ],
       false,
     );
-    const parsed = parseSuggestion(raw, args.candidates, args.companyName);
+    const parsed = parseSuggestion(raw, args.candidates, args.companyName, args.peerCompanyNames);
     return filterSuggestionForIntent(parsed ?? args.suggestion, args.intent);
   } catch {
     return filterSuggestionForIntent(args.suggestion, args.intent);
@@ -772,7 +861,10 @@ export async function generateResearchPlan(args: {
   dislikedPreferences?: UserPref[];
   recentClaims?: Array<{ key?: string; value: string; source?: string }>;
   focus?: string;
+  peerCompanyNames?: string[];
+  researchProfile?: ResearchProfile;
 }): Promise<ResearchPlanSuggestion> {
+  const profile = args.researchProfile ?? "standard";
   const focus = args.focus?.trim().slice(0, 1800) || "";
   const initialPreferencesSummary = buildPreferencesSummary({
     preferred: args.preferences,
@@ -784,6 +876,7 @@ export async function generateResearchPlan(args: {
     recentClaims: args.recentClaims,
     focus,
     preferencesSummary: initialPreferencesSummary,
+    researchProfile: profile,
   });
   const plannerContext = buildPlannerCandidates({
     companyName: args.companyName,
@@ -820,7 +913,7 @@ Return strict JSON only with shape:
   ]
 }
 Rules:
-- Produce no more than the intent maxSteps. Use fewer when the user asked a narrow question. They should usually be source-agnostic tasks, not website tasks.
+- For narrow/fast asks, produce no more than intent maxSteps and prefer 1-3 steps. For broad/deep asks, include every materially distinct step needed to answer the request instead of forcing a tiny fixed cap. They should usually be source-agnostic tasks, not website tasks.
 - **summary** (required): 1–2 sentences. **First sentence must include the company name** and the concrete outcome (e.g. "verify X", "map Y competitors", "reconcile Z"). No boilerplate like "comprehensive research plan" or "diligence workflow" without naming what gets decided.
 - Each task must be a clear, answerable research question for this exact company.
 - Tie every task to the research intent first, then to a real relevant open gap or hypothesis. Avoid vague "look into X" work and whole-company background sweeps.
@@ -840,21 +933,23 @@ Rules:
   let raw = "";
   try {
     raw = await vertexRunWithTextMulti(
-      getResearchModel("flash"),
+      getResearchModel(profilePlannerModelTier(profile)),
       prompt,
       [
         { label: "Company name", value: args.companyName || "Unknown" },
         { label: "Known company context", value: args.companyContext || "No context available yet." },
+        { label: "Research profile", value: profile },
         { label: "User focus", value: focus || "No specific focus; choose the best next diligence plan." },
         { label: "Research intent", value: intent },
         { label: "Relevant open research gaps", value: plannerContext.openGapFields },
         { label: "Candidate source hints for source-constrained steps", value: plannerContext.candidates },
+        { label: "Peer or benchmark company names that must not be source hints", value: args.peerCompanyNames ?? [] },
         { label: "User website preferences summary", value: plannerContext.preferencesSummary || "No learned source preferences yet." },
         { label: "Search seed query", value: plannerContext.seedQuery },
       ],
       false
     );
-    const parsed = parseSuggestion(raw, plannerContext.candidates, args.companyName);
+    const parsed = parseSuggestion(raw, plannerContext.candidates, args.companyName, args.peerCompanyNames);
     if (parsed) {
       const reviewed = await reviewResearchPlan({
         companyName: args.companyName,
@@ -862,6 +957,8 @@ Rules:
         suggestion: filterSuggestionForIntent(parsed, intent),
         candidates: plannerContext.candidates,
         preferencesSummary: plannerContext.preferencesSummary,
+        peerCompanyNames: args.peerCompanyNames,
+        researchProfile: profile,
       });
       return {
         ...reviewed,

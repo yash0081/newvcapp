@@ -148,6 +148,34 @@ button {
   cursor: not-allowed;
 }
 
+.deep-toggle {
+  background: transparent;
+  border: 1px solid var(--vc-line);
+  color: #71717a;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  padding: 3px 8px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.deep-toggle:hover:not(:disabled) {
+  border-color: #d4d4d8;
+  color: #3f3f46;
+  background: var(--vc-soft);
+}
+
+.deep-toggle.active {
+  background: #fdf2f8;
+  color: #be123c;
+  border-color: #fbcfe8;
+  box-shadow: 0 2px 6px rgba(225, 29, 72, 0.08);
+}
+
 .tabs {
   display: flex;
   gap: 6px;
