@@ -433,6 +433,22 @@ function extractExplicitExclusions(text: string): string[] {
   return uniqueCleanStrings(excluded, 12);
 }
 
+function explicitBroadResearchRequested(focus: string): boolean {
+  const text = focus.trim();
+  if (!text) return true;
+  if (/\b(everything|full|complete|comprehensive|all fields|all schema|general diligence|full diligence|all angles|whole company)\b/i.test(text)) {
+    return true;
+  }
+  if (/\b(deep dive|deep research)\b/i.test(text)) {
+    const inferredCategories = inferCategoriesFromText(text).filter((category) => category !== "general");
+    const hasSpecificTopic =
+      inferredCategories.length > 0 ||
+      /\b(founder|team|product|customer|revenue|traction|funding|competitor|market|pricing|patent|risk|legal|hiring|news)\b/i.test(text);
+    return !hasSpecificTopic;
+  }
+  return false;
+}
+
 /** Sync planner intent (no LLM) — used for fast chat web checks and query shaping. */
 export function inferLightweightResearchIntent(args: {
   message: string;
@@ -460,7 +476,7 @@ function defaultIntent(args: {
   openGapFields: string[];
 }): ResearchPlanIntent {
   const focus = args.focus.trim();
-  const broad = !focus || /\b(everything|full|complete|comprehensive|deep dive|deep research|all fields|all schema|general diligence)\b/i.test(focus);
+  const broad = explicitBroadResearchRequested(focus);
   const inferred = inferCategoriesFromText(focus);
   const gapCategories = args.openGapFields.map(categoryForGap);
   const allowedCategories = broad
@@ -576,6 +592,8 @@ Return strict JSON only:
 
 Rules:
 - Narrow asks should stay narrow. Standard asks can combine adjacent topics. Broad asks are only for requests like full diligence, everything, comprehensive, or deep research.
+- Deep research mode means higher confidence, more source checking, and better synthesis around the requested scope. It may include adjacent subtopics when they are necessary context, corroboration, contradiction checks, or direct implications of the userGoal.
+- A phrase like "deep research founder background" is founder-centered research, not whole-company diligence. Appropriate expansion can include education, prior roles, co-founder history, achievements, credibility signals, and controversies; it should not drift into unrelated TAM, pricing, generic competitors, or customer traction unless those directly affect the founder question.
 - allowedCategories must include only task/source families needed to answer the userGoal.
 - excludedTopics should name schema areas that should not be researched for this prompt.
 - Classify named companies by role. If a company is named only as a matrix row, benchmark row, peer reference, or common-investor counterpart, do not turn that company into a product, founder, market, or competitor research target.
@@ -914,9 +932,11 @@ Return strict JSON only with shape:
 }
 Rules:
 - For narrow/fast asks, produce no more than intent maxSteps and prefer 1-3 steps. For broad/deep asks, include every materially distinct step needed to answer the request instead of forcing a tiny fixed cap. They should usually be source-agnostic tasks, not website tasks.
+- Deep profile is not automatic whole-company scope expansion. If intent.breadth is narrow or standard, keep the plan centered on that scope; expand only into adjacent subquestions that directly help answer, verify, falsify, or contextualize the userGoal.
 - **summary** (required): 1–2 sentences. **First sentence must include the company name** and the concrete outcome (e.g. "verify X", "map Y competitors", "reconcile Z"). No boilerplate like "comprehensive research plan" or "diligence workflow" without naming what gets decided.
 - Each task must be a clear, answerable research question for this exact company.
 - Tie every task to the research intent first, then to a real relevant open gap or hypothesis. Avoid vague "look into X" work and whole-company background sweeps.
+- Adjacent tasks are allowed when relevant and necessary. The task text must make the connection clear, for example by saying it verifies, contextualizes, pressure-tests, or resolves a contradiction in the requested topic.
 - Each task should name the exact schema field(s) it is trying to fill, verify, or falsify.
 - Do not compare products, markets, founders, or technology for a named company that the user only mentioned as a matrix row, peer reference, benchmark row, or common-investor counterpart.
 - When the user asks for competitors, keep competitor/product-similarity work focused on companies explicitly framed as competitors, alternatives, substitutes, or similar products.

@@ -93,7 +93,7 @@ test("shouldUseLlmModeRouter skips obvious single-fact lookups", () => {
   );
 });
 
-test("classifyResearchMode requests brief web even when saved context looks sufficient", () => {
+test("classifyResearchMode uses saved context for non-current traction summaries", () => {
   const decision = classifyResearchMode({
     message: "Summarize traction for this company",
     deepModeEnabled: false,
@@ -102,7 +102,7 @@ test("classifyResearchMode requests brief web even when saved context looks suff
     docChunkCount: 4,
   });
   assert.equal(decision.profile, "fast");
-  assert.equal(decision.needsWeb, true);
+  assert.equal(decision.needsWeb, false);
 });
 
 test("classifyResearchMode avoids deep workflow for document generation", () => {
@@ -118,7 +118,7 @@ test("classifyResearchMode avoids deep workflow for document generation", () => 
   assert.equal(decision.needsWorkflow, false);
 });
 
-test("classifyResearchMode requests web for founder background questions", () => {
+test("classifyResearchMode uses saved context for non-current founder background questions", () => {
   const decision = classifyResearchMode({
     message: "What is the founder's technical background?",
     deepModeEnabled: false,
@@ -126,7 +126,7 @@ test("classifyResearchMode requests web for founder background questions", () =>
     factChunkCount: 5,
     docChunkCount: 4,
   });
-  assert.equal(decision.needsWeb, true);
+  assert.equal(decision.needsWeb, false);
   assert.equal(decision.needsWorkflow, false);
 });
 

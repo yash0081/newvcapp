@@ -198,6 +198,7 @@ Rules:
 - If Source constraint mode is "broad_web", choose the best sources for the task and do not force any particular website.
 - If Source constraint mode is "source_constrained", use the provided source hint as a required target. If the source is inaccessible or has no relevant evidence, say that explicitly in notes.
 - Stay focused on the research task. Do not return adjacent facts that fail to answer it.
+- Deep research means stronger verification around this task. Include adjacent facts only when they directly explain, verify, falsify, or contextualize the task.
 - Use external web evidence where possible.
 - Use the internal workspace context first. If it answers part of the task, incorporate it and use web research to verify, update, or fill missing details. Do not repeat internal context as if it came from the web.
 - Use deterministic database signals when supplied for keyword or SQL-style questions, such as common investors, saved traction, saved competitors, saved customers, and prior document evidence.
@@ -208,6 +209,7 @@ Rules:
   - **task**: a single **answerable** instruction that names the company and a **schema angle** (e.g. funding_round, competitors, founder_experience) or a **named entity** to resolve. Must differ from the step you just ran.
   - **website**: usually **"web"**. Use a specific domain only when a registry, filing, product docs, or official site is clearly the right next hop.
 - Do not suggest follow-ups for generic company overviews, duplicate angles you already resolved, or "nice to have" context unrelated to the original task.
+- Suggested follow-ups must directly improve the answer to the original task. They may expand into adjacent subquestions when necessary, but do not add follow-ups for unrelated schema gaps discovered incidentally.
 - If evidence is weak, say so explicitly in notes.
 - Notes must be clean regular text. Do not use headings, bold markers, bullet characters, numbered lists, code fences, or link markup.
 - Map every finding to the canonical Deal Intel schema when possible:

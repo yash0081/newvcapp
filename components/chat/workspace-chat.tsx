@@ -1,7 +1,7 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, CheckCircle2, Circle, ExternalLink, FileText, Loader2, MessageSquare, Plus, Settings2, Sparkles, Trash2, Workflow, StopCircle, Search, History, Library, UploadCloud, Square, X, Paperclip, Send } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowUp, CheckCircle2, Circle, ExternalLink, FileText, Loader2, MessageSquare, Plus, Settings2, Sparkles, Trash2, Workflow, StopCircle, Search, History, Library, UploadCloud, Square, X, Paperclip, Send, Table2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SelectBox } from "@/components/ui/select-box";
 import { stripMarkdownText } from "@/lib/plain-text";
@@ -115,6 +115,33 @@ type ChatAction =
       type: "record_update";
       label: string;
       detail: string;
+    }
+  | {
+      type: "propose_create_matrix";
+      label: string;
+      name: string;
+      dealIds: string[];
+      dealNames: string[];
+      columnTheme: string | null;
+      explicitColumns: Array<{ label: string; prompt?: string; dataType?: string }>;
+    }
+  | {
+      type: "matrix_snapshot";
+      label: string;
+      href?: string;
+      viewName?: string | null;
+      grid?: {
+        viewName: string | null;
+        companyNames: string[];
+        columnLabels: string[];
+        values: Array<Array<string | null>>;
+        filledCount: number;
+        truncated: boolean;
+      };
+      rows?: Array<{ dealName: string; columnLabel: string; valueText: string | null; status: string }>;
+      filledCount?: number;
+      truncated?: boolean;
+      markdown?: string;
     };
 
 type ChatCitation = {
@@ -148,6 +175,7 @@ type ChatToolPermissions = {
   useSimilarCompanySearch: boolean;
   useCriteriaAnalysis: boolean;
   runWorkflows: boolean;
+  createMatrices: boolean;
 };
 
 const DEFAULT_TOOL_PERMISSIONS: ChatToolPermissions = {
@@ -158,6 +186,7 @@ const DEFAULT_TOOL_PERMISSIONS: ChatToolPermissions = {
   useSimilarCompanySearch: true,
   useCriteriaAnalysis: true,
   runWorkflows: true,
+  createMatrices: true,
 };
 
 const TOOL_PERMISSION_LABELS: Array<{ key: keyof ChatToolPermissions; label: string }> = [
@@ -168,6 +197,7 @@ const TOOL_PERMISSION_LABELS: Array<{ key: keyof ChatToolPermissions; label: str
   { key: "useSimilarCompanySearch", label: "Use similar-company search" },
   { key: "useCriteriaAnalysis", label: "Use criteria analysis" },
   { key: "runWorkflows", label: "Run saved workflows" },
+  { key: "createMatrices", label: "Create matrices" },
 ];
 
 type PreflightResearchStep = {
@@ -385,7 +415,8 @@ function isProposalAction(action: ChatAction): boolean {
     action.type === "propose_generate_document" ||
     action.type === "propose_research" ||
     action.type === "propose_record_update" ||
-    action.type === "propose_custom_workflow"
+    action.type === "propose_custom_workflow" ||
+    action.type === "propose_create_matrix"
   );
 }
 
@@ -398,11 +429,14 @@ function isRunnableAction(action: ChatAction, permissions: ChatToolPermissions):
   );
 }
 
+function isInternalAppHref(href: string): boolean {
+  return href.startsWith("/home/");
+}
+
 function isLegacyMatrixAction(action: { type?: unknown; href?: unknown }): boolean {
   return (
     action.type === "propose_matrix_fill" ||
-    action.type === "matrix_preview" ||
-    (action.type === "open_link" && typeof action.href === "string" && action.href.startsWith("/home/matrix"))
+    action.type === "matrix_preview"
   );
 }
 
@@ -591,6 +625,118 @@ function ResearchTracePanel({
   );
 }
 
+function MatrixSnapshotCard({ action }: { action: Extract<ChatAction, { type: "matrix_snapshot" }> }) {
+  const title = action.viewName || action.label;
+  const grid = action.grid;
+  const legacyRows = action.rows ?? [];
+  const subtitle = grid
+    ? `${grid.companyNames.length} companies · ${grid.columnLabels.length} columns${grid.truncated ? " · more in full matrix" : ""}`
+    : legacyRows.length
+      ? `${legacyRows.length} cells`
+      : "Saved matrix";
+
+  const table = grid && (grid.companyNames.length || grid.columnLabels.length) ? (
+    <div className="mt-3 max-h-[min(52vh,420px)] overflow-auto rounded-xl border border-zinc-200 bg-zinc-50/40">
+      <table className="w-max min-w-full border-separate border-spacing-0 text-xs">
+        <thead className="sticky top-0 z-10 bg-white shadow-[0_1px_0_0_rgba(228,228,231,0.8)]">
+          <tr>
+            <th className="sticky left-0 z-20 min-w-[9rem] max-w-[9rem] border-b border-r border-zinc-200 bg-white px-3 py-2 text-left text-[10px] font-extrabold uppercase tracking-widest text-zinc-500">
+              Company
+            </th>
+            {grid.columnLabels.map((column) => (
+              <th
+                key={column}
+                className="min-w-[10rem] max-w-[14rem] border-b border-r border-zinc-200 bg-white px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-zinc-950"
+              >
+                <span className="block truncate">{column}</span>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {grid.companyNames.map((company, rowIndex) => (
+            <tr key={company} className="bg-white">
+              <td className="sticky left-0 z-[1] min-w-[9rem] max-w-[9rem] border-b border-r border-zinc-200 bg-white px-3 py-2 font-semibold text-zinc-950">
+                <span className="block truncate">{company}</span>
+              </td>
+              {grid.columnLabels.map((column, columnIndex) => (
+                <td
+                  key={`${company}-${column}`}
+                  className="min-w-[10rem] max-w-[14rem] border-b border-r border-zinc-100 px-3 py-2 align-top text-zinc-800"
+                >
+                  <span className="block whitespace-pre-wrap leading-relaxed">
+                    {grid.values[rowIndex]?.[columnIndex]?.trim() || "—"}
+                  </span>
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : legacyRows.length ? (
+    <div className="mt-3 overflow-hidden rounded-xl border border-zinc-100">
+      <table className="w-full text-left text-xs">
+        <thead>
+          <tr className="border-b border-zinc-100 bg-zinc-50/80">
+            <th className="px-3 py-2 font-semibold text-zinc-600">Company</th>
+            <th className="px-3 py-2 font-semibold text-zinc-600">Column</th>
+            <th className="px-3 py-2 font-semibold text-zinc-600">Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {legacyRows.map((row, index) => (
+            <tr key={`${row.dealName}-${row.columnLabel}-${index}`} className="border-b border-zinc-50 last:border-0">
+              <td className="px-3 py-2 font-medium text-zinc-900">{row.dealName}</td>
+              <td className="px-3 py-2 text-zinc-600">{row.columnLabel}</td>
+              <td className="px-3 py-2 text-zinc-800">{row.valueText?.trim() || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : action.markdown ? (
+    <p className="mt-3 text-xs leading-relaxed text-zinc-600">{plainChatText(action.markdown).slice(0, 400)}</p>
+  ) : (
+    <p className="mt-3 text-xs text-zinc-500">Open the matrix to view or fill cells.</p>
+  );
+
+  const body = (
+    <div className="flex items-start gap-3">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-zinc-100 text-zinc-700">
+        <Table2 className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-zinc-950">{title}</div>
+            <div className="mt-0.5 text-xs text-zinc-500">{subtitle}</div>
+          </div>
+          {action.href ? <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-500" /> : null}
+        </div>
+        {table}
+      </div>
+    </div>
+  );
+
+  if (action.href) {
+    return (
+      <a
+        href={action.href}
+        className="block w-full max-w-full rounded-2xl border border-zinc-200 bg-white p-3 text-left shadow-sm transition hover:border-zinc-300 hover:shadow-md md:w-[760px]"
+      >
+        {body}
+      </a>
+    );
+  }
+
+  return (
+    <div className="block w-full max-w-full rounded-2xl border border-zinc-200 bg-white p-3 text-left shadow-sm md:w-[760px]">
+      {body}
+    </div>
+  );
+}
+
 function DocumentPreviewCard({ action }: { action: Extract<ChatAction, { type: "document_preview" }> }) {
   const content = plainChatText(action.content || action.excerpt || "");
   const body = (
@@ -677,9 +823,36 @@ export function WorkspaceChat({
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   const sessionAbortRef = useRef<AbortController | null>(null);
   const cancelRequestedRef = useRef(false);
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
+
+  const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const container = messagesScrollRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior });
+  }, []);
 
   useEffect(() => {
     setMounted(true);
+    shouldStickToBottomRef.current = true;
+    requestAnimationFrame(() => scrollMessagesToBottom("auto"));
+  }, [scrollMessagesToBottom]);
+
+  useLayoutEffect(() => {
+    if (!shouldStickToBottomRef.current) return;
+    scrollMessagesToBottom(messages.length ? "smooth" : "auto");
+  }, [messages, busy, loadingThread, scrollMessagesToBottom]);
+
+  useEffect(() => {
+    const container = messagesScrollRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      shouldStickToBottomRef.current = distanceFromBottom < 120;
+    };
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
   }, []);
 
   const selectedDeal = useMemo(() => deals.find((d) => d.id === dealId) ?? null, [deals, dealId]);
@@ -793,9 +966,13 @@ export function WorkspaceChat({
       setToolRuns({});
       setResearchTraces({});
       setAutoActionKeys(new Set());
+      shouldStickToBottomRef.current = true;
     } finally {
       setLoadingThread(null);
-      setTimeout(() => inputRef.current?.focus(), 0);
+      setTimeout(() => {
+        scrollMessagesToBottom("auto");
+        inputRef.current?.focus();
+      }, 0);
     }
   }
 
@@ -991,6 +1168,7 @@ export function WorkspaceChat({
 
     setInput("");
     setAttachedFiles([]);
+    shouldStickToBottomRef.current = true;
     const userMsg: ChatMessage = { id: newId(), role: "user", content: finalPrompt };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
@@ -1701,6 +1879,44 @@ export function WorkspaceChat({
         setMessages((prev) => [...prev, message]);
         void saveAssistantMessage(message, threadIdForSave);
         markToolRun(runKey, { status: "done", label: action.label, detail: "Workflow finished" });
+      } else if (action.type === "propose_create_matrix") {
+        const res = await fetch("/api/chat/matrix/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: action.name,
+            dealIds: action.dealIds,
+            dealNames: action.dealNames,
+            columnTheme: action.columnTheme,
+            explicitColumns: action.explicitColumns,
+          }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          href?: string;
+          columnCount?: number;
+          view?: { name?: string };
+          error?: string;
+        } | null;
+        if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+        const href = json?.href ?? "/home/matrix";
+        const viewName = json?.view?.name ?? action.name;
+        const message: ChatMessage = {
+          id: newId(),
+          role: "assistant",
+          content: `Created matrix "${viewName}" with ${action.dealNames.join(", ")} (${json?.columnCount ?? 0} columns). Open it to review or fill cells.`,
+          actions: [
+            {
+              type: "open_link",
+              label: `Open ${viewName}`,
+              href,
+              detail: `${action.dealIds.length} companies`,
+            },
+          ],
+        };
+        clearTransientMessage();
+        setMessages((prev) => [...prev, message]);
+        void saveAssistantMessage(message, threadIdForSave);
+        markToolRun(runKey, { status: "done", label: action.label, detail: "Matrix created" });
       }
     } catch (e) {
       if (action.type === "propose_research") {
@@ -1756,7 +1972,7 @@ export function WorkspaceChat({
   function shouldRenderActionForMessage(action: ChatAction, key: string): boolean {
     if (action.type === "tool_call") return false;
     if (isLegacyMatrixAction(action)) return false;
-    if (action.type === "document_preview") return true;
+    if (action.type === "document_preview" || action.type === "matrix_snapshot") return true;
     if (action.type === "open_document" || action.type === "open_link" || action.type === "record_update") return true;
     const runState = toolRuns[key];
     if (runState?.status === "done") return false;
@@ -1781,7 +1997,7 @@ export function WorkspaceChat({
   });
 
   return (
-    <div className="flex h-full w-full bg-white relative overflow-hidden select-none">
+    <div className="flex h-full w-full bg-white relative overflow-hidden">
       {/* Centered Chat History Modal */}
       {chatHistoryOpen && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/20 backdrop-blur-md p-4 transition-all duration-300">
@@ -1934,7 +2150,7 @@ export function WorkspaceChat({
         </div>
 
         {/* Scrollable Chat Message List */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 bg-zinc-50/30">
+        <div ref={messagesScrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-6 bg-zinc-50/30">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
             {loadingThread && (
               <div className="flex justify-center items-center py-16 text-xs font-semibold text-zinc-500 gap-2">
@@ -1972,7 +2188,7 @@ export function WorkspaceChat({
 
                   return (
                     <div key={m.id} className="flex flex-col items-end gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200 mt-1">
-                      <div className="max-w-[78%] rounded-2xl border border-zinc-200/80 bg-white px-4 py-3 text-sm font-medium text-zinc-950 shadow-[0_2px_8px_rgba(0,0,0,0.03)] leading-relaxed">
+                      <div className="max-w-[78%] select-text rounded-2xl border border-zinc-200/80 bg-white px-4 py-3 text-sm font-medium text-zinc-950 shadow-[0_2px_8px_rgba(0,0,0,0.03)] leading-relaxed">
                         <div className="whitespace-pre-wrap">{displayContent}</div>
                       </div>
                       {attachedSnippetFiles.length > 0 && (
@@ -1998,7 +2214,7 @@ export function WorkspaceChat({
                     </div>
                     <div className="flex-1 min-w-0 space-y-3 pt-0.5">
                       {contentText && (
-                        <div className="whitespace-pre-wrap text-zinc-800 leading-relaxed text-sm">
+                        <div className="select-text whitespace-pre-wrap text-zinc-800 leading-relaxed text-sm">
                           {contentText}
                         </div>
                       )}
@@ -2017,13 +2233,34 @@ export function WorkspaceChat({
                             if (a.type === "document_preview") {
                               return <DocumentPreviewCard key={key} action={a} />;
                             }
+                            if (a.type === "matrix_snapshot") {
+                              return <MatrixSnapshotCard key={key} action={a} />;
+                            }
+                            if (a.type === "propose_create_matrix") {
+                              const columnHint =
+                                a.columnTheme ||
+                                (a.explicitColumns.length
+                                  ? a.explicitColumns.map((c) => c.label).join(", ")
+                                  : "default columns");
+                              return (
+                                <ToolActionButton
+                                  key={key}
+                                  label={a.label}
+                                  detail={runState?.detail || `${a.dealNames.join(" vs ")} · ${columnHint}`}
+                                  status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
+                                  icon={<Table2 className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
+                                  onClick={() => runAction(a, key)}
+                                  disabled={Boolean(busyAction)}
+                                />
+                              );
+                            }
                             if (a.type === "open_document" || a.type === "open_link") {
+                              const internal = isInternalAppHref(a.href);
                               return (
                                 <a
                                   key={key}
                                   href={a.href}
-                                  target="_blank"
-                                  rel="noreferrer"
+                                  {...(internal ? {} : { target: "_blank", rel: "noreferrer" })}
                                   className="flex w-full max-w-full items-center justify-between gap-3 border border-zinc-200 bg-white px-4 py-3 rounded-2xl text-left text-xs font-semibold text-zinc-950 hover:bg-zinc-50/50 shadow-sm transition-all md:w-[760px] active:scale-[0.99]"
                                 >
                                   <span className="min-w-0">
@@ -2140,6 +2377,7 @@ export function WorkspaceChat({
                 </div>
               </div>
             )}
+            <div ref={messagesEndRef} aria-hidden className="h-px shrink-0" />
           </div>
         </div>
 

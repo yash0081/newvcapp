@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   DEFAULT_MATRIX_COLUMNS,
   MATRIX_COLUMN_PRESETS,
@@ -29,6 +30,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
 import { MatrixSetupPanel } from "@/components/diligence-matrix/matrix-setup-panel";
 
 type Deal = { id: string; name: string };
@@ -147,7 +149,13 @@ function filterByQuery(value: string, query: string): boolean {
 const MATRIX_VIEW_STORAGE_KEY = "vcapp.matrix.views.v1";
 
 export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { focusMode?: boolean; initialDealIds?: string[] }) {
-  const [viewMode, setViewMode] = useState<"list" | "spreadsheet">("list");
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const requestedViewId = searchParams.get("view");
+  const [viewMode, setViewMode] = useState<"list" | "spreadsheet">(() =>
+    requestedViewId ? "spreadsheet" : "list",
+  );
   const [data, setData] = useState<MatrixData>({ deals: [], columns: [], cells: [] });
   const [selectedDeals, setSelectedDeals] = useState<Set<string>>(new Set());
   const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set());
@@ -171,7 +179,8 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
   const [detailsCollapsed, setDetailsCollapsed] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null);
+  const [selectedMatrixIds, setSelectedMatrixIds] = useState<Set<string>>(new Set());
+  const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; names: string[] } | null>(null);
 
   const activeView = useMemo(
     () => matrixViews.find((view) => view.id === activeViewId) ?? null,
@@ -184,6 +193,14 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
 
   function persistMatrixViewsLocal(next: MatrixView[]) {
     window.localStorage.setItem(MATRIX_VIEW_STORAGE_KEY, JSON.stringify(next));
+  }
+
+  function syncViewInUrl(viewId: string | null) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (viewId) params.set("view", viewId);
+    else params.delete("view");
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   }
 
   async function loadMatrixViews(): Promise<MatrixView[]> {
@@ -285,8 +302,25 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
 
   useEffect(() => {
     if (!viewsLoaded || viewMode !== "spreadsheet" || activeViewId) return;
+    if (requestedViewId) return;
     void ensureActiveMatrixView().catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [viewsLoaded, viewMode, activeViewId, selectedDeals, selectedColumns]);
+  }, [viewsLoaded, viewMode, activeViewId, requestedViewId, selectedDeals, selectedColumns]);
+
+  // Deep-link / browser navigation: apply view from ?view= only when the URL changes (not when sidebar selection changes).
+  useEffect(() => {
+    if (!viewsLoaded || !requestedViewId) return;
+    const view = matrixViews.find((item) => item.id === requestedViewId);
+    if (!view) return;
+    const dealIds = view.dealIds.filter((id) => data.deals.some((deal) => deal.id === id));
+    const columnIds = resolveMatrixColumnIds(view.columnIds, data.columns, { focusMode });
+    setActiveViewId(view.id);
+    setViewMode("spreadsheet");
+    setSelectedDeals(
+      new Set(dealIds.length ? dealIds : data.deals.slice(0, 8).map((deal) => deal.id)),
+    );
+    setSelectedColumns(new Set(columnIds));
+    setMatrixName(view.name);
+  }, [data.columns, data.deals, focusMode, matrixViews, requestedViewId, viewsLoaded]);
 
   const cellNeedsFill = useCallback((cell?: Cell | null): boolean => {
     if (!cell) return true;
@@ -511,6 +545,7 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
     };
     setMatrixViews((prev) => [view, ...prev.filter((item) => item.id !== view.id)].slice(0, 48));
     setActiveViewId(view.id);
+    syncViewInUrl(view.id);
     persistMatrixViewsLocal([view, ...matrixViews].slice(0, 48));
     return view.id;
   }
@@ -571,6 +606,7 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
     const dealIds = view.dealIds.filter((id) => data.deals.some((deal) => deal.id === id));
     const columnIds = resolveMatrixColumnIds(view.columnIds, data.columns, { focusMode });
     setActiveViewId(view.id);
+    syncViewInUrl(view.id);
     setSelectedDeals(
       new Set(dealIds.length ? dealIds : data.deals.slice(0, 8).map((deal) => deal.id)),
     );
@@ -617,10 +653,38 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
     }
   }
 
+  function toggleMatrixSelection(viewId: string, checked: boolean) {
+    setSelectedMatrixIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(viewId);
+      else next.delete(viewId);
+      return next;
+    });
+  }
+
+  function selectAllMatrices() {
+    setSelectedMatrixIds(new Set(matrixViews.map((view) => view.id)));
+  }
+
+  function clearMatrixSelection() {
+    setSelectedMatrixIds(new Set());
+  }
+
+  function requestDeleteMatrixViews(ids: string[]) {
+    const unique = [...new Set(ids)].filter((id) => matrixViews.some((view) => view.id === id));
+    if (!unique.length) return;
+    const names = unique
+      .map((id) => matrixViews.find((view) => view.id === id)?.name)
+      .filter((name): name is string => Boolean(name));
+    setDeleteConfirm({ ids: unique, names });
+  }
+
   function requestDeleteMatrixView(viewId: string) {
-    const view = matrixViews.find((item) => item.id === viewId);
-    if (!view) return;
-    setDeleteConfirm({ id: view.id, name: view.name });
+    if (selectedMatrixIds.size > 1 && selectedMatrixIds.has(viewId)) {
+      requestDeleteMatrixViews([...selectedMatrixIds]);
+      return;
+    }
+    requestDeleteMatrixViews([viewId]);
   }
 
   function cancelDeleteMatrixView() {
@@ -629,34 +693,83 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
 
   async function confirmDeleteMatrixView() {
     if (!deleteConfirm || busy === "delete-matrix") return;
-    const { id: viewId, name } = deleteConfirm;
+    const idsToDelete = deleteConfirm.ids;
     setBusy("delete-matrix");
     setError(null);
     try {
-      try {
-        await jsonFetch(`/api/diligence-matrix/views/${viewId}`, { method: "DELETE" });
-      } catch {
-        /* local-only legacy id */
+      for (const viewId of idsToDelete) {
+        try {
+          await jsonFetch(`/api/diligence-matrix/views/${viewId}`, { method: "DELETE" });
+        } catch {
+          /* local-only legacy id */
+        }
       }
-      const next = matrixViews.filter((item) => item.id !== viewId);
+      const deleted = new Set(idsToDelete);
+      const next = matrixViews.filter((item) => !deleted.has(item.id));
       setMatrixViews(next);
       persistMatrixViewsLocal(next);
       setDeleteConfirm(null);
-      if (activeViewId === viewId) {
+      setSelectedMatrixIds((prev) => {
+        const remaining = new Set(prev);
+        for (const id of idsToDelete) remaining.delete(id);
+        return remaining;
+      });
+      if (activeViewId && deleted.has(activeViewId)) {
         setActiveViewId(null);
         if (next[0]) {
           applyMatrixView(next[0]);
         } else {
           setViewMode("list");
           setMatrixName("");
+          syncViewInUrl(null);
         }
       }
-      setMessage(`Deleted ${name}.`);
+      const label =
+        deleteConfirm.names.length === 1
+          ? deleteConfirm.names[0]!
+          : `${deleteConfirm.names.length} matrices`;
+      setMessage(`Deleted ${label}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
+  }
+
+  const selectedMatrixCount = selectedMatrixIds.size;
+
+  function matrixSelectionToolbar(className?: string) {
+    if (!matrixViews.length) return null;
+    return (
+      <div className={cn("flex flex-wrap items-center gap-2", className)}>
+        <button
+          type="button"
+          onClick={selectAllMatrices}
+          className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-zinc-700 hover:bg-zinc-50"
+        >
+          Select all
+        </button>
+        {selectedMatrixCount > 0 ? (
+          <>
+            <button
+              type="button"
+              onClick={clearMatrixSelection}
+              className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-zinc-700 hover:bg-zinc-50"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={() => requestDeleteMatrixViews([...selectedMatrixIds])}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 hover:bg-rose-100"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete {selectedMatrixCount} selected
+            </button>
+          </>
+        ) : null}
+      </div>
+    );
   }
 
   async function openNewMatrix() {
@@ -668,7 +781,8 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
     setActiveViewId(null);
     setViewName("");
     setMatrixName("");
-    await ensureActiveMatrixView();
+    const createdId = await ensureActiveMatrixView();
+    if (createdId) syncViewInUrl(createdId);
   }
 
   useEffect(() => {
@@ -805,12 +919,25 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
           </div>
 
           <div>
-            <h2 className="text-xs font-extrabold text-zinc-400 uppercase tracking-widest mb-4">Saved matrices</h2>
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <h2 className="text-xs font-extrabold text-zinc-400 uppercase tracking-widest">Saved matrices</h2>
+              {matrixSelectionToolbar()}
+            </div>
             <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm overflow-hidden">
                {matrixViews.length > 0 ? (
                  <div className="divide-y divide-zinc-150">
                     {matrixViews.map((view) => (
                        <div key={view.id} className="flex items-center gap-1 px-2 py-1 hover:bg-zinc-50 transition-colors">
+                          <label
+                            className="flex shrink-0 cursor-pointer items-center px-2 py-2"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <Checkbox
+                              checked={selectedMatrixIds.has(view.id)}
+                              onCheckedChange={(checked) => toggleMatrixSelection(view.id, checked === true)}
+                              aria-label={`Select ${view.name}`}
+                            />
+                          </label>
                           <button
                             type="button"
                             onClick={() => applyMatrixView(view)}
@@ -939,6 +1066,7 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
                 Save as
               </button>
             </div>
+            {matrixSelectionToolbar('mt-3')}
             <input
               className="mt-2 h-8 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-xs outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:bg-white"
               value={viewName}
@@ -959,6 +1087,14 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
                   activeViewId === view.id ? "border-zinc-900 bg-zinc-900 text-white" : "border-zinc-200 bg-white hover:bg-zinc-50",
                 )}
               >
+                <label className="flex shrink-0 cursor-pointer items-center px-1.5 py-1.5" onClick={(e) => e.stopPropagation()}>
+                  <Checkbox
+                    checked={selectedMatrixIds.has(view.id)}
+                    onCheckedChange={(checked) => toggleMatrixSelection(view.id, checked === true)}
+                    aria-label={`Select ${view.name}`}
+                    className={activeViewId === view.id ? "border-white/40 data-[state=checked]:bg-white data-[state=checked]:text-zinc-900" : undefined}
+                  />
+                </label>
                 <button type="button" onClick={() => applyMatrixView(view)} className="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-left">
                   <span className="block truncate text-sm font-semibold">{view.name}</span>
                   <span className={cn("block truncate text-xs", activeViewId === view.id ? "text-white/65" : "text-zinc-500")}>
@@ -1233,11 +1369,18 @@ export function DiligenceMatrix({ focusMode = false, initialDealIds = [] }: { fo
             className="relative w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl"
           >
             <h3 id="delete-matrix-title" className="text-sm font-semibold text-zinc-950">
-              Delete matrix?
+              {deleteConfirm.ids.length === 1 ? 'Delete matrix?' : `Delete ${deleteConfirm.ids.length} matrices?`}
             </h3>
             <p className="mt-2 text-sm leading-relaxed text-zinc-600">
-              <span className="font-medium text-zinc-900">{deleteConfirm.name}</span> will be permanently removed. This
-              cannot be undone.
+              {deleteConfirm.ids.length === 1 ? (
+                <span className="font-medium text-zinc-900">{deleteConfirm.names[0]}</span>
+              ) : (
+                <span className="font-medium text-zinc-900">
+                  {deleteConfirm.names.slice(0, 3).join(", ")}
+                  {deleteConfirm.names.length > 3 ? ` and ${deleteConfirm.names.length - 3} more` : ""}
+                </span>
+              )}{" "}
+              will be permanently removed. This cannot be undone.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button

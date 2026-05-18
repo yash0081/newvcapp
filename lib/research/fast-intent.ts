@@ -4,7 +4,7 @@ import type { WebsiteCategory } from "@/lib/research/types";
 export const DOCUMENT_GENERATION_RE =
   /\b(write|draft|generate|create|make|prepare|produce)\b.{0,80}\b(document|doc|memo|notes?|brief|report|email|one[- ]?pager|summary)\b|\b(ic|investment committee|investment)\s+memo\b/i;
 
-/** Questions that usually need public web even when CRM has some data. */
+/** Public-person/entity wording is not itself a web request; saved CRM context should get first shot. */
 const PUBLIC_ENTITY_RE =
   /\b(founder|co-?founders?|ceo|cto|cmo|team|leadership|technical background|engineering background|work history|career|education|degree|phd|mba|linkedin|pedigree|background of|who is|executive|prior (?:role|company|exit))\b/i;
 
@@ -15,19 +15,29 @@ const INTERNAL_ONLY_RE =
 const EXPLICIT_WEB_RE =
   /\b(search the web|web search|look up online|on the internet|public(?:ly)? available|current|latest|recent|verify online|check online)\b/i;
 
+const WEB_FRESHNESS_RE =
+  /\b(current|latest|recent|today|now|new|news|announced|verify|confirm|stock price|market cap)\b/i;
+
+const EXPLICIT_RESEARCH_ACTION_RE =
+  /(?:^|[.!?\n]\s*)(?:please\s+)?(?:research|investigate)\b|\b(?:can|could|would)\s+you\s+(?:please\s+)?(?:research|look into|investigate|find out|dig into|do\s+(?:some|more|a\s+bit\s+of\s+)?research|run\s+(?:a\s+)?(?:web\s+search|deep\s+dive))\b|\b(?:please|help me|i want(?:\s+you)?\s+to|let'?s)\s+(?:research|look into|investigate|find out|dig into|do\s+(?:some|more|a\s+bit\s+of\s+)?research|run\s+(?:a\s+)?(?:web\s+search|deep\s+dive))\b|\b(?:look into|dig into|find out about|web search|search the web|deep dive)\b/i;
+
 export function isDocumentGenerationRequest(message: string): boolean {
   return DOCUMENT_GENERATION_RE.test(message.trim());
 }
+
+export type DocumentDeliveryMode = "explicit" | "ambiguous" | "none";
 
 export function isDocumentPrimaryRequest(args: {
   message: string;
   generateDocumentEnabled: boolean;
   wantsResearchFromPrecheck: boolean;
+  documentDelivery?: DocumentDeliveryMode;
 }): boolean {
   if (!args.generateDocumentEnabled) return false;
   if (args.wantsResearchFromPrecheck) return false;
-  if (isDocumentGenerationRequest(args.message)) return true;
-  return args.generateDocumentEnabled;
+  if (args.documentDelivery === "ambiguous") return false;
+  if (args.documentDelivery === "explicit" || isDocumentGenerationRequest(args.message)) return true;
+  return false;
 }
 
 export type FastResearchIntent = {
@@ -48,6 +58,18 @@ export function isInternalOnlyQuestion(message: string): boolean {
   if (INTERNAL_ONLY_RE.test(msg)) return true;
   if (/\bwhat do we know about\b/i.test(msg)) return true;
   return false;
+}
+
+export function isExplicitResearchRequest(message: string): boolean {
+  return EXPLICIT_RESEARCH_ACTION_RE.test(message.trim());
+}
+
+export function shouldUsePublicWebForChat(message: string): boolean {
+  const msg = message.trim();
+  if (!msg) return false;
+  if (isDocumentGenerationRequest(msg)) return false;
+  if (isInternalOnlyQuestion(msg)) return false;
+  return EXPLICIT_WEB_RE.test(msg) || WEB_FRESHNESS_RE.test(msg);
 }
 
 export function buildQuickLookupQuery(args: {

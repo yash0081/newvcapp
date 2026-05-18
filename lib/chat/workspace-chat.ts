@@ -12,6 +12,26 @@ import type { SimilarPeerForPrompt } from "@/lib/similar-deals/types";
 import { loadAggregatedRulesForUser } from "@/lib/investment-rules";
 import { listCustomWorkflowDefinitions, type CustomWorkflowDefinition } from "@/lib/custom-workflows";
 import {
+  buildMatrixHref,
+  buildMatrixSnapshotGrid,
+  buildMatrixToolBrief,
+  executeCreateMatrixFromProposal,
+  enrichMatrixCreateFromMessage,
+  enrichMatrixRoutePlan,
+  extractArtifactSubjectHint,
+  formatMatrixContextForPrompt,
+  formatMatrixViewsIndex,
+  loadMatrixContextForChat,
+  messageReferencesSavedMatrix,
+  messageRequestsMatrixCreate,
+  extractMatrixCreateCompanyHints,
+  resolveMatrixViewFromMessage,
+  type MatrixColumnSpec,
+  type MatrixRoutePlanFields,
+  type MatrixSnapshotGrid,
+} from "@/lib/diligence-matrix/chat-matrix";
+import { listMatrixViews, type MatrixSavedView } from "@/lib/diligence-matrix/views";
+import {
   DEAL_INTEL_LAYER1A_SCHEMA_GUIDE,
   DEAL_INTEL_QUALITY_GUARDRAILS,
   DEAL_INTEL_RESEARCH_FOCUS_GUIDE,
@@ -23,9 +43,23 @@ import { loadResearchInternalContext } from "@/lib/research/context";
 import {
   buildQuickLookupQuery,
   formatFastIntentForPrompt,
+  isExplicitResearchRequest,
   isDocumentPrimaryRequest,
+  shouldUsePublicWebForChat,
   type FastResearchIntent,
 } from "@/lib/research/fast-intent";
+import {
+  type DocumentClarifyField,
+  type DocumentTypeSummary,
+  classifyDocumentDelivery,
+  documentLikelyNeedsCompany,
+  documentSignalFromMessage,
+  formatDeliveryClarificationMessage,
+  formatNeedsSetupMessage,
+  formatTypeClarificationMessage,
+  inferDocumentTypeHint,
+  resolveDocumentGeneration,
+} from "@/lib/chat/document-type-routing";
 import { inferLightweightResearchIntent } from "@/lib/research/planner";
 import {
   classifyResearchModeAsync,
@@ -125,6 +159,27 @@ export type ChatAction =
       type: "record_update";
       label: string;
       detail: string;
+    }
+  | {
+      type: "propose_create_matrix";
+      label: string;
+      name: string;
+      dealIds: string[];
+      dealNames: string[];
+      columnTheme: string | null;
+      explicitColumns: MatrixColumnSpec[];
+    }
+  | {
+      type: "matrix_snapshot";
+      label: string;
+      href?: string;
+      viewName?: string | null;
+      grid?: MatrixSnapshotGrid;
+      /** @deprecated Legacy flat rows */
+      rows?: Array<{ dealName: string; columnLabel: string; valueText: string | null; status: string }>;
+      filledCount?: number;
+      truncated?: boolean;
+      markdown?: string;
     };
 
 export type ChatCitation = {
@@ -141,6 +196,7 @@ export type ChatToolPermissions = {
   useSimilarCompanySearch: boolean;
   useCriteriaAnalysis: boolean;
   runWorkflows: boolean;
+  createMatrices: boolean;
 };
 
 export const DEFAULT_CHAT_TOOL_PERMISSIONS: ChatToolPermissions = {
@@ -151,10 +207,26 @@ export const DEFAULT_CHAT_TOOL_PERMISSIONS: ChatToolPermissions = {
   useSimilarCompanySearch: true,
   useCriteriaAnalysis: true,
   runWorkflows: true,
+  createMatrices: true,
+};
+
+export type MatrixClarifyField = "companies" | "columns" | "which_matrix";
+
+export type MatrixRoutePlan = {
+  action: "none" | "read" | "create";
+  viewId: string | null;
+  dealIds: string[];
+  name: string | null;
+  columnTheme: string | null;
+  explicitColumns: MatrixColumnSpec[];
+  clarify: MatrixClarifyField[];
+  useMatrixIfRelevant: boolean;
 };
 
 type ToolPrecheck = {
   wantsDocument: boolean;
+  documentDelivery: "explicit" | "ambiguous" | "none";
+  documentSignal: boolean;
   wantsResearch: boolean;
   wantsWorkflow: boolean;
   documentTypeHint: string | null;
@@ -183,16 +255,6 @@ type DocumentRow = {
 type QuickLookupResult = {
   text: string;
   citations: ChatCitation[];
-};
-
-type DocumentTypeSummary = {
-  id: string;
-  name: string;
-  output_format: string | null;
-  description: string | null;
-  instructions: string | null;
-  learned_preferences: string | null;
-  updated_at: string | null;
 };
 
 export type UpdateTarget =
@@ -244,6 +306,8 @@ type ChatRoutePlan = {
     enabled: boolean;
     prompt: string;
     typeHint: string | null;
+    typeId: string | null;
+    clarify: DocumentClarifyField[];
   };
   runResearch: {
     enabled: boolean;
@@ -256,6 +320,7 @@ type ChatRoutePlan = {
     workflowId: string | null;
     input: string;
   };
+  matrix: MatrixRoutePlan;
   quickLookup: {
     enabled: boolean;
     query: string;
@@ -266,6 +331,77 @@ type ChatRoutePlan = {
   researchProfile: ResearchProfile;
   researchModeReason?: string;
 };
+
+function emptyMatrixPlan(): MatrixRoutePlan {
+  return {
+    action: "none",
+    viewId: null,
+    dealIds: [],
+    name: null,
+    columnTheme: null,
+    explicitColumns: [],
+    clarify: [],
+    useMatrixIfRelevant: false,
+  };
+}
+
+function parseMatrixRouteFromRouter(
+  raw: unknown,
+  allowedDealIds: Set<string>,
+): MatrixRoutePlan {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const actionRaw = typeof o.action === "string" ? o.action : "none";
+  const action: MatrixRoutePlan["action"] =
+    actionRaw === "read" || actionRaw === "create" ? actionRaw : "none";
+  const viewId = typeof o.viewId === "string" && o.viewId.trim() ? o.viewId.trim() : null;
+  const dealIds: string[] = [];
+  if (Array.isArray(o.dealIds)) {
+    for (const id of o.dealIds) {
+      if (typeof id === "string" && allowedDealIds.has(id) && !dealIds.includes(id)) dealIds.push(id);
+    }
+  }
+  const name = typeof o.name === "string" && o.name.trim() ? o.name.trim().slice(0, 120) : null;
+  const columnTheme =
+    typeof o.columnTheme === "string" && o.columnTheme.trim() ? o.columnTheme.trim().slice(0, 500) : null;
+  const explicitColumns: MatrixColumnSpec[] = [];
+  if (Array.isArray(o.explicitColumns)) {
+    for (const item of o.explicitColumns) {
+      if (!item || typeof item !== "object") continue;
+      const col = item as Record<string, unknown>;
+      const label = typeof col.label === "string" ? col.label.trim() : "";
+      if (!label) continue;
+      explicitColumns.push({
+        label: label.slice(0, 80),
+        prompt: typeof col.prompt === "string" ? col.prompt.trim().slice(0, 2000) : undefined,
+        dataType:
+          col.dataType === "text" ||
+          col.dataType === "number" ||
+          col.dataType === "percent" ||
+          col.dataType === "currency" ||
+          col.dataType === "boolean"
+            ? col.dataType
+            : undefined,
+      });
+    }
+  }
+  const clarify: MatrixClarifyField[] = [];
+  if (Array.isArray(o.clarify)) {
+    for (const c of o.clarify) {
+      if (c === "companies" || c === "columns" || c === "which_matrix") clarify.push(c);
+    }
+  }
+  const useMatrixIfRelevant = o.useMatrixIfRelevant === true;
+  return {
+    action: clarify.length && action === "create" ? "none" : action,
+    viewId,
+    dealIds,
+    name,
+    columnTheme,
+    explicitColumns,
+    clarify,
+    useMatrixIfRelevant,
+  };
+}
 
 const UPDATE_TARGETS: UpdateTarget[] = [
   "deal.company_name",
@@ -433,11 +569,19 @@ async function resolveDeal(
   userId: string,
   dealId: string | null,
   message: string,
+  matrixViews: MatrixSavedView[] = [],
 ): Promise<DealRow | null> {
   if (dealId) return loadDealForUser(admin, userId, dealId);
+  if (matrixViews.length && messageReferencesSavedMatrix(message, matrixViews)) return null;
   const deals = await listChatDeals(admin, userId);
   const msg = normalizeText(message);
-  const matched = deals.find((d) => d.name.length >= 2 && msg.includes(normalizeText(d.name)));
+  const artifactHint = extractArtifactSubjectHint(message);
+  const matched = deals.find((d) => {
+    const name = normalizeText(d.name);
+    if (!name || name.length < 2) return false;
+    if (artifactHint && normalizeText(artifactHint) === name) return false;
+    return msg.includes(name);
+  });
   return matched ? loadDealForUser(admin, userId, matched.id) : null;
 }
 
@@ -451,41 +595,6 @@ function matchDealsFromMessage(deals: Array<{ id: string; name: string }>, messa
     const tokens = name.split(" ").filter((t) => t.length >= 3);
     return tokens.length >= 2 && tokens.every((t) => msg.includes(t));
   });
-}
-
-function scoreDocumentType(type: DocumentTypeSummary, message: string, hint: string | null): number {
-  const hay = normalizeText(
-    `${type.name} ${type.output_format ?? ""} ${type.description ?? ""} ${type.instructions ?? ""} ${type.learned_preferences ?? ""}`,
-  );
-  const query = normalizeText(`${hint ?? ""} ${message}`);
-  if (!hay || !query) return 0;
-  let score = 0;
-  if (hint && hay.includes(normalizeText(hint))) score += 10;
-  if (query.includes(normalizeText(type.name))) score += 8;
-  const tokens = query.split(" ").filter((t) => t.length >= 4);
-  for (const t of tokens) if (hay.includes(t)) score += 1;
-  return score;
-}
-
-function pickDocumentType(types: DocumentTypeSummary[], message: string, hint: string | null): DocumentTypeSummary | null {
-  const scored = types
-    .map((type) => ({ type, score: scoreDocumentType(type, message, hint) }))
-    .sort((a, b) => b.score - a.score);
-  return scored[0]?.score ? scored[0].type : null;
-}
-
-function documentLikelyNeedsCompany(type: DocumentTypeSummary, message: string): boolean {
-  const text = normalizeText(`${type.name} ${type.description ?? ""} ${message}`);
-  return /\b(memo|report|analysis|profile|brief|company|competitor|investment|ic|diligence)\b/.test(text);
-}
-
-function titleFromDocumentHint(hint: string | null): string {
-  if (!hint) return "Document";
-  return hint
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 async function loadDocuments(
@@ -619,29 +728,9 @@ function asRouteTask(value: unknown): ChatRoutePlan["chatTask"] {
     : "deep_reasoning";
 }
 
-function inferDocumentTypeHint(message: string): string | null {
-  const lower = message.toLowerCase();
-  const pairs: Array<[RegExp, string]> = [
-    [/\b(ic|investment committee)\s+memo\b/, "investment memo"],
-    [/\binvestment\s+memo\b/, "investment memo"],
-    [/\bmemo\b/, "memo"],
-    [/\b(notes?|meeting notes|call notes)\b/, "notes"],
-    [/\bbrief\b/, "brief"],
-    [/\breport\b/, "report"],
-    [/\bemail\b/, "email"],
-    [/\bsummary\b/, "summary"],
-    [/\bteaser\b/, "teaser"],
-    [/\bone[- ]?pager\b/, "one pager"],
-  ];
-  for (const [regex, hint] of pairs) {
-    if (regex.test(lower)) return hint;
-  }
-  return null;
-}
-
 const DOCUMENT_INTENT_RE = /\b(write|draft|generate|create|make|prepare|produce)\b.{0,80}\b(document|doc|memo|notes?|brief|report|email|one[- ]?pager|summary)\b|\b(ic|investment committee|investment)\s+memo\b/i;
 const RESEARCH_INTENT_RE = /\b(research|look into|investigate|find out|dig into|web search|search the web|deep dive|competitors?|patents?|common investors?|shared investors?)\b/i;
-const EXPLICIT_RESEARCH_INTENT_RE = /\b(research|look into|investigate|find out|dig into|web search|search the web|deep dive)\b/i;
+const RESEARCH_TOPIC_WORKFLOW_RE = /\b(competitor landscape|competitors?|patents?|common investors?|shared investors?)\b/i;
 const WORKFLOW_INTENT_RE = /\b(workflow|playbook|process|run the saved|run saved)\b/i;
 
 function taskClauses(message: string): string[] {
@@ -664,6 +753,21 @@ function buildToolPrecheck(args: {
   focusDeal: DealRow | null;
   allDeals: Array<{ id: string; name: string }>;
 }): ToolPrecheck {
+  if (messageRequestsMatrixCreate(args.message)) {
+    return {
+      wantsDocument: false,
+      documentDelivery: "none",
+      documentSignal: false,
+      wantsResearch: false,
+      wantsWorkflow: false,
+      documentTypeHint: null,
+      targetDealIds: args.focusDeal?.id ? [args.focusDeal.id] : [],
+      researchDealIds: [],
+      researchFocus: args.message,
+      documentFocus: args.message,
+      evidence: ["matrix create intent"],
+    };
+  }
   const researchFocus = focusedSegment(args.message, RESEARCH_INTENT_RE).slice(0, 1800);
   const documentFocus = focusedSegment(args.message, DOCUMENT_INTENT_RE).slice(0, 1800);
   const clauses = taskClauses(args.message);
@@ -671,13 +775,15 @@ function buildToolPrecheck(args: {
   const researchMentionedDeals = matchDealsFromMessage(args.allDeals, researchFocus);
   const targetDealIds = (mentionedDeals.length ? mentionedDeals.map((deal) => deal.id) : args.focusDeal?.id ? [args.focusDeal.id] : []).slice(0, 8);
   const docTypeHint = inferDocumentTypeHint(args.message);
-  const wantsDocument = Boolean(docTypeHint) || DOCUMENT_INTENT_RE.test(args.message);
+  const documentDelivery = classifyDocumentDelivery(args.message);
+  const wantsDocument = documentDelivery === "explicit";
+  const documentSignal = documentSignalFromMessage(args.message);
   const standaloneResearchClauses = clauses.filter(
     (clause) => RESEARCH_INTENT_RE.test(clause) && !DOCUMENT_INTENT_RE.test(clause),
   );
   const wantsResearch =
-    standaloneResearchClauses.some((clause) => EXPLICIT_RESEARCH_INTENT_RE.test(clause)) ||
-    (!wantsDocument && standaloneResearchClauses.some((clause) => RESEARCH_INTENT_RE.test(clause)));
+    standaloneResearchClauses.some((clause) => isExplicitResearchRequest(clause)) ||
+    (!wantsDocument && standaloneResearchClauses.some((clause) => RESEARCH_TOPIC_WORKFLOW_RE.test(clause)));
   const wantsWorkflow = WORKFLOW_INTENT_RE.test(args.message);
   const researchDealIds = wantsResearch
     ? (researchMentionedDeals.length ? researchMentionedDeals.map((deal) => deal.id) : targetDealIds).filter((id) => {
@@ -688,12 +794,15 @@ function buildToolPrecheck(args: {
       })
     : [];
   const evidence = [
-    wantsDocument ? `document keyword${docTypeHint ? `: ${docTypeHint}` : ""}` : "",
+    wantsDocument ? `document explicit${docTypeHint ? `: ${docTypeHint}` : ""}` : "",
+    documentDelivery === "ambiguous" ? `document ambiguous${docTypeHint ? `: ${docTypeHint}` : ""}` : "",
     wantsResearch ? "research keyword" : "",
     wantsWorkflow ? "workflow keyword" : "",
   ].filter(Boolean);
   return {
     wantsDocument,
+    documentDelivery,
+    documentSignal,
     wantsResearch,
     wantsWorkflow,
     documentTypeHint: docTypeHint,
@@ -751,10 +860,11 @@ function fallbackRoutePlan(args: {
     openDocumentQuery: null,
     createCompany: null,
     updates: [],
-    generateDocument: { enabled: false, prompt: args.message, typeHint: null },
+    generateDocument: emptyGenerateDocumentPlan(args.message),
     runResearch: { enabled: false, focus: args.message, when: "now" },
     researchDealIds: [],
     customWorkflow: { enabled: false, workflowId: null, input: args.message },
+    matrix: emptyMatrixPlan(),
     quickLookup: { enabled: false, query: args.message },
     useSimilarCompanies: args.chatTask === "similar_deal",
     useCriteria: false,
@@ -762,6 +872,15 @@ function fallbackRoutePlan(args: {
     researchProfile: "fast",
     researchModeReason: "",
   };
+}
+
+function suppressResearchForMatrixTool(plan: ChatRoutePlan): void {
+  plan.quickLookup.enabled = false;
+  plan.runResearch.enabled = false;
+  plan.runResearch.when = "if_missing_info";
+  plan.generateDocument.enabled = false;
+  plan.missingInfoBehavior = "answer_unknown";
+  plan.useSimilarCompanies = false;
 }
 
 function applyResearchModeToRoutePlan(args: {
@@ -772,11 +891,15 @@ function applyResearchModeToRoutePlan(args: {
   permissions: ChatToolPermissions;
   focusDealId: string | null;
   targetDealIds: string[];
+  matrixToolActive?: boolean;
 }): void {
+  if (args.matrixToolActive) return;
+
   const documentPrimary = isDocumentPrimaryRequest({
     message: args.message,
     generateDocumentEnabled: args.plan.generateDocument.enabled,
     wantsResearchFromPrecheck: args.precheck.wantsResearch,
+    documentDelivery: args.precheck.documentDelivery,
   });
 
   if (documentPrimary) {
@@ -806,7 +929,7 @@ function applyResearchModeToRoutePlan(args: {
 
   const wantsBriefWeb =
     args.decision.needsWeb ||
-    (args.decision.profile === "fast" && !isInternalOnlyQuestion(args.message));
+    (args.decision.profile === "fast" && shouldUsePublicWebForChat(args.message));
   if (wantsBriefWeb && args.permissions.runResearch) {
     args.plan.quickLookup = {
       enabled: true,
@@ -839,14 +962,38 @@ function mergeIds(primary: string[], extra: string[], allowed: Set<string>, limi
   return out;
 }
 
+function parseDocumentClarifyFromRouter(raw: unknown): DocumentClarifyField[] {
+  const clarify: DocumentClarifyField[] = [];
+  if (!Array.isArray(raw)) return clarify;
+  for (const item of raw) {
+    if (item === "delivery_mode" || item === "which_type" || item === "which_company") {
+      clarify.push(item);
+    }
+  }
+  return clarify;
+}
+
+function emptyGenerateDocumentPlan(prompt: string): ChatRoutePlan["generateDocument"] {
+  return {
+    enabled: false,
+    prompt,
+    typeHint: null,
+    typeId: null,
+    clarify: [],
+  };
+}
+
 function applyToolPrecheck(args: {
   plan: ChatRoutePlan;
   precheck: ToolPrecheck;
   permissions: ChatToolPermissions;
   allDeals: Array<{ id: string; name: string }>;
   message: string;
+  enforceToolSignals?: boolean | "document_only";
 }): ChatRoutePlan {
   const allowedDeals = new Set(args.allDeals.map((deal) => deal.id));
+  const enforceAll = args.enforceToolSignals === true || args.enforceToolSignals === undefined;
+  const enforceDocumentOnly = enforceAll || args.enforceToolSignals === "document_only";
   const targetDealIds = mergeIds(args.plan.targetDealIds, args.precheck.targetDealIds, allowedDeals);
   const plan: ChatRoutePlan = {
     ...args.plan,
@@ -855,10 +1002,11 @@ function applyToolPrecheck(args: {
     runResearch: { ...args.plan.runResearch },
     researchDealIds: mergeIds(args.plan.researchDealIds, [], allowedDeals),
     customWorkflow: { ...args.plan.customWorkflow },
+    matrix: { ...args.plan.matrix },
     quickLookup: { ...args.plan.quickLookup },
   };
 
-  if (args.precheck.wantsDocument && args.permissions.generateDocuments) {
+  if (enforceDocumentOnly && args.precheck.documentDelivery === "explicit" && args.permissions.generateDocuments) {
     plan.generateDocument.enabled = true;
     plan.generateDocument.prompt = args.precheck.documentFocus || plan.generateDocument.prompt || args.message;
     plan.generateDocument.typeHint = plan.generateDocument.typeHint || args.precheck.documentTypeHint;
@@ -870,7 +1018,7 @@ function applyToolPrecheck(args: {
     }
   }
 
-  if (args.precheck.wantsResearch && args.permissions.runResearch) {
+  if (enforceAll && args.precheck.wantsResearch && args.permissions.runResearch) {
     plan.runResearch.enabled = true;
     plan.runResearch.when = "now";
     plan.runResearch.focus = args.precheck.researchFocus || plan.runResearch.focus || args.message;
@@ -880,7 +1028,7 @@ function applyToolPrecheck(args: {
     plan.researchDealIds = mergeIds(plan.researchDealIds, precheckResearchIds, allowedDeals);
   }
 
-  if (args.precheck.wantsWorkflow && args.permissions.runWorkflows && !plan.customWorkflow.enabled) {
+  if (enforceAll && args.precheck.wantsWorkflow && args.permissions.runWorkflows && !plan.customWorkflow.enabled) {
     plan.customWorkflow.input = plan.customWorkflow.input || args.message;
   }
 
@@ -893,18 +1041,37 @@ const OPEN_DOCUMENT_INTENT_RE = /\b(open|show|view|find|pull up)\b.{0,80}\b(doc|
 const UPDATE_RECORD_INTENT_RE = /\b(save|update|edit|record|change|add)\b.{0,80}\b(company|deal|record|crm|stage|website|traction|problem|solution|founder|note)\b/i;
 const CREATE_COMPANY_INTENT_RE = /\b(add|create|save)\b.{0,40}\b(company|deal)\b/i;
 const CRITERIA_INTENT_RE = /\b(criteria|thesis|fit|score|scoring|evaluate|evaluation|pass|invest|investment decision)\b/i;
-const CROSS_COMPANY_INTENT_RE = /\b(compare|comparison|benchmark|benchmarks|portfolio|all companies|all deals|across companies|side[- ]?by[- ]?side|table|tabular|matrix)\b/i;
+const CROSS_COMPANY_INTENT_RE =
+  /\b(compare|comparison|benchmark|benchmarks|portfolio|all companies|all deals|across companies|side[- ]?by[- ]?side)\b/i;
+const WORKSPACE_ARTIFACT_QUESTION_RE =
+  /\b(tell me about|what(?:'s| is| are)|who is|show me|open|view|see|describe|summarize|explain|look at)\b/i;
+
+function messageMayTargetNamedWorkspaceArtifact(args: {
+  message: string;
+  matrixViews: MatrixSavedView[];
+  allDeals: Array<{ id: string; name: string }>;
+}): boolean {
+  if (messageReferencesSavedMatrix(args.message, args.matrixViews)) return true;
+  if (!args.matrixViews.length || !WORKSPACE_ARTIFACT_QUESTION_RE.test(args.message)) return false;
+  const subjectHint = extractArtifactSubjectHint(args.message);
+  if (!subjectHint || subjectHint.length < 2) return false;
+  return matchDealsFromMessage(args.allDeals, subjectHint).length === 0;
+}
 
 function shouldUseSmartRouter(args: {
   message: string;
   precheck: ToolPrecheck;
   fallbackTask: ChatRoutePlan["chatTask"];
   matchedDeals: Array<{ id: string; name: string }>;
+  matrixViews: MatrixSavedView[];
+  allDeals: Array<{ id: string; name: string }>;
 }): boolean {
   if (args.precheck.wantsWorkflow) return true;
   if (OPEN_DOCUMENT_INTENT_RE.test(args.message)) return true;
   if (UPDATE_RECORD_INTENT_RE.test(args.message) || CREATE_COMPANY_INTENT_RE.test(args.message)) return true;
   if (CRITERIA_INTENT_RE.test(args.message)) return true;
+  if (messageMayTargetNamedWorkspaceArtifact(args)) return true;
+  if (messageRequestsMatrixCreate(args.message)) return true;
   if (args.fallbackTask === "similar_deal") return true;
   if (args.matchedDeals.length > 1 || CROSS_COMPANY_INTENT_RE.test(args.message)) return true;
   return false;
@@ -957,14 +1124,26 @@ async function planSmartChatRoute(args: {
   preferenceContext: string;
   permissions: ChatToolPermissions;
   fallbackTask: ChatRoutePlan["chatTask"];
+  matrixViewsIndex?: string;
 }): Promise<ChatRoutePlan> {
   const focusName = args.focusDeal ? companyName(args.focusDeal) : null;
+  const allowedDealIds = new Set(args.allDeals.map((d) => d.id));
   const precheck = buildToolPrecheck({
     message: args.message,
     focusDeal: args.focusDeal,
     allDeals: args.allDeals,
   });
   const prompt = `You are the tool router for a VC workspace chat assistant.
+
+Workspace tools (first decide whether the user is asking for a tool vs a plain answer):
+- Companies / CRM: pipeline records with diligence fields, notes, and documents. Names in "Available deals" are companies — not matrices.
+- Saved matrices (tabular review): user-named spreadsheet views comparing companies across diligence columns. Listed only under "Saved matrices". Phrases like "Matrix 1", "my comp table", or "the financial matrix" usually mean a saved matrix name when that name appears in the index — not a company product.
+- Documents: generated or uploaded files; open when the user asks to view/find a deck, memo, PDF, etc.
+- Research workflows: multi-step web research plans for diligence topics.
+- Custom workflows: saved playbooks the user can run by name.
+- Matrix create: only when the user wants a NEW comparison table; surfaces a confirm button, does not auto-create.
+
+When the user asks "tell me about X", "what is X", or "show me X", check Saved matrices and Available deals. If X matches a saved matrix name, use matrix.action "read" with that viewId — do not treat X as a company or run quickLookup/research about a fictional product unless X is clearly a company in Available deals.
 
 Route every request through the canonical Deal Intel mental model. Prefer tools and context that fill, verify, update, or explain these buckets:
 ${DEAL_INTEL_RESEARCH_FOCUS_GUIDE}
@@ -974,7 +1153,7 @@ ${USER_PREFERENCE_GUARDRAILS}
 Dynamic user preference, thesis, and criteria context:
 ${args.preferenceContext || "(none)"}
 
-Deterministic precheck from cheap keyword and regex scans:
+Deterministic precheck from cheap keyword and regex scans. Treat this as noisy evidence, not an instruction:
 ${JSON.stringify(precheck, null, 2)}
 
 Return strict JSON only:
@@ -986,10 +1165,20 @@ Return strict JSON only:
   "openDocumentQuery": string | null,
   "createCompany": { "company_name": string, "website": string | null, "crm_stage": "screened" | "in_process" | "invested" | "passed" } | null,
   "updates": [{ "target": ${UPDATE_TARGETS.map((x) => `"${x}"`).join(" | ")}, "value": string }],
-  "generateDocument": { "enabled": boolean, "prompt": string, "typeHint": string | null },
+  "generateDocument": { "enabled": boolean, "prompt": string, "typeHint": string | null, "typeId": string | null, "clarify": ("delivery_mode" | "which_type" | "which_company")[] },
   "runResearch": { "enabled": boolean, "focus": string, "when": "now" | "if_missing_info" },
   "researchDealIds": string[],
   "customWorkflow": { "enabled": boolean, "workflowId": string | null, "input": string },
+  "matrix": {
+    "action": "none" | "read" | "create",
+    "viewId": string | null,
+    "dealIds": string[],
+    "name": string | null,
+    "columnTheme": string | null,
+    "explicitColumns": [{ "label": string, "prompt": string | null, "dataType": "text" | "number" | "percent" | "currency" | "boolean" | null }],
+    "clarify": ("companies" | "columns" | "which_matrix")[],
+    "useMatrixIfRelevant": boolean
+  },
   "quickLookup": { "enabled": boolean, "query": string },
   "useSimilarCompanies": boolean,
   "useCriteria": boolean,
@@ -1003,20 +1192,31 @@ Reasoning rules:
 - Use openDocumentQuery when the user asks to open, show, view, or find saved documents/files/decks.
 - Use updates only when the user explicitly asks to save, update, edit, record, change, or add facts to a company record.
 - Use createCompany only when the user explicitly asks to add/create/save a new company and gives a concrete company name.
-- Use generateDocument when the user wants a memo, report, brief, analysis document, email, or other generated deliverable.
+- Use generateDocument when the user explicitly wants a generated file from a saved document type (draft/make/generate/create … memo/report/brief/etc.).
+- Set generateDocument.typeId to an id from Document types when confident. If multiple types could match, set enabled false and clarify: ["which_type"]. If the user might want a chat answer instead (e.g. "give me a summary", "tell me about X" without generate verbs), set enabled false and clarify: ["delivery_mode"].
+- Do not use generateDocument for matrix, tabular review, table, or spreadsheet-style comparison requests unless the user explicitly asks for a written document/report in addition to the matrix.
+- Never invent document types; only use ids from the Document types list.
 - Use quickLookup for one-off factual/current-public-web questions that likely need only one search, such as current CEO, latest funding round, headquarters, recent news, a single metric, or a simple verification. quickLookup answers directly; it does not create a research workflow.
 - Use runResearch for broader or multi-step diligence, such as building a research plan, funding history, competitor landscape, customer evidence, founder background, market sizing, or any task that needs several searches/sources/subquestions. Use when="if_missing_info" only when the saved focused-company context may be insufficient and a fuller workflow is the right next step.
+- Mentions of research, data, documents, or company facts are not tool requests by themselves. If the user is asking a meta question, expressing dissatisfaction, giving a command, or asking what you can/cannot do, answer that request directly and leave tools disabled unless a concrete supported action is explicitly requested.
 - Use researchDealIds for the companies that actually need research. If another named company is only a benchmark row, peer reference, or common-investor counterpart, include it in targetDealIds for comparison context but leave it out of researchDealIds unless the user explicitly asks to research that company too.
 - When runResearch.enabled is true, researchDealIds should normally be non-empty and narrower than targetDealIds when some target companies are only needed for comparison context.
 - If the user asks for missing schema coverage, evidence quality, negatives, or "what do we know", prefer the schema buckets above when choosing answer vs research vs update.
 - Use customWorkflow when the user asks to run a saved/reusable workflow, playbook, process, or their request clearly matches one workflow's name, description, or step instructions. Choose exactly one workflow id only when the match is clear. If multiple workflows plausibly match, leave customWorkflow disabled and ask which workflow to run by name.
+- Matrix / tabular review tool (saved diligence spreadsheets — see Saved matrices index):
+  - action "read": user asks about, wants to open, summarize, or compare using an existing saved matrix; or names a matrix from the index (e.g. "Matrix 1", "tell me about my SaaS comps matrix"). Set viewId from the index id when matched. Put that matrix's company ids in dealIds when known. Do NOT run research/quickLookup just to explain a saved matrix name.
+  - action "create": user explicitly asks to create/build/make a new matrix or tabular comparison (e.g. "make a matrix for Company A and B with TAM and SAM"). Put matched company ids in dealIds. Put TAM/SAM and other column labels in explicitColumns; use columnTheme for vague "a few more columns" requests. Set runResearch.enabled false — matrix creation does not require a research workflow first.
+  - When matrix.action is "create", runResearch.enabled must be false and quickLookup.enabled must be false unless the user separately asked for research in the same message.
+  - action "none": CRM-only comparison with no saved matrix involved, or vague create request with clarify set.
+  - useMatrixIfRelevant: true when comparing 2+ companies and saved matrix cells may help even if action is "none".
+  - Saved matrix names take precedence over guessing a company/product when both could match.
+  - Matrix create runs immediately server-side and returns an open-matrix link; do not also enable research to populate cells first.
 - Do not set both quickLookup and runResearch unless the user asks for a direct answer now plus deeper follow-up research.
 - When the user explicitly asks for multiple outputs or tools in one prompt, set every requested tool field. For example, a workflow plus a document should run both if both are requested.
 - Tools are not mutually exclusive. If the user explicitly asks for workflow, document, research, database-backed lookup, or analysis outputs in the same prompt, return all requested tool actions. Avoid only exact duplicate tool work.
 - Use useSimilarCompanies for similar companies, comps, peers, comparables, or competitor benchmarking.
 - Use useCriteria for thesis fit, uploaded criteria, investment evaluation, scoring, pass/invest reasoning, or criteria-based analysis.
-- Chat does not create or fill diligence matrices. If the user asks for a matrix/table, answer conversationally from available context or choose analysis/comparison tools as appropriate, but do not return any matrix action.
-- Treat the deterministic precheck as a floor, not the whole answer. You may add nuance, but do not drop an explicit document, research, or workflow request found by the precheck unless the related permission is disabled.
+- Use the deterministic precheck as a hint. You may override it when the actual user intent is better served by a direct answer or a different tool choice.
 - Respect disabled permissions by setting the related tool field false/null.
 - If no tool is needed, leave tools disabled and answer from context.
 
@@ -1045,6 +1245,9 @@ ${args.customWorkflows.map((w) => {
   }).join("; ");
   return `- ${w.name} (${w.id}) description=${w.description || ""} steps=${steps}`;
 }).join("\n").slice(0, 5000) || "(none)"}
+
+Saved matrices (tabular review views):
+${args.matrixViewsIndex || "(none loaded)"}
 
 Recent chat:
 ${args.history.slice(-6).map((m) => `${m.role}: ${m.content.slice(0, 500)}`).join("\n") || "(none)"}
@@ -1084,6 +1287,8 @@ ${args.message.slice(0, 4000)}`;
     const whenRaw = typeof researchRaw.when === "string" ? researchRaw.when : "now";
     const workflowIdRaw = typeof workflowRaw.workflowId === "string" ? workflowRaw.workflowId : "";
     const workflowId = args.customWorkflows.some((w) => w.id === workflowIdRaw) ? workflowIdRaw : null;
+    const typeIdRaw = typeof generateRaw.typeId === "string" ? generateRaw.typeId : "";
+    const typeId = args.docTypes.some((t) => t.id === typeIdRaw) ? typeIdRaw : null;
     const plan: ChatRoutePlan = {
       chatTask: asRouteTask(parsed?.chatTask ?? args.fallbackTask),
       scope,
@@ -1108,6 +1313,8 @@ ${args.message.slice(0, 4000)}`;
           typeof generateRaw.typeHint === "string" && generateRaw.typeHint.trim()
             ? generateRaw.typeHint.trim().slice(0, 160)
             : null,
+        typeId,
+        clarify: parseDocumentClarifyFromRouter(generateRaw.clarify),
       },
       runResearch: {
         enabled: researchRaw.enabled === true && args.permissions.runResearch,
@@ -1120,6 +1327,7 @@ ${args.message.slice(0, 4000)}`;
         workflowId,
         input: typeof workflowRaw.input === "string" && workflowRaw.input.trim() ? workflowRaw.input.trim().slice(0, 2000) : args.message,
       },
+      matrix: parseMatrixRouteFromRouter(parsed?.matrix, allowedDealIds),
       quickLookup: {
         enabled: lookupRaw.enabled === true && args.permissions.runResearch,
         query: typeof lookupRaw.query === "string" && lookupRaw.query.trim() ? lookupRaw.query.trim().slice(0, 600) : args.message,
@@ -1136,19 +1344,16 @@ ${args.message.slice(0, 4000)}`;
       permissions: args.permissions,
       allDeals: args.allDeals,
       message: args.message,
+      enforceToolSignals: "document_only",
     });
   } catch {
-    return applyToolPrecheck({
-      plan: fallbackRoutePlan({
+    return deterministicRoutePlan({
       message: args.message,
       focusDeal: args.focusDeal,
       allDeals: args.allDeals,
-      chatTask: args.fallbackTask,
-      }),
       precheck,
       permissions: args.permissions,
-      allDeals: args.allDeals,
-      message: args.message,
+      fallbackTask: args.fallbackTask,
     });
   }
 }
@@ -1493,6 +1698,13 @@ function actionSummary(action: ChatAction): string {
   if (action.type === "propose_custom_workflow") {
     return `proposal: workflow=${action.workflowName}, deal=${action.dealName ?? "none"}, input=${action.input}`;
   }
+  if (action.type === "propose_create_matrix") {
+    return `proposal: matrix for ${action.dealNames.join(", ")}; columns=${action.columnTheme ?? action.explicitColumns.map((c) => c.label).join(", ")}`;
+  }
+  if (action.type === "matrix_snapshot") {
+    const rowCount = action.rows?.length ?? 0;
+    return `matrix snapshot: ${action.viewName ?? action.label}; rows=${rowCount}`;
+  }
   return "";
 }
 
@@ -1533,7 +1745,8 @@ function confirmationMessage(actions: ChatAction[]): string | null {
       a.type === "propose_generate_document" ||
       a.type === "propose_research" ||
       a.type === "propose_custom_workflow" ||
-      a.type === "propose_record_update",
+      a.type === "propose_record_update" ||
+      a.type === "propose_create_matrix",
   );
   if (!hasToolProposal) return null;
   return "";
@@ -1568,22 +1781,34 @@ export async function runWorkspaceChat(args: {
   if (deepMode) permissions.runResearch = true;
   const history = args.history ?? [];
 
-  const [deal, allDeals] = await Promise.all([
-    resolveDeal(args.admin, args.userId, args.dealId ?? null, message),
+  const [allDeals, matrixViewsForRoute] = await Promise.all([
     listChatDeals(args.admin, args.userId),
+    listMatrixViews(args.admin, args.userId).catch(() => [] as MatrixSavedView[]),
   ]);
+  const deal = await resolveDeal(args.admin, args.userId, args.dealId ?? null, message, matrixViewsForRoute);
   const fallbackTask = classifyChatTask(message);
   const precheck = buildToolPrecheck({ message, focusDeal: deal, allDeals });
   const matchedDeals = matchDealsFromMessage(allDeals, message);
-  const needsSmartRouter = shouldUseSmartRouter({ message, precheck, fallbackTask, matchedDeals });
-  const [docTypesForRoute, customWorkflowsForRoute, preferenceContext] = needsSmartRouter
+  const allowedDealIds = new Set(allDeals.map((d) => d.id));
+  const needsSmartRouter = shouldUseSmartRouter({
+    message,
+    precheck,
+    fallbackTask,
+    matchedDeals,
+    matrixViews: matrixViewsForRoute,
+    allDeals,
+  });
+  const needsDocTypes = needsSmartRouter || precheck.documentSignal;
+  const [docTypesForRoute, customWorkflowsForRoute, preferenceContext] = needsDocTypes
     ? await Promise.all([
         loadDocumentTypes(args.admin, args.userId),
-        listCustomWorkflowDefinitions(args.admin, args.userId),
-        loadCriteriaContext(args.admin, args.userId).catch(() => ""),
+        needsSmartRouter
+          ? listCustomWorkflowDefinitions(args.admin, args.userId)
+          : Promise.resolve([] as CustomWorkflowDefinition[]),
+        needsSmartRouter ? loadCriteriaContext(args.admin, args.userId).catch(() => "") : Promise.resolve(""),
       ])
     : [[], [], ""];
-  const routePlan = needsSmartRouter
+  const routed = needsSmartRouter
     ? await planSmartChatRoute({
         message,
         history,
@@ -1594,6 +1819,7 @@ export async function runWorkspaceChat(args: {
         preferenceContext,
         permissions,
         fallbackTask,
+        matrixViewsIndex: formatMatrixViewsIndex(matrixViewsForRoute),
       })
     : deterministicRoutePlan({
         message,
@@ -1603,6 +1829,37 @@ export async function runWorkspaceChat(args: {
         permissions,
         fallbackTask,
       });
+  let routePlan = {
+    ...routed,
+    matrix: enrichMatrixRoutePlan(
+      enrichMatrixCreateFromMessage(
+        { ...routed.matrix, explicitColumns: [...routed.matrix.explicitColumns] } as MatrixRoutePlanFields,
+        message,
+        allDeals,
+        allowedDealIds,
+        matchDealsFromMessage,
+      ),
+      message,
+      matrixViewsForRoute,
+      allowedDealIds,
+    ),
+  };
+  const matrixArtifactRead =
+    routePlan.matrix.action === "read" && Boolean(routePlan.matrix.viewId);
+  const matrixToolCreate = routePlan.matrix.action === "create";
+  const matrixToolActive = matrixArtifactRead || matrixToolCreate || messageRequestsMatrixCreate(message);
+  const resolvedMatrixView = matrixArtifactRead
+    ? matrixViewsForRoute.find((view) => view.id === routePlan.matrix.viewId) ??
+      resolveMatrixViewFromMessage(message, matrixViewsForRoute)
+    : null;
+  let matrixToolBrief = buildMatrixToolBrief({
+    action: routePlan.matrix.action,
+    viewId: routePlan.matrix.viewId,
+    viewName: resolvedMatrixView?.name ?? null,
+  });
+  if (matrixToolActive) {
+    suppressResearchForMatrixTool(routePlan);
+  }
   // Deep Research toggle: prefer deep_reasoning task tier and auto-enable workflow when user opted in.
   // Profile (fast/standard/deep) is chosen by the mode router after retrieval, not forced here.
   let task = routePlan.chatTask;
@@ -1610,14 +1867,18 @@ export async function runWorkspaceChat(args: {
     message,
     generateDocumentEnabled: routePlan.generateDocument.enabled,
     wantsResearchFromPrecheck: precheck.wantsResearch,
+    documentDelivery: precheck.documentDelivery,
   });
-  if (deepMode && !documentPrimaryEarly) {
+  if (deepMode && !documentPrimaryEarly && !matrixToolActive) {
     task = task === "filtering" || task === "similar_deal" || task === "questions" ? "deep_reasoning" : task;
     if (!routePlan.runResearch.enabled) {
       routePlan.runResearch = { enabled: true, focus: message, when: "now" };
     } else if (routePlan.runResearch.when === "if_missing_info") {
       routePlan.runResearch = { ...routePlan.runResearch, when: "now" };
     }
+  }
+  if (matrixToolActive) {
+    suppressResearchForMatrixTool(routePlan);
   }
 
   if (routePlan.answerPersonal) {
@@ -1636,7 +1897,16 @@ export async function runWorkspaceChat(args: {
     }
     routeTargetDealIds = routeTargetDealIds.slice(0, 8);
   }
-  let primaryDealId = routeTargetDealIds[0] ?? deal?.id ?? args.dealId ?? null;
+  if (routePlan.matrix.dealIds.length && !matrixArtifactRead && !matrixToolCreate) {
+    for (const id of routePlan.matrix.dealIds) {
+      if (!routeTargetDealIds.includes(id)) routeTargetDealIds.push(id);
+    }
+    routeTargetDealIds = routeTargetDealIds.slice(0, 8);
+  }
+  let primaryDealId =
+    matrixArtifactRead || matrixToolCreate
+      ? args.dealId ?? null
+      : routeTargetDealIds[0] ?? deal?.id ?? args.dealId ?? null;
   let primaryDeal =
     primaryDealId && deal?.id === primaryDealId
       ? deal
@@ -1681,13 +1951,69 @@ export async function runWorkspaceChat(args: {
   const retrievalLimit = retrieveLimitForTask(task);
   const customWorkflowSelected = routePlan.customWorkflow.enabled && Boolean(routePlan.customWorkflow.workflowId);
   const [docTypes, customWorkflows] = await Promise.all([
-    routePlan.generateDocument.enabled && !docTypesForRoute.length
-      ? loadDocumentTypes(args.admin, args.userId)
-      : Promise.resolve(docTypesForRoute),
+    docTypesForRoute.length
+      ? Promise.resolve(docTypesForRoute)
+      : routePlan.generateDocument.enabled || precheck.documentSignal
+        ? loadDocumentTypes(args.admin, args.userId)
+        : Promise.resolve([] as DocumentTypeSummary[]),
     customWorkflowSelected && !customWorkflowsForRoute.length
       ? listCustomWorkflowDefinitions(args.admin, args.userId)
       : Promise.resolve(customWorkflowsForRoute),
   ]);
+
+  let resolvedDocumentType: DocumentTypeSummary | null = null;
+  if (
+    permissions.generateDocuments &&
+    (precheck.documentSignal || routePlan.generateDocument.enabled || routePlan.generateDocument.clarify.length > 0)
+  ) {
+    const docResolution = resolveDocumentGeneration({
+      message,
+      types: docTypes,
+      typeHint: routePlan.generateDocument.typeHint ?? precheck.documentTypeHint,
+      typeIdFromRouter: routePlan.generateDocument.typeId,
+      clarifyFromRouter: routePlan.generateDocument.clarify,
+      generateEnabled: routePlan.generateDocument.enabled,
+    });
+    if (docResolution.status === "needs_setup") {
+      return {
+        message: cleanAssistantResponse(formatNeedsSetupMessage()),
+        actions: [
+          {
+            type: "open_link",
+            label: "Open Documents",
+            href: "/home/document-generator",
+            detail: "Create document types and templates.",
+          },
+        ],
+        citations: [],
+        dealId: focusDealId,
+      };
+    }
+    if (docResolution.status === "clarify_delivery") {
+      return {
+        message: cleanAssistantResponse(formatDeliveryClarificationMessage(docResolution.suggestedTypes)),
+        actions: [],
+        citations: [],
+        dealId: focusDealId,
+      };
+    }
+    if (docResolution.status === "clarify_type") {
+      return {
+        message: cleanAssistantResponse(formatTypeClarificationMessage(docResolution.candidates)),
+        actions: [],
+        citations: [],
+        dealId: focusDealId,
+      };
+    }
+    if (docResolution.status === "ready") {
+      resolvedDocumentType = docResolution.type;
+      routePlan.generateDocument.enabled = true;
+      routePlan.generateDocument.typeId = docResolution.type.id;
+      routePlan.generateDocument.typeHint = routePlan.generateDocument.typeHint ?? docResolution.type.name;
+    } else {
+      routePlan.generateDocument.enabled = false;
+    }
+  }
 
   if (customWorkflowSelected && routePlan.customWorkflow.workflowId) {
     const workflow = customWorkflows.find((w) => w.id === routePlan.customWorkflow.workflowId);
@@ -1704,6 +2030,178 @@ export async function runWorkspaceChat(args: {
       });
       toolNotes.push(`Selected workflow: ${workflow.name}.`);
     }
+  }
+
+  let matrixContextText = "";
+  const matrixPlan = routePlan.matrix;
+  const matrixDealIds = matrixArtifactRead
+    ? (resolvedMatrixView?.dealIds ?? matrixPlan.dealIds)
+    : matrixPlan.dealIds.length
+      ? matrixPlan.dealIds
+      : routeTargetDealIds.length
+        ? routeTargetDealIds
+        : primaryDealId
+          ? [primaryDealId]
+          : [];
+
+  if (matrixPlan.clarify.length) {
+    const clarifyParts: string[] = [];
+    if (matrixPlan.clarify.includes("companies")) clarifyParts.push("which companies to include");
+    if (matrixPlan.clarify.includes("columns")) clarifyParts.push("which columns or themes (e.g. financial, team)");
+    if (matrixPlan.clarify.includes("which_matrix")) clarifyParts.push("which saved matrix to use");
+    if (clarifyParts.length) {
+      toolNotes.push(`Before using the matrix tool, ask the user to clarify: ${clarifyParts.join("; ")}.`);
+    }
+  }
+
+  const shouldLoadMatrixContext =
+    matrixPlan.action === "read" ||
+    (matrixPlan.action === "none" && matrixPlan.useMatrixIfRelevant && matrixDealIds.length >= 2);
+
+  if (shouldLoadMatrixContext) {
+    const resolvedView = resolveMatrixViewFromMessage(message, matrixViewsForRoute);
+    try {
+      const matrixCtx = await loadMatrixContextForChat(args.admin, args.userId, {
+        viewId: matrixPlan.viewId ?? resolvedView?.id ?? null,
+        viewNameHint: resolvedView?.name ?? extractArtifactSubjectHint(message),
+        dealIds: matrixDealIds.length ? matrixDealIds : resolvedView?.dealIds,
+        message,
+        filledOnly: true,
+      });
+      matrixContextText = formatMatrixContextForPrompt(matrixCtx);
+      if (matrixCtx.viewId) {
+        const href = buildMatrixHref({
+          viewId: matrixCtx.viewId,
+          dealIds: matrixDealIds,
+          singleDealId: args.dealId ?? primaryDealId,
+        });
+        actions.push({
+          type: "open_link",
+          label: matrixCtx.viewName ? `Open ${matrixCtx.viewName}` : "Open matrix",
+          href,
+          detail: `${matrixCtx.filledCount} filled cells in saved matrix`,
+        });
+      }
+      if (matrixPlan.action === "read") {
+        if (!matrixToolBrief) {
+          matrixToolBrief = buildMatrixToolBrief({
+            action: "read",
+            viewId: matrixCtx.viewId,
+            viewName: matrixCtx.viewName,
+          });
+        }
+        const hrefDealIds =
+          matrixDealIds.length > 0
+            ? matrixDealIds
+            : resolvedView?.dealIds?.length
+              ? resolvedView.dealIds
+              : matrixViewsForRoute.find((view) => view.id === matrixCtx.viewId)?.dealIds ?? [];
+        const grid = buildMatrixSnapshotGrid(matrixCtx.rows, {
+          viewName: matrixCtx.viewName,
+          companyNames: matrixCtx.companyOrder.map((company) => company.name),
+          columnLabels: matrixCtx.columnOrder.map((column) => column.label),
+        });
+        actions.push({
+          type: "matrix_snapshot",
+          label: matrixCtx.viewName ?? "Matrix snapshot",
+          viewName: matrixCtx.viewName,
+          grid,
+          filledCount: grid.filledCount,
+          truncated: grid.truncated,
+          href: matrixCtx.viewId
+            ? buildMatrixHref({
+                viewId: matrixCtx.viewId,
+                dealIds: hrefDealIds,
+                singleDealId: args.dealId ?? null,
+              })
+            : undefined,
+        });
+        suppressResearchForMatrixTool(routePlan);
+        if (!grid.filledCount) {
+          toolNotes.push("This matrix has no filled cells yet — open it to add or run research on columns.");
+        }
+      }
+    } catch {
+      toolNotes.push("Could not load saved matrix data.");
+    }
+  }
+
+  if (
+    matrixPlan.action === "create" &&
+    !matrixPlan.clarify.length &&
+    permissions.createMatrices
+  ) {
+    const matrixDeals = matrixDealIds
+      .map((id) => targetDealMap.get(id))
+      .filter((d): d is { id: string; name: string } => Boolean(d));
+    const hasColumnIntent =
+      Boolean(matrixPlan.columnTheme?.trim()) || matrixPlan.explicitColumns.length > 0;
+    if (!matrixDeals.length) {
+      toolNotes.push("I need to know which companies to include in the matrix.");
+    } else if (!hasColumnIntent) {
+      toolNotes.push("Specify which columns or themes you want in the matrix (e.g. revenue, headcount, financial metrics).");
+    } else {
+      const matrixLabel =
+        matrixPlan.name?.trim() ||
+        (matrixDeals.length > 1
+          ? `Matrix: ${matrixDeals.map((d) => d.name).slice(0, 3).join(" vs ")}`
+          : `Matrix: ${matrixDeals[0]!.name}`);
+      suppressResearchForMatrixTool(routePlan);
+      try {
+        const created = await executeCreateMatrixFromProposal(args.admin, args.userId, {
+          name: matrixLabel,
+          dealIds: matrixDeals.map((d) => d.id),
+          dealNames: matrixDeals.map((d) => d.name),
+          columnTheme: matrixPlan.columnTheme,
+          explicitColumns: matrixPlan.explicitColumns,
+        });
+        actions.push({
+          type: "open_link",
+          label: `Open ${created.view.name}`,
+          href: created.href,
+          detail: `${matrixDeals.length} companies · ${created.columnCount} columns`,
+        });
+        const companyList = matrixDeals.map((d) => d.name).join(" and ");
+        return {
+          message: cleanAssistantResponse(
+            `Created "${created.view.name}" comparing ${companyList} (${created.columnCount} columns). Open the matrix when you're ready to fill cells.`,
+          ),
+          actions,
+          citations: [],
+          dealId: args.dealId ?? null,
+        };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Could not create matrix";
+        toolNotes.push(detail);
+        actions.push({
+          type: "record_update",
+          label: "Matrix creation failed",
+          detail,
+        });
+      }
+    }
+  }
+
+  if (matrixToolCreate && matrixPlan.clarify.length) {
+    suppressResearchForMatrixTool(routePlan);
+    const hints = extractMatrixCreateCompanyHints(message);
+    const clarifyParts: string[] = [];
+    if (matrixPlan.clarify.includes("companies")) {
+      clarifyParts.push(
+        hints.length >= 2
+          ? `add these companies to your pipeline first: ${hints.join(", ")}`
+          : "which companies to include (they must exist in your CRM)",
+      );
+    }
+    if (matrixPlan.clarify.includes("columns")) clarifyParts.push("which columns or themes you want");
+    return {
+      message: cleanAssistantResponse(
+        `I can create that comparison matrix once you clarify ${clarifyParts.join("; ")}.`,
+      ),
+      actions,
+      citations: [],
+      dealId: args.dealId ?? null,
+    };
   }
 
   const embedCacheKey = cacheKeyForQuery(args.userId, message);
@@ -1779,40 +2277,18 @@ export async function runWorkspaceChat(args: {
     message,
     generateDocumentEnabled: routePlan.generateDocument.enabled,
     wantsResearchFromPrecheck: precheck.wantsResearch,
+    documentDelivery: precheck.documentDelivery,
   });
-  const willRunFullResearchNowEarly =
-    routePlan.runResearch.enabled && routePlan.runResearch.when === "now";
-  const shouldSpeculateQuickWeb =
-    permissions.runResearch &&
-    !deepMode &&
-    !documentPrimary &&
-    !precheck.wantsResearch &&
-    !willRunFullResearchNowEarly &&
-    !isInternalOnlyQuestion(message);
-  const speculativeQuickLookup = shouldSpeculateQuickWeb
-    ? runQuickLookup({
-        query: quickLookupQuery,
-        message,
-        focusCompanyName: focusCompanyLabel,
-        savedContext: savedLookupContextEarly,
-        researchProfile: "fast",
-        plannerIntent: fastPlannerIntent,
-      })
-    : null;
-
-  const [modeDecision, speculativeQuickLookupResult] = await Promise.all([
-    classifyResearchModeAsync({
-      message,
-      deepModeEnabled: deepMode,
-      openGaps: openGapsForMode,
-      factChunkCount: factChunks.length,
-      docChunkCount: docChunks.length,
-      wantsResearchFromPrecheck: precheck.wantsResearch,
-      runResearchEnabled: routePlan.runResearch.enabled,
-      documentGenerationOnly: documentPrimary,
-    }),
-    speculativeQuickLookup ?? Promise.resolve({ text: "", citations: [] } as QuickLookupResult),
-  ]);
+  const modeDecision = await classifyResearchModeAsync({
+    message,
+    deepModeEnabled: deepMode,
+    openGaps: openGapsForMode,
+    factChunkCount: factChunks.length,
+    docChunkCount: docChunks.length,
+    wantsResearchFromPrecheck: precheck.wantsResearch,
+    runResearchEnabled: routePlan.runResearch.enabled,
+    documentGenerationOnly: documentPrimary,
+  });
 
   applyResearchModeToRoutePlan({
     plan: routePlan,
@@ -1822,23 +2298,29 @@ export async function runWorkspaceChat(args: {
     permissions,
     focusDealId,
     targetDealIds: routeTargetDealIds,
+    matrixToolActive,
   });
+  if (matrixToolActive) {
+    suppressResearchForMatrixTool(routePlan);
+  }
 
   let prefetchedQuickLookup: QuickLookupResult = { text: "", citations: [] };
-  const willRunFullResearchNow = routePlan.runResearch.enabled && routePlan.runResearch.when === "now";
-  if (routePlan.quickLookup.enabled && !willRunFullResearchNow && permissions.runResearch) {
-    const hasSpeculativeResult =
-      Boolean(speculativeQuickLookupResult.text.trim()) || speculativeQuickLookupResult.citations.length > 0;
-    prefetchedQuickLookup = hasSpeculativeResult
-      ? speculativeQuickLookupResult
-      : await runQuickLookup({
-          query: routePlan.quickLookup.query || quickLookupQuery,
-          message,
-          focusCompanyName: focusCompanyLabel,
-          savedContext: savedLookupContextEarly,
-          researchProfile: routePlan.researchProfile,
-          plannerIntent: fastPlannerIntent,
-        });
+  const willRunFullResearchNow =
+    !matrixToolActive && routePlan.runResearch.enabled && routePlan.runResearch.when === "now";
+  if (
+    !matrixToolActive &&
+    routePlan.quickLookup.enabled &&
+    !willRunFullResearchNow &&
+    permissions.runResearch
+  ) {
+    prefetchedQuickLookup = await runQuickLookup({
+      query: routePlan.quickLookup.query || quickLookupQuery,
+      message,
+      focusCompanyName: focusCompanyLabel,
+      savedContext: savedLookupContextEarly,
+      researchProfile: routePlan.researchProfile,
+      plannerIntent: fastPlannerIntent,
+    });
     if (
       !documentPrimary &&
       quickLookupWeak(prefetchedQuickLookup) &&
@@ -1883,29 +2365,9 @@ export async function runWorkspaceChat(args: {
     }
   }
 
-  if (routePlan.generateDocument.enabled) {
-    const pickedType = pickDocumentType(docTypes, message, routePlan.generateDocument.typeHint);
-    if (!pickedType) {
-      const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
-      let typeName = titleFromDocumentHint(routePlan.generateDocument.typeHint);
-      if (typeName === "Document" && /\b(ic|investment memo)\b/i.test(message)) typeName = "IC Memo";
-      if (typeName.toLowerCase() === "investment memo") typeName = "IC Memo";
-      
-      actions.push({
-        type: "propose_generate_document",
-        label: `Generate ${typeName}`,
-        prompt: targetName
-          ? `Draft a ${typeName} for ${targetName}.\n\nUser request: ${routePlan.generateDocument.prompt}`
-          : routePlan.generateDocument.prompt,
-        dealId: focusDealId,
-        dealName: targetName,
-        typeId: null,
-        typeName,
-        outputFormat: "text",
-        skipResearch: true,
-      });
-      toolNotes.push(`Selected ad hoc document type: ${typeName}. If you want to use a formal template, add it in the Setup sidebar.`);
-    } else if (!focusDealId && documentLikelyNeedsCompany(pickedType, message)) {
+  if (routePlan.generateDocument.enabled && resolvedDocumentType) {
+    const pickedType = resolvedDocumentType;
+    if (!focusDealId && documentLikelyNeedsCompany(pickedType, message)) {
       toolNotes.push(`I found the "${pickedType.name}" document type, but I need to know which company to use.`);
     } else {
       const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
@@ -1927,6 +2389,7 @@ export async function runWorkspaceChat(args: {
   }
 
   if (
+    !matrixToolActive &&
     !documentPrimary &&
     routePlan.runResearch.enabled &&
     routePlan.runResearch.when === "now"
@@ -1976,6 +2439,7 @@ export async function runWorkspaceChat(args: {
   }
 
   if (
+    !matrixToolActive &&
     focusDealId &&
     !crossCompanyContextAllowed &&
     routePlan.runResearch.enabled &&
@@ -2002,7 +2466,9 @@ export async function runWorkspaceChat(args: {
     formatDocChunks(docChunks.slice(0, 2), docs),
   ].filter(Boolean).join("\n\n");
   const [similarPeers, criteriaContext, quickLookupResult] = await Promise.all([
-    routePlan.useSimilarCompanies
+    matrixToolActive
+      ? Promise.resolve([])
+      : routePlan.useSimilarCompanies
       ? focusDealId
         ? fetchSimilarDealsFromDealId(args.admin, focusDealId, 8).catch(() => [])
         : embedText(message.slice(0, 8000))
@@ -2017,7 +2483,7 @@ export async function runWorkspaceChat(args: {
             .catch(() => [])
       : Promise.resolve([]),
     routePlan.useCriteria ? loadCriteriaContext(args.admin, args.userId).catch(() => "") : Promise.resolve(""),
-    routePlan.quickLookup.enabled
+    !matrixToolActive && routePlan.quickLookup.enabled
       ? prefetchedQuickLookup.text || prefetchedQuickLookup.citations.length
         ? Promise.resolve(prefetchedQuickLookup)
         : runQuickLookup({
@@ -2060,13 +2526,16 @@ Capabilities available in this turn:
 - If a focused company is set, answer about that company by default. Do not answer with another company's facts unless the user explicitly asks for comparisons, competitors, peers, benchmarks, similar companies, portfolio-wide analysis, or all-company context.
 - If the focused company's context does not contain the requested fact, check the quick web lookup result first before saying you do not know. Do not fill the gap using another company's context. If research has been prepared, mention that you started it.
 - If a quick web lookup result is present, use it to answer directly. Do not describe it as a research plan or say you only have saved context when web evidence is available.
+- Focus on the user's actual question or command. Do not summarize company background, facts, or research unless that directly answers what they asked.
 - When the user asks for a company analysis, structure the answer around relevant schema buckets rather than generic startup prose.
 - Always separate evidence-backed facts from unknowns, gaps, and negative aspects.
 - When facts are missing, prefer proposing/focusing research on the missing schema field instead of filling the gap with guesses.
+- When saved matrix data is present, use it for comparisons and matrix-specific questions. If matrix cells are empty for the asked dimension, say so and offer to create or fill a matrix — do not guess. Do not paste markdown/ASCII tables in your reply; the UI shows a matrix card and open link when available.
 - Do not overwrite or reinterpret user preference rules as company facts. Investment preferences are decision guidance; company facts need citations or saved context.
 
 ${dealLine}
 Cross-company context allowed: ${crossCompanyContextAllowed ? "yes" : "no"}
+${matrixToolBrief ? `\n${matrixToolBrief}\n` : ""}
 Task route: ${task}
 Route plan:
 ${JSON.stringify(routePlan, null, 2).slice(0, 5000)}
@@ -2092,6 +2561,9 @@ ${criteriaContext || "(not requested or no uploaded criteria found)"}
 Quick web lookup result (use this for current public facts; prefer over stale saved context when they conflict):
 ${quickLookupResult.text || "(not requested or no quick lookup result)"}
 
+Saved matrix / tabular review data (prefer these values for cross-company comparisons when present; do not invent matrix values):
+${matrixContextText || "(not loaded for this turn)"}
+
 Actions already taken or prepared:
 ${actions.length ? actions.map((a) => `- ${a.label}: ${actionSummary(a)}`).join("\n") : "(none)"}
 
@@ -2101,7 +2573,7 @@ ${toolNotes.length ? toolNotes.map((n) => `- ${n}`).join("\n") : "(none)"}
 User message:
 ${message}
 
-Respond conversationally and directly. If you used context, mention the basis briefly. If a quick lookup answered the question, just answer it. If a generated document, saved workflow, or research workflow is prepared, say you are starting it now. If record updates were applied, say they were applied. If you found documents, tell the user which links are available. Do not invent facts.`;
+Respond conversationally and directly to the user's actual request. If you used context, mention the basis briefly. If a quick lookup answered the question, just answer it. If a generated document, saved workflow, or research workflow is prepared, say the user can confirm the button to run it. If a matrix was already created (open-matrix link in actions), say it is ready to open and fill — do not suggest running research first. If record updates were applied, say they were applied. If a matrix snapshot card or open-matrix link is shown, summarize insights in prose and point the user to the card/link — never reproduce the table in the message body. If you found documents or matrix links, tell the user which links are available. Do not invent facts.`;
 
   if (args.onAssistantDelta) {
     let response = "";
@@ -2110,21 +2582,14 @@ Respond conversationally and directly. If you used context, mention the basis br
       args.onAssistantDelta(chunk);
     }
     const finalMessage = cleanAssistantResponse(response || "I could not produce a response.");
-    // For streaming (always fast path): skip extra citation-filter LLM call to keep latency low.
-    // Use direct top-3 candidates instead.
-    const citations = deepMode
-      ? await citationsActuallyUsedInAnswer({
-          answer: finalMessage,
-          userMessage: message,
-          factChunks,
-          docChunks,
-          docs,
-          webCitations: quickLookupResult.citations,
-        })
-      : citationCandidatesFromContext(factChunks, docChunks, docs)
-          .slice(0, 3)
-          .map((c) => c.citation)
-          .concat(quickLookupResult.citations.slice(0, 2));
+    const citations = await citationsActuallyUsedInAnswer({
+      answer: finalMessage,
+      userMessage: message,
+      factChunks,
+      docChunks,
+      docs,
+      webCitations: quickLookupResult.citations,
+    });
     return {
       message: finalMessage,
       actions,
@@ -2134,27 +2599,24 @@ Respond conversationally and directly. If you used context, mention the basis br
   }
 
   const response = await vertexRunWithText(chatModelForTask(task, routePlan.researchProfile), prompt, false);
-  // Deep mode: run full polish + citation filter for highest quality
-  // Fast mode: skip polish LLM call and citation filter to save ~500ms
+  // Use a conservative citation filter in every mode. Retrieved context is not
+  // enough: only sources that directly support claims in the final answer should
+  // be returned to the UI.
   let finalMessage: string;
   let citations: ChatCitation[];
   if (deepMode) {
     finalMessage = await polishPlainTextResponse(response || "I could not produce a response.", message);
-    citations = await citationsActuallyUsedInAnswer({
-      answer: finalMessage,
-      userMessage: message,
-      factChunks,
-      docChunks,
-      docs,
-      webCitations: quickLookupResult.citations,
-    });
   } else {
     finalMessage = cleanAssistantResponse(response || "I could not produce a response.");
-    citations = citationCandidatesFromContext(factChunks, docChunks, docs)
-      .slice(0, 3)
-      .map((c) => c.citation)
-      .concat(quickLookupResult.citations.slice(0, 2));
   }
+  citations = await citationsActuallyUsedInAnswer({
+    answer: finalMessage,
+    userMessage: message,
+    factChunks,
+    docChunks,
+    docs,
+    webCitations: quickLookupResult.citations,
+  });
   return {
     message: finalMessage,
     actions,

@@ -1,7 +1,8 @@
 import { parseJsonFromResponseOrNull } from "@/lib/gemini";
 import type { ResearchModelTier } from "@/lib/research/research-model-env";
 import { computeOpenGaps, type ResearchGap } from "@/lib/copilot/research-agenda";
-import { isDocumentGenerationRequest, isInternalOnlyQuestion } from "@/lib/research/fast-intent";
+import { messageRequestsMatrixCreate } from "@/lib/diligence-matrix/matrix-chat-intent";
+import { isDocumentGenerationRequest, isInternalOnlyQuestion, shouldUsePublicWebForChat } from "@/lib/research/fast-intent";
 import { vertexRunWithText } from "@/lib/vertex";
 
 export { isInternalOnlyQuestion } from "@/lib/research/fast-intent";
@@ -127,10 +128,7 @@ export function internalContextSufficient(args: {
   const minChunks = args.minChunks ?? 3;
   const totalChunks = args.factChunkCount + args.docChunkCount;
   if (totalChunks < minChunks) return false;
-  if (PUBLIC_FACT_RE.test(args.message)) return false;
-  if (/\b(founder|co-?founder|technical background|engineering background|team background|who is the|ceo|cto)\b/i.test(args.message)) {
-    return false;
-  }
+  if (shouldUsePublicWebForChat(args.message)) return false;
   if (args.openGaps.length > 6) return false;
   if (MULTI_ASPECT_RE.test(args.message)) return false;
   if (BROAD_DILIGENCE_RE.test(args.message)) return false;
@@ -215,36 +213,43 @@ function inferResearchProfileFromSignals(args: {
     };
   }
 
-  if (PUBLIC_FACT_RE.test(message) || !internalOk) {
+  if (shouldUsePublicWebForChat(message)) {
     const escalateWorkflow = WORKFLOW_ESCALATION_RE.test(message) || moderateGaps;
     return {
       profile: "fast",
       needsWeb: true,
       needsWorkflow: escalateWorkflow,
-      reason: PUBLIC_FACT_RE.test(message)
-        ? "Question likely needs current public web evidence."
-        : "Internal workspace context is thin for this question.",
+      reason: "Question likely needs current public web evidence.",
+    };
+  }
+
+  if (!internalOk) {
+    return {
+      profile: "fast",
+      needsWeb: false,
+      needsWorkflow: false,
+      reason: "Saved workspace context is thin; answer from available context and name gaps.",
     };
   }
 
   if (openGaps.length > 0 && openGaps.length <= 4 && internalOk) {
     return {
       profile: "fast",
-      needsWeb: !isInternalOnlyQuestion(message),
+      needsWeb: shouldUsePublicWebForChat(message),
       needsWorkflow: false,
-      reason: isInternalOnlyQuestion(message)
-        ? "Workspace-only question; saved context is sufficient."
-        : "Brief public-web check to verify saved context on limited open gaps.",
+      reason: shouldUsePublicWebForChat(message)
+        ? "Brief public-web check for a narrow public fact."
+        : "Workspace chat question; saved context is sufficient.",
     };
   }
 
   return {
     profile: "fast",
-    needsWeb: !isInternalOnlyQuestion(message),
+    needsWeb: shouldUsePublicWebForChat(message),
     needsWorkflow: false,
-    reason: isInternalOnlyQuestion(message)
-      ? "Workspace-only question."
-      : "Default fast path: quick web check plus saved workspace context.",
+    reason: shouldUsePublicWebForChat(message)
+      ? "Narrow public fact question."
+      : "Default chat path: answer from saved workspace context.",
   };
 }
 
@@ -404,13 +409,22 @@ export function finalizeResearchModeDecision(args: {
       suggestedMaxSteps: profileMaxSteps("fast"),
     };
   }
+  if (messageRequestsMatrixCreate(args.message)) {
+    return {
+      profile: "fast",
+      needsWeb: false,
+      needsWorkflow: false,
+      reason: "Matrix creation request — tabular workspace tool, not a research workflow.",
+      suggestedMaxSteps: profileMaxSteps("fast"),
+    };
+  }
   if (profile === "deep") {
     needsWeb = true;
     needsWorkflow = true;
   } else if (profile === "standard") {
     needsWeb = true;
     needsWorkflow = true;
-  } else if (profile === "fast" && !isInternalOnlyQuestion(args.message)) {
+  } else if (profile === "fast" && shouldUsePublicWebForChat(args.message)) {
     needsWeb = true;
   }
 

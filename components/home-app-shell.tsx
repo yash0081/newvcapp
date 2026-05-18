@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ChevronLeft, Loader2 } from "lucide-react";
+import { ChevronLeft, Loader2, MessageSquare } from "lucide-react";
 import { SignOutButton } from "@/components/sign-out-button";
 import { cn } from "@/lib/utils";
 
@@ -105,6 +105,20 @@ export function HomeAppShell({ children }: { children: React.ReactNode }) {
             >
               Investora Labs
             </Link>
+            {pathname.startsWith("/home/") && (
+              <Link
+                href="/home/chat"
+                className={cn(
+                  "flex h-8 items-center gap-1.5 rounded-full border px-3 text-[11px] font-bold uppercase tracking-wider shadow-sm transition-all",
+                  chatRoute
+                    ? "border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-800"
+                    : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
+                )}
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+                <span>Chat</span>
+              </Link>
+            )}
             {pathname !== "/home/deals" && pathname !== "/home/deals/grid" && pathname.startsWith("/home/") && (
               <Link
                 href="/home/deals"
