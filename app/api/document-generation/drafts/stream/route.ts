@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAuthedUser } from "@/lib/research/db";
-import { buildGenerationContext, loadDocumentType, preflightDocument, skippedResearchPreflight } from "@/lib/document-generation/generator";
-import type { DocumentTypeRow } from "@/lib/document-generation/generator";
+import {
+  buildGenerationContext,
+  DocumentTypeResolutionError,
+  isPersistedDocumentType,
+  preflightDocument,
+  requireSavedDocumentType,
+  skippedResearchPreflight,
+} from "@/lib/document-generation/generator";
 import { getResearchModel } from "@/lib/research/research-model-env";
 import { stripMarkdownText } from "@/lib/plain-text";
 import { vertexStreamText } from "@/lib/vertex";
@@ -13,6 +19,7 @@ type StreamBody = {
   typeName?: string | null;
   outputFormat?: string | null;
   prompt?: string;
+  userMessage?: string;
   skipResearch?: boolean;
 };
 
@@ -28,43 +35,33 @@ function draftTitle(content: string, fallback: string): string {
   return (firstLine || fallback || "Generated document").slice(0, 180);
 }
 
-function adHocDocumentType(userId: string, body: StreamBody): DocumentTypeRow {
-  const requestedName = typeof body.typeName === "string" && body.typeName.trim()
-    ? body.typeName.trim().slice(0, 120)
-    : "Document";
-  const format = body.outputFormat === "docx" || body.outputFormat === "pdf" || body.outputFormat === "markdown" || body.outputFormat === "text"
-    ? body.outputFormat
-    : "text";
-  return {
-    id: "",
-    user_id: userId,
-    name: requestedName,
-    output_format: format,
-    description: "Ad hoc document requested from workspace chat.",
-    instructions: [
-      `Create a complete ${requestedName}.`,
-      "Use the user's prompt as the controlling document brief.",
-      "Make the result editable as clean plain text.",
-    ].join("\n"),
-    learned_preferences: "",
-    metadata: { ad_hoc: true, source: "chat" },
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-}
-
 export async function POST(req: Request) {
   const user = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = (await req.json().catch(() => null)) as StreamBody | null;
-  const typeId = typeof body?.typeId === "string" ? body.typeId : "";
   const prompt = typeof body?.prompt === "string" ? body.prompt.trim().slice(0, 8000) : "";
   if (!prompt) return NextResponse.json({ error: "prompt is required" }, { status: 400 });
 
   const admin = createAdminClient();
-  const type = typeId ? await loadDocumentType(admin, user.id, typeId) : adHocDocumentType(user.id, body ?? {});
-  if (!type) return NextResponse.json({ error: "Document type not found" }, { status: 404 });
+  let type;
+  try {
+    type = await requireSavedDocumentType(admin, user.id, {
+      typeId: body?.typeId,
+    });
+  } catch (error) {
+    const message =
+      error instanceof DocumentTypeResolutionError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : "Document type not found";
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
+
+  if (!isPersistedDocumentType(type)) {
+    return NextResponse.json({ error: "A saved document type is required." }, { status: 400 });
+  }
 
   const dealId = typeof body?.dealId === "string" ? body.dealId : null;
   const skipResearch = Boolean(body?.skipResearch);
@@ -122,7 +119,7 @@ ${JSON.stringify(context).slice(0, 30000)}`;
           .insert({
             user_id: user.id,
             deal_id: dealId,
-            type_id: type.id || null,
+            type_id: type.id,
             title,
             prompt,
             content,

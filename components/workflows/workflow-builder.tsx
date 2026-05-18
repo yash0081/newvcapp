@@ -17,6 +17,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { SelectBox } from "@/components/ui/select-box";
+import { documentOutputFormatLabel } from "@/lib/document-generation/output-format-label";
 import { cn } from "@/lib/utils";
 import type { CustomWorkflowDefinition, CustomWorkflowRunRecord, CustomWorkflowRunResult, CustomWorkflowStep } from "@/lib/custom-workflows";
 
@@ -135,14 +136,6 @@ function stepSummary(step: CustomWorkflowStep): string {
   if (step.type === "document") return step.typeId ? "Uses saved document type" : "Choose a doc type";
   if (step.type === "record_update") return step.target || "Pick a saved field";
   return "Manual review point";
-}
-
-function formatOutput(format: string | null) {
-  const value = String(format || "").toLowerCase();
-  if (value === "docx") return "Word document";
-  if (value === "text") return "Plain text";
-  if (value === "pdf") return "PDF";
-  return value ? value[0]!.toUpperCase() + value.slice(1) : "";
 }
 
 function resultTone(status: RunStepStatus) {
@@ -782,7 +775,7 @@ export function WorkflowBuilder({ initialWorkflows, initialRuns, deals, document
                                 <option value="">Choose document type</option>
                                 {documentTypes.map((type) => (
                                   <option key={type.id} value={type.id}>
-                                    {type.name}{type.output_format ? ` (${formatOutput(type.output_format)})` : ""}
+                                    {type.name}{type.output_format ? ` (${documentOutputFormatLabel(type.output_format)})` : ""}
                                   </option>
                                 ))}
                               </SelectBox>

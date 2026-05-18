@@ -84,6 +84,34 @@ async function loadDeal(admin: SupabaseClient, userId: string, dealId: string | 
   return (res.data as DealRow | null) ?? null;
 }
 
+export class DocumentTypeResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DocumentTypeResolutionError";
+  }
+}
+
+export function isPersistedDocumentType(type: Pick<DocumentTypeRow, "id" | "metadata">): boolean {
+  if (!type.id?.trim()) return false;
+  const meta = type.metadata ?? {};
+  return meta.ad_hoc !== true;
+}
+
+export async function listDocumentTypesForUser(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<DocumentTypeRow[]> {
+  const res = await admin
+    .schema("deal_intel")
+    .from("document_generation_type")
+    .select("id, user_id, name, output_format, description, instructions, learned_preferences, metadata, created_at, updated_at")
+    .eq("user_id", userId)
+    .order("updated_at", { ascending: false })
+    .limit(40);
+  if (res.error) throw res.error;
+  return (res.data ?? []) as DocumentTypeRow[];
+}
+
 export async function loadDocumentType(
   admin: SupabaseClient,
   userId: string,
@@ -94,10 +122,42 @@ export async function loadDocumentType(
     .from("document_generation_type")
     .select("id, user_id, name, output_format, description, instructions, learned_preferences, metadata, created_at, updated_at")
     .eq("id", typeId)
-    .or(`user_id.eq.${userId},user_id.is.null`)
+    .eq("user_id", userId)
     .maybeSingle();
   if (res.error) throw res.error;
-  return (res.data as DocumentTypeRow | null) ?? null;
+  const row = (res.data as DocumentTypeRow | null) ?? null;
+  return row && isPersistedDocumentType(row) ? row : null;
+}
+
+/** Resolves a saved document type or throws. Ad-hoc / invented types are never allowed. */
+export async function requireSavedDocumentType(
+  admin: SupabaseClient,
+  userId: string,
+  body: {
+    typeId?: string | null;
+    typeName?: string | null;
+  },
+): Promise<DocumentTypeRow> {
+  const savedTypes = await listDocumentTypesForUser(admin, userId);
+  if (!savedTypes.length) {
+    throw new DocumentTypeResolutionError(
+      "Create at least one document type in Documents before generating.",
+    );
+  }
+
+  const typeId = typeof body.typeId === "string" ? body.typeId.trim() : "";
+  if (!typeId) {
+    throw new DocumentTypeResolutionError(
+      `Generation requires a saved document type id. Choose one of: ${savedTypes.map((type) => type.name).join(", ")}.`,
+    );
+  }
+
+  const loaded = await loadDocumentType(admin, userId, typeId);
+  if (loaded) return loaded;
+
+  throw new DocumentTypeResolutionError(
+    `Document type not found. Choose one of: ${savedTypes.map((type) => type.name).join(", ")}.`,
+  );
 }
 
 export async function loadTypeReferences(

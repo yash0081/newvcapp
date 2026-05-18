@@ -54,11 +54,14 @@ import {
   classifyDocumentDelivery,
   documentLikelyNeedsCompany,
   documentSignalFromMessage,
+  findTypeMentionedInMessage,
   formatDeliveryClarificationMessage,
   formatNeedsSetupMessage,
   formatTypeClarificationMessage,
-  inferDocumentTypeHint,
+  messageRequestsSavedDocumentGeneration,
+  pickSavedDocumentType,
   resolveDocumentGeneration,
+  typesNamedInMessage,
 } from "@/lib/chat/document-type-routing";
 import { inferLightweightResearchIntent } from "@/lib/research/planner";
 import {
@@ -113,12 +116,14 @@ export type ChatAction =
       type: "propose_generate_document";
       label: string;
       prompt: string;
+      userMessage?: string;
       dealId: string | null;
       dealName: string | null;
-      typeId: string | null;
+      typeId: string;
       typeName: string;
       outputFormat: string;
       skipResearch?: boolean;
+      autoRun?: boolean;
     }
   | {
       type: "propose_research";
@@ -557,10 +562,13 @@ async function loadDocumentTypes(admin: SupabaseClient, userId: string): Promise
     .schema("deal_intel")
     .from("document_generation_type")
     .select("id, name, output_format, description, instructions, learned_preferences, updated_at")
-    .or(`user_id.eq.${userId},user_id.is.null`)
+    .eq("user_id", userId)
     .order("updated_at", { ascending: false })
     .limit(40);
-  if (res.error) return [];
+  if (res.error) {
+    console.error("[workspace-chat] loadDocumentTypes failed", res.error.message);
+    return [];
+  }
   return (res.data ?? []) as DocumentTypeSummary[];
 }
 
@@ -748,10 +756,33 @@ function focusedSegment(message: string, re: RegExp): string {
   return matches.length ? matches.join(". ") : message;
 }
 
+function buildDocumentPickerActions(args: {
+  types: DocumentTypeSummary[];
+  message: string;
+  dealId: string | null;
+  dealName: string | null;
+  autoRun: boolean;
+}): ChatAction[] {
+  return args.types.map((type) => ({
+    type: "propose_generate_document" as const,
+    label: `Generate ${type.name}`,
+    prompt: args.message,
+    userMessage: args.message,
+    dealId: args.dealId,
+    dealName: args.dealName,
+    typeId: type.id,
+    typeName: type.name,
+    outputFormat: type.output_format || "text",
+    skipResearch: true,
+    autoRun: args.autoRun,
+  }));
+}
+
 function buildToolPrecheck(args: {
   message: string;
   focusDeal: DealRow | null;
   allDeals: Array<{ id: string; name: string }>;
+  docTypes?: DocumentTypeSummary[];
 }): ToolPrecheck {
   if (messageRequestsMatrixCreate(args.message)) {
     return {
@@ -774,10 +805,15 @@ function buildToolPrecheck(args: {
   const mentionedDeals = matchDealsFromMessage(args.allDeals, args.message);
   const researchMentionedDeals = matchDealsFromMessage(args.allDeals, researchFocus);
   const targetDealIds = (mentionedDeals.length ? mentionedDeals.map((deal) => deal.id) : args.focusDeal?.id ? [args.focusDeal.id] : []).slice(0, 8);
-  const docTypeHint = inferDocumentTypeHint(args.message);
+  const docTypes = args.docTypes ?? [];
   const documentDelivery = classifyDocumentDelivery(args.message);
-  const wantsDocument = documentDelivery === "explicit";
-  const documentSignal = documentSignalFromMessage(args.message);
+  const namedType = findTypeMentionedInMessage(args.message, docTypes);
+  const namedInMessage = typesNamedInMessage(args.message, docTypes);
+  const wantsDocument =
+    documentDelivery === "explicit" ||
+    Boolean(namedType) ||
+    namedInMessage.length > 0;
+  const documentSignal = documentSignalFromMessage(args.message, docTypes);
   const standaloneResearchClauses = clauses.filter(
     (clause) => RESEARCH_INTENT_RE.test(clause) && !DOCUMENT_INTENT_RE.test(clause),
   );
@@ -794,8 +830,8 @@ function buildToolPrecheck(args: {
       })
     : [];
   const evidence = [
-    wantsDocument ? `document explicit${docTypeHint ? `: ${docTypeHint}` : ""}` : "",
-    documentDelivery === "ambiguous" ? `document ambiguous${docTypeHint ? `: ${docTypeHint}` : ""}` : "",
+    wantsDocument ? "document explicit" : "",
+    documentDelivery === "ambiguous" ? "document ambiguous" : "",
     wantsResearch ? "research keyword" : "",
     wantsWorkflow ? "workflow keyword" : "",
   ].filter(Boolean);
@@ -805,7 +841,7 @@ function buildToolPrecheck(args: {
     documentSignal,
     wantsResearch,
     wantsWorkflow,
-    documentTypeHint: docTypeHint,
+    documentTypeHint: namedType?.name ?? namedInMessage[0]?.name ?? null,
     targetDealIds,
     researchDealIds,
     researchFocus: researchFocus || args.message,
@@ -878,7 +914,6 @@ function suppressResearchForMatrixTool(plan: ChatRoutePlan): void {
   plan.quickLookup.enabled = false;
   plan.runResearch.enabled = false;
   plan.runResearch.when = "if_missing_info";
-  plan.generateDocument.enabled = false;
   plan.missingInfoBehavior = "answer_unknown";
   plan.useSimilarCompanies = false;
 }
@@ -989,6 +1024,7 @@ function applyToolPrecheck(args: {
   permissions: ChatToolPermissions;
   allDeals: Array<{ id: string; name: string }>;
   message: string;
+  docTypes?: DocumentTypeSummary[];
   enforceToolSignals?: boolean | "document_only";
 }): ChatRoutePlan {
   const allowedDeals = new Set(args.allDeals.map((deal) => deal.id));
@@ -1006,10 +1042,25 @@ function applyToolPrecheck(args: {
     quickLookup: { ...args.plan.quickLookup },
   };
 
-  if (enforceDocumentOnly && args.precheck.documentDelivery === "explicit" && args.permissions.generateDocuments) {
+  const docTypes = args.docTypes ?? [];
+  const namedType = findTypeMentionedInMessage(args.message, docTypes);
+  const shouldEnableDocument =
+    args.precheck.documentDelivery === "explicit" ||
+    Boolean(namedType) ||
+    typesNamedInMessage(args.message, docTypes).length > 0 ||
+    Boolean(plan.generateDocument.typeId && docTypes.some((type) => type.id === plan.generateDocument.typeId));
+
+  if (enforceDocumentOnly && shouldEnableDocument && args.permissions.generateDocuments) {
+    const pick = pickSavedDocumentType(args.message, docTypes, plan.generateDocument.typeId);
     plan.generateDocument.enabled = true;
     plan.generateDocument.prompt = args.precheck.documentFocus || plan.generateDocument.prompt || args.message;
-    plan.generateDocument.typeHint = plan.generateDocument.typeHint || args.precheck.documentTypeHint;
+    if (pick.kind === "ready") {
+      plan.generateDocument.typeId = pick.type.id;
+      plan.generateDocument.typeHint = pick.type.name;
+    } else {
+      plan.generateDocument.typeId = null;
+      plan.generateDocument.typeHint = null;
+    }
 
     if (!args.precheck.wantsResearch) {
       plan.runResearch.enabled = false;
@@ -1084,6 +1135,7 @@ function deterministicRoutePlan(args: {
   precheck: ToolPrecheck;
   permissions: ChatToolPermissions;
   fallbackTask: ChatRoutePlan["chatTask"];
+  docTypes?: DocumentTypeSummary[];
 }): ChatRoutePlan {
   const plan = fallbackRoutePlan({
     message: args.message,
@@ -1111,6 +1163,7 @@ function deterministicRoutePlan(args: {
     permissions: args.permissions,
     allDeals: args.allDeals,
     message: args.message,
+    docTypes: args.docTypes,
   });
 }
 
@@ -1132,6 +1185,7 @@ async function planSmartChatRoute(args: {
     message: args.message,
     focusDeal: args.focusDeal,
     allDeals: args.allDeals,
+    docTypes: args.docTypes,
   });
   const prompt = `You are the tool router for a VC workspace chat assistant.
 
@@ -1344,6 +1398,7 @@ ${args.message.slice(0, 4000)}`;
       permissions: args.permissions,
       allDeals: args.allDeals,
       message: args.message,
+      docTypes: args.docTypes,
       enforceToolSignals: "document_only",
     });
   } catch {
@@ -1354,6 +1409,7 @@ ${args.message.slice(0, 4000)}`;
       precheck,
       permissions: args.permissions,
       fallbackTask: args.fallbackTask,
+      docTypes: args.docTypes,
     });
   }
 }
@@ -1781,13 +1837,16 @@ export async function runWorkspaceChat(args: {
   if (deepMode) permissions.runResearch = true;
   const history = args.history ?? [];
 
-  const [allDeals, matrixViewsForRoute] = await Promise.all([
+  const [allDeals, matrixViewsForRoute, docTypesEarly] = await Promise.all([
     listChatDeals(args.admin, args.userId),
     listMatrixViews(args.admin, args.userId).catch(() => [] as MatrixSavedView[]),
+    permissions.generateDocuments
+      ? loadDocumentTypes(args.admin, args.userId)
+      : Promise.resolve([] as DocumentTypeSummary[]),
   ]);
   const deal = await resolveDeal(args.admin, args.userId, args.dealId ?? null, message, matrixViewsForRoute);
   const fallbackTask = classifyChatTask(message);
-  const precheck = buildToolPrecheck({ message, focusDeal: deal, allDeals });
+  const precheck = buildToolPrecheck({ message, focusDeal: deal, allDeals, docTypes: docTypesEarly });
   const matchedDeals = matchDealsFromMessage(allDeals, message);
   const allowedDealIds = new Set(allDeals.map((d) => d.id));
   const needsSmartRouter = shouldUseSmartRouter({
@@ -1798,16 +1857,13 @@ export async function runWorkspaceChat(args: {
     matrixViews: matrixViewsForRoute,
     allDeals,
   });
-  const needsDocTypes = needsSmartRouter || precheck.documentSignal;
-  const [docTypesForRoute, customWorkflowsForRoute, preferenceContext] = needsDocTypes
+  const docTypesForRoute = docTypesEarly;
+  const [customWorkflowsForRoute, preferenceContext] = needsSmartRouter
     ? await Promise.all([
-        loadDocumentTypes(args.admin, args.userId),
-        needsSmartRouter
-          ? listCustomWorkflowDefinitions(args.admin, args.userId)
-          : Promise.resolve([] as CustomWorkflowDefinition[]),
-        needsSmartRouter ? loadCriteriaContext(args.admin, args.userId).catch(() => "") : Promise.resolve(""),
+        listCustomWorkflowDefinitions(args.admin, args.userId),
+        loadCriteriaContext(args.admin, args.userId).catch(() => ""),
       ])
-    : [[], [], ""];
+    : [[], ""];
   const routed = needsSmartRouter
     ? await planSmartChatRoute({
         message,
@@ -1828,6 +1884,7 @@ export async function runWorkspaceChat(args: {
         precheck,
         permissions,
         fallbackTask,
+        docTypes: docTypesForRoute,
       });
   let routePlan = {
     ...routed,
@@ -1953,7 +2010,9 @@ export async function runWorkspaceChat(args: {
   const [docTypes, customWorkflows] = await Promise.all([
     docTypesForRoute.length
       ? Promise.resolve(docTypesForRoute)
-      : routePlan.generateDocument.enabled || precheck.documentSignal
+      : routePlan.generateDocument.enabled ||
+          precheck.documentSignal ||
+          messageRequestsSavedDocumentGeneration(message)
         ? loadDocumentTypes(args.admin, args.userId)
         : Promise.resolve([] as DocumentTypeSummary[]),
     customWorkflowSelected && !customWorkflowsForRoute.length
@@ -1969,7 +2028,6 @@ export async function runWorkspaceChat(args: {
     const docResolution = resolveDocumentGeneration({
       message,
       types: docTypes,
-      typeHint: routePlan.generateDocument.typeHint ?? precheck.documentTypeHint,
       typeIdFromRouter: routePlan.generateDocument.typeId,
       clarifyFromRouter: routePlan.generateDocument.clarify,
       generateEnabled: routePlan.generateDocument.enabled,
@@ -1998,18 +2056,41 @@ export async function runWorkspaceChat(args: {
       };
     }
     if (docResolution.status === "clarify_type") {
+      const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
       return {
         message: cleanAssistantResponse(formatTypeClarificationMessage(docResolution.candidates)),
-        actions: [],
+        actions: buildDocumentPickerActions({
+          types: docResolution.candidates,
+          message,
+          dealId: focusDealId,
+          dealName: targetName,
+          autoRun: false,
+        }),
         citations: [],
         dealId: focusDealId,
       };
     }
     if (docResolution.status === "ready") {
-      resolvedDocumentType = docResolution.type;
+      const saved = docTypes.find((row) => row.id === docResolution.type.id);
+      if (!saved) {
+        const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
+        return {
+          message: cleanAssistantResponse(formatTypeClarificationMessage(docTypes)),
+          actions: buildDocumentPickerActions({
+            types: docTypes,
+            message,
+            dealId: focusDealId,
+            dealName: targetName,
+            autoRun: false,
+          }),
+          citations: [],
+          dealId: focusDealId,
+        };
+      }
+      resolvedDocumentType = saved;
       routePlan.generateDocument.enabled = true;
-      routePlan.generateDocument.typeId = docResolution.type.id;
-      routePlan.generateDocument.typeHint = routePlan.generateDocument.typeHint ?? docResolution.type.name;
+      routePlan.generateDocument.typeId = saved.id;
+      routePlan.generateDocument.typeHint = routePlan.generateDocument.typeHint ?? saved.name;
     } else {
       routePlan.generateDocument.enabled = false;
     }
@@ -2365,27 +2446,29 @@ export async function runWorkspaceChat(args: {
     }
   }
 
-  if (routePlan.generateDocument.enabled && resolvedDocumentType) {
+  if (resolvedDocumentType?.id && permissions.generateDocuments) {
     const pickedType = resolvedDocumentType;
+    const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
+    actions.push({
+      type: "propose_generate_document",
+      label: `Generate ${pickedType.name}`,
+      prompt: targetName
+        ? `Draft a ${pickedType.name} for ${targetName}.\n\nUser request: ${routePlan.generateDocument.prompt}`
+        : routePlan.generateDocument.prompt,
+      userMessage: message,
+      dealId: focusDealId,
+      dealName: targetName,
+      typeId: pickedType.id,
+      typeName: pickedType.name,
+      outputFormat: pickedType.output_format || "text",
+      skipResearch: true,
+      autoRun: true,
+    });
+    toolNotes.push(`Selected document type: ${pickedType.name}.`);
     if (!focusDealId && documentLikelyNeedsCompany(pickedType, message)) {
       toolNotes.push(`I found the "${pickedType.name}" document type, but I need to know which company to use.`);
-    } else {
-      const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
-      actions.push({
-        type: "propose_generate_document",
-        label: `Generate ${pickedType.name}`,
-        prompt: targetName
-          ? `Draft a ${pickedType.name} for ${targetName}.\n\nUser request: ${routePlan.generateDocument.prompt}`
-          : routePlan.generateDocument.prompt,
-        dealId: focusDealId,
-        dealName: targetName,
-        typeId: pickedType.id,
-        typeName: pickedType.name,
-        outputFormat: pickedType.output_format || "text",
-        skipResearch: true,
-      });
-      toolNotes.push(`Selected document type: ${pickedType.name}.`);
     }
+    routePlan.generateDocument.enabled = true;
   }
 
   if (
@@ -2429,7 +2512,11 @@ export async function runWorkspaceChat(args: {
       dealId: focusDealId,
     };
   }
-  if (routePlan.generateDocument.enabled || (routePlan.runResearch.enabled && routePlan.runResearch.when === "now")) {
+  if (
+    resolvedDocumentType ||
+    routePlan.generateDocument.enabled ||
+    (routePlan.runResearch.enabled && routePlan.runResearch.when === "now")
+  ) {
     return {
       message: cleanAssistantResponse(toolNotes.length ? toolNotes.join("\n\n") : "I need a bit more direction before I can use that tool."),
       actions,
@@ -2458,6 +2545,28 @@ export async function runWorkspaceChat(args: {
       dealNames: [companyName(primaryDeal)],
       researchProfile: routePlan.researchProfile,
     });
+  }
+
+  const documentGenerationRequested =
+    permissions.generateDocuments && messageRequestsSavedDocumentGeneration(message, docTypes);
+  if (
+    documentGenerationRequested &&
+    !resolvedDocumentType &&
+    !actions.some((action) => action.type === "propose_generate_document")
+  ) {
+    const targetName = targetDeals[0]?.name ?? (primaryDeal ? companyName(primaryDeal) : null);
+    return {
+      message: cleanAssistantResponse(formatTypeClarificationMessage(docTypes)),
+      actions: buildDocumentPickerActions({
+        types: docTypes,
+        message,
+        dealId: focusDealId,
+        dealName: targetName,
+        autoRun: false,
+      }),
+      citations: [],
+      dealId: focusDealId,
+    };
   }
 
   const savedLookupContext = [
@@ -2520,6 +2629,7 @@ Capabilities available in this turn:
 - Answer using retrieved CRM facts and document snippets.
 - Surface links to saved documents when relevant.
 - Prepare document generation, research, saved workflow, and record-update actions when the router selected a tool. The UI will run enabled tool actions automatically.
+- Never draft a full memo, report, brief, or other standalone document in chat text when document generation is prepared or requested. The workspace only generates files through saved document types.
 - Do not say a tool has finished until the completed action result is present. You may say you are starting selected tool actions now.
 - Write like a normal chat assistant in plain conversational text. Do not use formatting syntax, headings, bold text, star bullets, numbered lists, tables, code fences, or link markup. If the user asks for structure, use short plain-text paragraphs with simple labels.
 - Only use retrieved company/person context when it actually answers the user's question. For questions about the user, do not infer identity from company records.

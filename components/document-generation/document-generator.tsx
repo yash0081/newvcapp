@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, FileText, Loader2, Plus, Search, UploadCloud } from "lucide-react";
 import { SelectBox } from "@/components/ui/select-box";
+import { documentOutputFormatLabel } from "@/lib/document-generation/output-format-label";
 
 type DealOption = { id: string; name: string };
 
@@ -49,14 +50,6 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const json = (await res.json().catch(() => null)) as T & { error?: string };
   if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
   return json;
-}
-
-function formatOutputFormat(format?: DocType["output_format"] | null): string {
-  if (format === "docx") return "Word document";
-  if (format === "pdf") return "PDF";
-  if (format === "text") return "Plain text";
-  if (format === "markdown") return "Plain text";
-  return "-";
 }
 
 export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[]; initialDealId?: string }) {
@@ -259,7 +252,7 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
             </div>
             <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
               <p className="text-[11px] font-medium text-zinc-500">Output</p>
-              <p className="text-sm font-semibold text-zinc-950">{formatOutputFormat(selectedType?.output_format)}</p>
+              <p className="text-sm font-semibold text-zinc-950">{documentOutputFormatLabel(selectedType?.output_format)}</p>
             </div>
           </div>
         </div>
@@ -274,7 +267,7 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
               <option value="">Choose a type</option>
               {types.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.name} ({formatOutputFormat(t.output_format)})
+                  {t.name} ({documentOutputFormatLabel(t.output_format)})
                 </option>
               ))}
             </SelectBox>
@@ -346,7 +339,7 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
               </div>
               {selectedType ? (
                 <span className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs font-medium text-zinc-700">
-                  {selectedType.name} / {formatOutputFormat(selectedType.output_format)}
+                  {selectedType.name} / {documentOutputFormatLabel(selectedType.output_format)}
                 </span>
               ) : null}
             </div>
@@ -414,7 +407,7 @@ export function DocumentGenerator({ deals, initialDealId }: { deals: DealOption[
                     <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                     <h2 className="text-base font-semibold text-zinc-950">{draft.title}</h2>
                   </div>
-                  {selectedType ? <p className="mt-1 text-xs text-zinc-500">Preview for {formatOutputFormat(selectedType.output_format)} output.</p> : null}
+                  {selectedType ? <p className="mt-1 text-xs text-zinc-500">Preview for {documentOutputFormatLabel(selectedType.output_format)} output.</p> : null}
                 </div>
                 <a className="crm-button-secondary" href={`/home/generated-documents/${draft.id}`} target="_blank" rel="noreferrer">
                   Open document

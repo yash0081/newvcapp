@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { QuickDocumentSearch } from "@/components/crm/quick-document-search";
+import { CompanySwitcher } from "@/components/crm/company-switcher";
 
 const tabs = [
   { key: "home", label: "Home", icon: Home, href: (id: string) => `/home/deal-intel/${id}` },
@@ -76,15 +77,12 @@ export function CompanyShell({
           {expanded ? (
             /* When expanded: avatar, text and collapser button at the SAME level (side-by-side) */
             <div className="flex items-center justify-between gap-2.5 min-w-0">
-              <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-xs font-bold text-white shadow-sm shadow-zinc-900/20">
-                  {companyName.slice(0, 1).toUpperCase()}
-                </div>
-                <div className="min-w-0 flex-1 font-sans">
-                  <div className="truncate text-xs font-bold tracking-wider text-zinc-950 uppercase">{companyName}</div>
-                  <div className="truncate text-[10px] font-bold text-zinc-400 uppercase tracking-widest mt-0.5">{stageLabel}</div>
-                </div>
-              </div>
+              <CompanySwitcher
+                dealId={dealId}
+                companyName={companyName}
+                stageLabel={stageLabel}
+                expanded
+              />
               <button
                 type="button"
                 onClick={toggle}
@@ -105,9 +103,12 @@ export function CompanyShell({
               >
                 <PanelLeftOpen className="h-3.5 w-3.5" />
               </button>
-              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-zinc-900 text-xs font-bold text-white shadow-sm shadow-zinc-900/20">
-                {companyName.slice(0, 1).toUpperCase()}
-              </div>
+              <CompanySwitcher
+                dealId={dealId}
+                companyName={companyName}
+                stageLabel={stageLabel}
+                expanded={false}
+              />
             </div>
           )}
         </div>

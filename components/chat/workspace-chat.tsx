@@ -4,6 +4,7 @@ import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { ArrowUp, CheckCircle2, Circle, ExternalLink, FileText, Loader2, MessageSquare, Plus, Settings2, Sparkles, Trash2, Workflow, StopCircle, Search, History, Library, UploadCloud, Square, X, Paperclip, Send, Table2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SelectBox } from "@/components/ui/select-box";
+import { documentOutputFormatLabel } from "@/lib/document-generation/output-format-label";
 import { stripMarkdownText } from "@/lib/plain-text";
 
 const promptTemplates = [
@@ -67,12 +68,14 @@ type ChatAction =
       type: "propose_generate_document";
       label: string;
       prompt: string;
+      userMessage?: string;
       dealId: string | null;
       dealName: string | null;
-      typeId: string | null;
+      typeId: string;
       typeName: string;
       outputFormat: string;
       skipResearch?: boolean;
+      autoRun?: boolean;
     }
   | {
       type: "propose_research";
@@ -420,9 +423,16 @@ function isProposalAction(action: ChatAction): boolean {
   );
 }
 
+function hasSavedDocumentTypeId(action: Extract<ChatAction, { type: "propose_generate_document" }>): boolean {
+  return typeof action.typeId === "string" && action.typeId.trim().length > 0;
+}
+
 function isRunnableAction(action: ChatAction, permissions: ChatToolPermissions): boolean {
   return (
-    (action.type === "propose_generate_document" && permissions.generateDocuments) ||
+    (action.type === "propose_generate_document" &&
+      permissions.generateDocuments &&
+      hasSavedDocumentTypeId(action) &&
+      action.autoRun !== false) ||
     (action.type === "propose_research" && permissions.runResearch) ||
     (action.type === "propose_record_update" && permissions.editRecords) ||
     (action.type === "propose_custom_workflow" && permissions.runWorkflows)
@@ -490,7 +500,7 @@ function stripStaleProposalActions(actions?: ChatAction[]): ChatAction[] | undef
 
 function documentFormatFromMetadata(metadata: Record<string, unknown> | null | undefined, fallback: string): string {
   const value = metadata && typeof metadata.output_format === "string" ? metadata.output_format : fallback;
-  return value || "document";
+  return documentOutputFormatLabel(value);
 }
 
 import { Check } from "lucide-react";
@@ -749,7 +759,7 @@ function DocumentPreviewCard({ action }: { action: Extract<ChatAction, { type: "
 	            <div className="min-w-0">
 	              <div className="truncate text-sm font-semibold text-zinc-950">{action.title || action.label}</div>
 	              <div className="mt-0.5 text-xs text-zinc-950">
-	                {[action.format ? action.format.toUpperCase() : "", action.dealName || ""].filter(Boolean).join(" / ") || "Generated document"}
+	                {[action.format ? documentOutputFormatLabel(action.format) : "", action.dealName || ""].filter(Boolean).join(" / ") || "Generated document"}
 	                {action.streaming ? " / Generating" : ""}
 	              </div>
 	            </div>
@@ -1402,6 +1412,9 @@ export function WorkspaceChat({
     markToolRun(runKey, { status: "running", label: action.label, detail: "Running" });
     try {
       if (action.type === "propose_generate_document") {
+        if (!hasSavedDocumentTypeId(action)) {
+          throw new Error("This document request is missing a saved document type. Ask chat to generate again after setting up document types in Documents.");
+        }
         const previewMessageId = transientMessageId ?? newId();
         let previewAction: Extract<ChatAction, { type: "document_preview" }> = {
           type: "document_preview",
@@ -1436,9 +1449,8 @@ export function WorkspaceChat({
           body: JSON.stringify({
             dealId: action.dealId,
             typeId: action.typeId,
-            typeName: action.typeName,
-            outputFormat: action.outputFormat,
             prompt: action.prompt,
+            userMessage: action.userMessage ?? action.prompt,
             skipResearch: Boolean(action.skipResearch),
           }),
         });
@@ -2278,7 +2290,10 @@ export function WorkspaceChat({
                                 <ToolActionButton
                                   key={key}
                                   label={a.label}
-                                  detail={runState?.detail || `${a.outputFormat.toUpperCase()}${a.dealName ? ` - ${a.dealName}` : ""}`}
+                                  detail={
+                                    runState?.detail ||
+                                    `${documentOutputFormatLabel(a.outputFormat)}${a.dealName ? ` - ${a.dealName}` : ""}`
+                                  }
                                   status={runError ? "error" : isRunning ? "running" : runDone ? "done" : "queued"}
                                   icon={<FileText className="mt-0.5 h-3.5 w-3.5 text-zinc-950" />}
                                   onClick={() => runAction(a, key)}
